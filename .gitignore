@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.corepack/
+.cache/
+.mini-agent/
+coverage/
+*.log
+backend/.m2/
+backend/target/
+backend/data/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo

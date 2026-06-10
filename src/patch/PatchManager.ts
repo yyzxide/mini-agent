@@ -1,0 +1,431 @@
+import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { execa } from "execa";
+import { GitManager } from "../git/GitManager.js";
+import type { GitDiffResult } from "../git/GitManager.js";
+import {
+  EmptyPatchError,
+  InvalidPatchFormatError,
+  PatchPathOutsideRepoError,
+  PatchTooLargeError,
+  PatchTouchesInternalDirectoryError,
+} from "../utils/errors.js";
+import {
+  ensureDir,
+  isPathInside,
+  normalizeRepoPath,
+  resolveMiniAgentPath,
+  resolveRepoPath,
+  toPosixPath,
+  truncateText,
+} from "../utils/fs.js";
+
+export interface PatchManagerOptions {
+  repoPath: string;
+  maxPatchChars?: number;
+  maxDiffChars?: number;
+}
+
+export interface ValidatePatchInput {
+  patch: string;
+}
+
+export interface PreviewPatchInput {
+  patch: string;
+}
+
+export interface ApplyPatchInput {
+  patch: string;
+  checkBeforeApply?: boolean;
+}
+
+export interface GetDiffInput {
+  cached?: boolean;
+  path?: string;
+}
+
+export interface PatchCheckResult {
+  success: boolean;
+  error?: string;
+  stderr?: string;
+}
+
+export type PatchChangeType = "ADDED" | "MODIFIED" | "DELETED" | "RENAMED" | "UNKNOWN";
+
+export interface PatchChangedFile {
+  path: string;
+  changeType: PatchChangeType;
+  additions: number;
+  deletions: number;
+}
+
+export interface PatchPreviewResult {
+  files: PatchChangedFile[];
+  summary: string;
+  truncated: boolean;
+}
+
+export interface PatchApplyResult {
+  success: boolean;
+  applied: boolean;
+  checkResult: PatchCheckResult;
+  preview: PatchPreviewResult;
+  diff: string;
+  changedFiles: PatchChangedFile[];
+  error?: string;
+}
+
+interface MutablePatchFile {
+  oldPath: string | undefined;
+  newPath: string | undefined;
+  displayPath: string | undefined;
+  changeType: PatchChangeType;
+  additions: number;
+  deletions: number;
+}
+
+export class PatchManager {
+  readonly repoPath: string;
+  readonly maxPatchChars: number;
+  readonly maxDiffChars: number;
+
+  constructor(options: PatchManagerOptions) {
+    this.repoPath = normalizeRepoPath(options.repoPath);
+    this.maxPatchChars = options.maxPatchChars ?? 50_000;
+    this.maxDiffChars = options.maxDiffChars ?? 50_000;
+  }
+
+  async validatePatch(input: ValidatePatchInput): Promise<PatchCheckResult> {
+    try {
+      this.assertPatchAllowed(input.patch);
+      const patchFile = await this.writeTempPatch(input.patch);
+      try {
+        const result = await execa("git", ["apply", "--check", patchFile], {
+          cwd: this.repoPath,
+          reject: false,
+          encoding: "utf8",
+        });
+
+        return result.exitCode === 0
+          ? { success: true }
+          : {
+              success: false,
+              error: "git apply --check failed",
+              stderr: result.stderr,
+            };
+      } finally {
+        await fs.rm(patchFile, { force: true });
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async previewPatch(input: PreviewPatchInput): Promise<PatchPreviewResult> {
+    this.assertPatchAllowed(input.patch);
+    const preview = parseUnifiedDiff(input.patch);
+    const { text, truncated } = truncateText(preview.summary, this.maxPatchChars);
+    return {
+      files: preview.files,
+      summary: text,
+      truncated,
+    };
+  }
+
+  async applyPatch(input: ApplyPatchInput): Promise<PatchApplyResult> {
+    const preview = await this.previewPatch({ patch: input.patch });
+    const checkResult = input.checkBeforeApply === false
+      ? { success: true }
+      : await this.validatePatch({ patch: input.patch });
+
+    if (!checkResult.success) {
+      return {
+        success: false,
+        applied: false,
+        checkResult,
+        preview,
+        diff: "",
+        changedFiles: preview.files,
+        error: checkResult.error ?? "Patch check failed",
+      };
+    }
+
+    const patchFile = await this.writeTempPatch(input.patch);
+    try {
+      const result = await execa("git", ["apply", patchFile], {
+        cwd: this.repoPath,
+        reject: false,
+        encoding: "utf8",
+      });
+
+      if (result.exitCode !== 0) {
+        return {
+          success: false,
+          applied: false,
+          checkResult,
+          preview,
+          diff: "",
+          changedFiles: preview.files,
+          error: result.stderr || "git apply failed",
+        };
+      }
+
+      const diff = await this.getDiff();
+      return {
+        success: true,
+        applied: true,
+        checkResult,
+        preview,
+        diff: diff.diff,
+        changedFiles: preview.files,
+      };
+    } finally {
+      await fs.rm(patchFile, { force: true });
+    }
+  }
+
+  async getDiff(input: GetDiffInput = {}): Promise<GitDiffResult> {
+    const git = new GitManager({ repoPath: this.repoPath });
+    return await git.getDiff({ ...input, maxChars: this.maxDiffChars });
+  }
+
+  private assertPatchAllowed(patch: string): void {
+    if (patch.trim().length === 0) {
+      throw new EmptyPatchError();
+    }
+
+    if (patch.length > this.maxPatchChars) {
+      throw new PatchTooLargeError(this.maxPatchChars);
+    }
+
+    const paths = extractPatchPaths(patch);
+    if (paths.length === 0) {
+      throw new InvalidPatchFormatError("Patch does not contain any file paths");
+    }
+
+    for (const filePath of paths) {
+      assertPatchPathAllowed(this.repoPath, filePath);
+    }
+  }
+
+  private async writeTempPatch(patch: string): Promise<string> {
+    const tmpDir = resolveMiniAgentPath(this.repoPath, "tmp");
+    await ensureDir(tmpDir);
+    const patchFile = resolveMiniAgentPath(this.repoPath, "tmp", `${randomUUID()}.patch`);
+    await fs.writeFile(patchFile, patch, "utf8");
+    return patchFile;
+  }
+}
+
+function parseUnifiedDiff(patch: string): PatchPreviewResult {
+  const files: MutablePatchFile[] = [];
+  let current: MutablePatchFile | undefined;
+
+  for (const line of patch.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const nextFile: MutablePatchFile = {
+        oldPath: parseDiffGitPath(line, "old"),
+        newPath: parseDiffGitPath(line, "new"),
+        displayPath: undefined,
+        changeType: "MODIFIED",
+        additions: 0,
+        deletions: 0,
+      };
+      current = nextFile;
+      files.push(current);
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    if (line.startsWith("rename from ")) {
+      const oldPath = normalizePatchPath(line.slice("rename from ".length));
+      if (oldPath) {
+        current.oldPath = oldPath;
+      }
+      current.changeType = "RENAMED";
+      continue;
+    }
+
+    if (line.startsWith("rename to ")) {
+      const newPath = normalizePatchPath(line.slice("rename to ".length));
+      if (newPath) {
+        current.newPath = newPath;
+        current.displayPath = newPath;
+      }
+      current.changeType = "RENAMED";
+      continue;
+    }
+
+    if (line.startsWith("new file mode ")) {
+      current.changeType = "ADDED";
+      continue;
+    }
+
+    if (line.startsWith("deleted file mode ")) {
+      current.changeType = "DELETED";
+      continue;
+    }
+
+    if (line.startsWith("--- ")) {
+      const oldPath = parseHeaderPath(line.slice(4));
+      if (oldPath === undefined) {
+        current.changeType = "ADDED";
+      } else {
+        current.oldPath = oldPath;
+      }
+      continue;
+    }
+
+    if (line.startsWith("+++ ")) {
+      const newPath = parseHeaderPath(line.slice(4));
+      if (newPath === undefined) {
+        current.changeType = "DELETED";
+      } else {
+        current.newPath = newPath;
+      }
+      continue;
+    }
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      current.additions += 1;
+      continue;
+    }
+
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      current.deletions += 1;
+    }
+  }
+
+  const normalizedFiles = files.map((file) => {
+    const path = file.displayPath ?? file.newPath ?? file.oldPath ?? "unknown";
+    return {
+      path,
+      changeType: inferChangeType(file),
+      additions: file.additions,
+      deletions: file.deletions,
+    };
+  });
+
+  return {
+    files: normalizedFiles,
+    summary: summarizePatchFiles(normalizedFiles),
+    truncated: false,
+  };
+}
+
+function inferChangeType(file: MutablePatchFile): PatchChangeType {
+  if (file.changeType !== "MODIFIED") {
+    return file.changeType;
+  }
+
+  if (file.oldPath === undefined && file.newPath) {
+    return "ADDED";
+  }
+
+  if (file.newPath === undefined && file.oldPath) {
+    return "DELETED";
+  }
+
+  return "MODIFIED";
+}
+
+function summarizePatchFiles(files: PatchChangedFile[]): string {
+  if (files.length === 0) {
+    return "No files changed";
+  }
+
+  const changed = files.map((file) => `${file.path} (+${file.additions}, -${file.deletions})`).join(", ");
+  return `${changeVerb(files)} ${files.length} ${files.length === 1 ? "file" : "files"}: ${changed}`;
+}
+
+function changeVerb(files: PatchChangedFile[]): string {
+  if (files.length === 1) {
+    const type = files[0]?.changeType ?? "UNKNOWN";
+    return type.charAt(0) + type.slice(1).toLowerCase();
+  }
+
+  return "Modified";
+}
+
+function extractPatchPaths(patch: string): string[] {
+  const paths = new Set<string>();
+  for (const line of patch.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      addPath(paths, parseDiffGitPath(line, "old"));
+      addPath(paths, parseDiffGitPath(line, "new"));
+    } else if (line.startsWith("--- ")) {
+      addPath(paths, parseHeaderPath(line.slice(4)));
+    } else if (line.startsWith("+++ ")) {
+      addPath(paths, parseHeaderPath(line.slice(4)));
+    } else if (line.startsWith("rename from ")) {
+      addPath(paths, normalizePatchPath(line.slice("rename from ".length)));
+    } else if (line.startsWith("rename to ")) {
+      addPath(paths, normalizePatchPath(line.slice("rename to ".length)));
+    }
+  }
+
+  return [...paths];
+}
+
+function addPath(paths: Set<string>, filePath: string | undefined): void {
+  if (filePath) {
+    paths.add(filePath);
+  }
+}
+
+function parseDiffGitPath(line: string, side: "old" | "new"): string | undefined {
+  const match = /^diff --git\s+(.+?)\s+(.+)$/.exec(line);
+  if (!match) {
+    return undefined;
+  }
+
+  return normalizePatchPath(side === "old" ? match[1] : match[2]);
+}
+
+function parseHeaderPath(rawPath: string): string | undefined {
+  const trimmed = rawPath.trim().split(/\s+/)[0] ?? "";
+  if (trimmed === "/dev/null") {
+    return undefined;
+  }
+
+  return normalizePatchPath(trimmed);
+}
+
+function normalizePatchPath(rawPath: string | undefined): string | undefined {
+  if (!rawPath) {
+    return undefined;
+  }
+
+  const unquoted = rawPath.trim().replace(/^"|"$/g, "");
+  if (unquoted === "/dev/null") {
+    return undefined;
+  }
+
+  return toPosixPath(unquoted.replace(/^[ab]\//, ""));
+}
+
+function assertPatchPathAllowed(repoPath: string, patchPath: string): void {
+  if (patchPath.startsWith("/") || patchPath.includes("\0")) {
+    throw new PatchPathOutsideRepoError(patchPath);
+  }
+
+  const parts = patchPath.split("/").filter(Boolean);
+  if (parts.includes(".git") || parts.includes(".mini-agent")) {
+    throw new PatchTouchesInternalDirectoryError(patchPath);
+  }
+
+  const resolvedPath = resolveRepoPath(repoPath, patchPath);
+  if (!isPathInside(repoPath, resolvedPath)) {
+    throw new PatchPathOutsideRepoError(patchPath);
+  }
+}
+
+export function previewPatchForTesting(patch: string): PatchPreviewResult {
+  return parseUnifiedDiff(patch);
+}

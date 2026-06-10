@@ -1,0 +1,43 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/code-agent
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  sql:
+    init:
+      mode: always
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui/index.html
+
+code-agent:
+  runner-path: ../dist/cli/index.js
+  node-path: node
+  workspace-root: ../
+  default-max-steps: 20
+  default-timeout-seconds: 600
+  execution-mode: DOCKER
+  sandbox:
+    enabled: true
+    docker-image: mini-coding-agent-sandbox:latest
+    workspace-root: ./data/workspaces
+    container-workdir: /workspace
+    cpu-limit: "2"
+    memory-limit: "2g"
+    network-enabled: false
+    auto-remove-container: true
+    container-timeout-seconds: 600
+    runner-mount-path: /opt/mini-agent
+    runner-host-path: ../

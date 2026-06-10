@@ -1,0 +1,623 @@
+import { CommandRunner } from "../command/CommandRunner.js";
+import type { CommandResult } from "../command/CommandRunner.js";
+import { ContextBuilder } from "../context/ContextBuilder.js";
+import { GitManager } from "../git/GitManager.js";
+import type { LlmClient, ToolSpec } from "../llm/LlmClient.js";
+import { PatchManager } from "../patch/PatchManager.js";
+import { PermissionLevel } from "../permission/PermissionLevel.js";
+import { PermissionManager } from "../permission/PermissionManager.js";
+import { EventStore } from "../session/EventStore.js";
+import { SessionStore } from "../session/SessionStore.js";
+import type { JsonObject, JsonValue } from "../session/SessionTypes.js";
+import { ToolRegistry } from "../tools/ToolRegistry.js";
+import type { ToolContext, ToolResult } from "../tools/Tool.js";
+import {
+  CommandBlockedError,
+  CommandPermissionDeniedError,
+  errorToCode,
+  errorToDetails,
+  errorToMessage,
+} from "../utils/errors.js";
+import type { AgentDecision } from "./AgentDecision.js";
+import { decisionToMessage } from "./AgentPlanner.js";
+import { AgentState, toJsonValue } from "./AgentState.js";
+
+export interface AgentLoopOptions {
+  repoPath: string;
+  llmClient: LlmClient;
+  toolRegistry: ToolRegistry;
+  sessionStore: SessionStore;
+  eventStore: EventStore;
+  commandRunner?: CommandRunner;
+  permissionManager?: PermissionManager;
+  patchManager?: PatchManager;
+  contextBuilder?: ContextBuilder;
+  onProgress?: AgentProgressHandler;
+  askUser?: (message: string) => Promise<string>;
+}
+
+export interface AgentRunInput {
+  userGoal: string;
+  sessionId?: string;
+  maxSteps?: number;
+  autoApprove?: boolean;
+  nonInteractive?: boolean;
+}
+
+export interface AgentRunResult {
+  sessionId: string;
+  success: boolean;
+  summary: string;
+  finalDiff: string;
+  steps: number;
+  error?: string;
+}
+
+export type AgentProgressEvent =
+  | { type: "session"; sessionId: string }
+  | { type: "plan"; message: string }
+  | { type: "tool"; toolName: string; input: JsonObject }
+  | { type: "patch"; description: string }
+  | { type: "command"; command: string }
+  | { type: "ask_user"; message: string }
+  | { type: "diff"; generated: boolean }
+  | { type: "summary"; summary: string; success: boolean }
+  | { type: "error"; message: string };
+
+export type AgentProgressHandler = (event: AgentProgressEvent) => void | Promise<void>;
+
+interface StepOutcome {
+  result?: AgentRunResult;
+  failed: boolean;
+}
+
+const MAX_CONSECUTIVE_FAILURES = 3;
+const MAX_REPEATED_DECISIONS = 3;
+
+export class AgentLoop {
+  private readonly repoPath: string;
+  private readonly llmClient: LlmClient;
+  private readonly toolRegistry: ToolRegistry;
+  private readonly sessionStore: SessionStore;
+  private readonly eventStore: EventStore;
+  private readonly commandRunner: CommandRunner;
+  private readonly permissionManager: PermissionManager;
+  private readonly patchManager: PatchManager;
+  private readonly contextBuilder: ContextBuilder;
+  private readonly onProgress: AgentProgressHandler | undefined;
+  private readonly askUser: ((message: string) => Promise<string>) | undefined;
+  private readonly availableTools: ToolSpec[];
+
+  constructor(options: AgentLoopOptions) {
+    this.repoPath = options.repoPath;
+    this.llmClient = options.llmClient;
+    this.toolRegistry = options.toolRegistry;
+    this.sessionStore = options.sessionStore;
+    this.eventStore = options.eventStore;
+    this.commandRunner = options.commandRunner ?? new CommandRunner({ repoPath: options.repoPath });
+    this.permissionManager = options.permissionManager ?? new PermissionManager();
+    this.patchManager = options.patchManager ?? new PatchManager({ repoPath: options.repoPath });
+    this.contextBuilder = options.contextBuilder ?? new ContextBuilder({ repoPath: options.repoPath });
+    this.onProgress = options.onProgress;
+    this.askUser = options.askUser;
+    this.availableTools = this.toolRegistry.listSpecs();
+  }
+
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    const userGoal = input.userGoal.trim();
+    if (userGoal.length === 0) {
+      throw new Error("User goal cannot be empty");
+    }
+
+    const sessionId = await this.ensureSession(userGoal, input.sessionId);
+    await this.emit({ type: "session", sessionId });
+
+    const state = new AgentState({
+      sessionId,
+      repoPath: this.repoPath,
+      userGoal,
+      ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
+    });
+
+    await this.recordUserMessage(state, userGoal);
+    let consecutiveFailures = 0;
+    let previousDecisionKey: string | undefined;
+    let repeatedDecisionCount = 0;
+
+    while (!state.isStepLimitReached()) {
+      const context = await this.contextBuilder.build(state, this.availableTools);
+      const decision = await this.readDecision(state, userGoal, context);
+
+      state.addDecision(decision);
+      await this.recordDecision(state.sessionId, decision);
+      await this.recordAssistantMessage(state, decisionToMessage(decision));
+
+      const decisionKey = stableDecisionKey(decision);
+      if (decisionKey === previousDecisionKey) {
+        repeatedDecisionCount += 1;
+      } else {
+        repeatedDecisionCount = 1;
+        previousDecisionKey = decisionKey;
+      }
+
+      if (repeatedDecisionCount > MAX_REPEATED_DECISIONS) {
+        const error = "Agent repeated the same decision too many times";
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error);
+      }
+
+      const outcome = await this.handleDecision(state, decision, input);
+      if (outcome.result) {
+        return outcome.result;
+      }
+
+      consecutiveFailures = outcome.failed ? consecutiveFailures + 1 : 0;
+      if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+        const error = "Agent failed too many consecutive steps";
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error);
+      }
+
+      state.incrementStep();
+    }
+
+    const error = `Agent stopped after reaching max steps (${state.maxSteps})`;
+    await this.recordError(sessionId, error);
+    return await this.fail(state, error);
+  }
+
+  private async handleDecision(
+    state: AgentState,
+    decision: AgentDecision,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    switch (decision.type) {
+      case "PLAN":
+        await this.emit({ type: "plan", message: decision.message });
+        return { failed: false };
+
+      case "TOOL_CALL":
+        return { failed: await this.executeToolDecision(state, decision.toolName, decision.input, input) };
+
+      case "APPLY_PATCH":
+        return await this.executePatchDecision(state, decision, input);
+
+      case "RUN_COMMAND":
+        return await this.executeCommandDecision(state, decision.command, decision.description, input);
+
+      case "ASK_USER":
+        return await this.executeAskUserDecision(state, decision.message, input);
+
+      case "FINAL":
+        return { failed: false, result: await this.finish(state, decision.summary, decision.success) };
+
+      case "FAILED":
+        return { failed: true, result: await this.fail(state, decision.error) };
+    }
+  }
+
+  private async executeToolDecision(
+    state: AgentState,
+    toolName: string,
+    toolInput: JsonObject,
+    input: AgentRunInput,
+  ): Promise<boolean> {
+    await this.emit({ type: "tool", toolName, input: toolInput });
+    const result = await this.toolRegistry.execute(toolName, toolInput, this.buildToolContext(state.sessionId, input));
+
+    state.addToolResult({
+      toolName,
+      input: toolInput,
+      result,
+    });
+
+    if (!result.success) {
+      state.setLastError(result.error?.message ?? `Tool failed: ${toolName}`);
+      await this.recordError(state.sessionId, state.lastError);
+      return true;
+    } else if (toolName === "git_diff" && isGitDiffData(result.data)) {
+      state.finalDiff = result.data.diff;
+    }
+
+    state.setLastError(null);
+    return false;
+  }
+
+  private async executePatchDecision(
+    state: AgentState,
+    decision: Extract<AgentDecision, { type: "APPLY_PATCH" }>,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    await this.emit({ type: "patch", description: decision.description ?? "apply_patch" });
+    const result = await this.toolRegistry.execute(
+      "apply_patch",
+      { patch: decision.patch, checkBeforeApply: true },
+      this.buildToolContext(state.sessionId, input),
+    );
+
+    state.addPatchResult({
+      patch: decision.patch,
+      ...(decision.description ? { description: decision.description } : {}),
+      result,
+    });
+
+    if (!result.success) {
+      const error = result.error?.message ?? "Patch application failed";
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      if (result.error?.code === "PATCH_PERMISSION_DENIED") {
+        return { failed: true, result: await this.fail(state, error) };
+      }
+      return { failed: true };
+    }
+
+    state.setLastError(null);
+    return { failed: false };
+  }
+
+  private async executeCommandDecision(
+    state: AgentState,
+    command: string,
+    description: string | undefined,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    await this.emit({ type: "command", command });
+
+    const permission = await this.permissionManager.check({
+      level: PermissionLevel.DANGEROUS,
+      action: "run_command",
+      description: description ?? "Run command requested by the agent.",
+      command,
+      ...(input.autoApprove === undefined ? {} : { autoApprove: input.autoApprove }),
+      ...(input.nonInteractive === undefined ? {} : { nonInteractive: input.nonInteractive }),
+    });
+
+    if (!permission.allowed) {
+      const error = permission.mode === "BLOCKED"
+        ? new CommandBlockedError(permission.reason ?? "Command was blocked", { permission })
+        : new CommandPermissionDeniedError(permission.reason ?? "Command permission denied", { permission });
+      const message = error.message;
+      state.setLastError(message);
+      await this.recordError(state.sessionId, message, error);
+      return { failed: true, result: await this.fail(state, message) };
+    }
+
+    const timeoutMs = this.commandRunner.defaultTimeoutMs;
+    const cwd = await this.commandRunner.resolveCwd(".");
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "COMMAND_STARTED",
+      payload: {
+        command,
+        cwd,
+        timeoutMs,
+      },
+    });
+
+    const result = await this.commandRunner.run({ command, cwd, timeoutMs });
+    state.addCommandResult(result);
+    await this.recordCommandResult(state.sessionId, result);
+
+    if (!result.success) {
+      const error = result.stderr || result.stdout || result.error || `Command failed with exit code ${String(result.exitCode)}`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return { failed: true };
+    } else {
+      state.setLastError(null);
+    }
+
+    return { failed: false };
+  }
+
+  private async executeAskUserDecision(
+    state: AgentState,
+    message: string,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    await this.emit({ type: "ask_user", message });
+
+    if (input.nonInteractive || !this.askUser) {
+      const error = "Agent asked for user input in non-interactive mode";
+      state.status = "WAITING_USER";
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return { failed: true, result: await this.fail(state, error) };
+    }
+
+    state.status = "WAITING_USER";
+    const answer = await this.askUser(`${message}\n> `);
+    state.status = "RUNNING";
+    await this.recordUserMessage(state, answer);
+    return { failed: false };
+  }
+
+  private async finish(state: AgentState, summary: string, success: boolean): Promise<AgentRunResult> {
+    const finalDiff = await this.readFinalDiff();
+    state.markFinished(finalDiff);
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "DIFF_SUMMARY",
+      payload: {
+        diff: finalDiff,
+      },
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "DIFF_GENERATED",
+      payload: {
+        truncated: false,
+        length: finalDiff.length,
+      },
+    });
+    await this.emit({ type: "diff", generated: true });
+
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary,
+        success,
+        finalDiff,
+        steps: state.step,
+      },
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "TASK_FINISHED",
+      payload: {
+        summary,
+        success,
+        steps: state.step,
+      },
+    });
+    await this.sessionStore.updateSessionStatus(state.sessionId, success ? "FINISHED" : "FAILED");
+    await this.emit({ type: "summary", summary, success });
+
+    return {
+      sessionId: state.sessionId,
+      success,
+      summary,
+      finalDiff,
+      steps: state.step,
+    };
+  }
+
+  private async fail(state: AgentState, error: string): Promise<AgentRunResult> {
+    state.markFailed(error);
+    const finalDiff = await this.readFinalDiff();
+    state.finalDiff = finalDiff;
+
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "DIFF_SUMMARY",
+      payload: {
+        diff: finalDiff,
+        failed: true,
+      },
+    });
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary: error,
+        success: false,
+        finalDiff,
+        steps: state.step,
+      },
+    });
+
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "TASK_FAILED",
+      payload: {
+        error,
+        steps: state.step,
+      },
+    });
+    await this.sessionStore.updateSessionStatus(state.sessionId, "FAILED");
+    await this.emit({ type: "error", message: error });
+
+    return {
+      sessionId: state.sessionId,
+      success: false,
+      summary: error,
+      finalDiff,
+      steps: state.step,
+      error,
+    };
+  }
+
+  private buildToolContext(sessionId: string, input: AgentRunInput): ToolContext {
+    return {
+      repoPath: this.repoPath,
+      sessionId,
+      sessionStore: this.sessionStore,
+      eventStore: this.eventStore,
+      permissionManager: this.permissionManager,
+      ...(input.autoApprove === undefined ? {} : { autoApprove: input.autoApprove }),
+      ...(input.nonInteractive === undefined ? {} : { nonInteractive: input.nonInteractive }),
+    };
+  }
+
+  private async ensureSession(userGoal: string, sessionId?: string): Promise<string> {
+    if (sessionId) {
+      await this.sessionStore.ensureSession(sessionId);
+      await this.eventStore.init();
+      return sessionId;
+    }
+
+    const created = await this.sessionStore.createSession({ title: userGoal.slice(0, 80) });
+    await this.eventStore.appendEvent(created.sessionId, {
+      type: "SESSION_CREATED",
+      payload: {
+        title: created.title,
+        repoPath: created.repoPath,
+        baseCommit: created.baseCommit,
+      },
+    });
+
+    return created.sessionId;
+  }
+
+  private async readDecision(state: AgentState, userGoal: string, context: string): Promise<AgentDecision> {
+    try {
+      return await this.llmClient.chat({
+        userGoal,
+        context,
+        state: state.toSnapshot(),
+        availableTools: this.availableTools,
+      });
+    } catch (error) {
+      const message = `LLM decision failed: ${errorToMessage(error)}`;
+      state.setLastError(message);
+      await this.recordError(state.sessionId, message, error);
+      return { type: "FAILED", error: message };
+    }
+  }
+
+  private async recordUserMessage(state: AgentState, content: string): Promise<void> {
+    state.addUserMessage(content);
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content },
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content },
+    });
+  }
+
+  private async recordDecision(sessionId: string, decision: AgentDecision): Promise<void> {
+    await this.sessionStore.appendRecord(sessionId, {
+      type: "AGENT_DECISION",
+      payload: {
+        decision: toJsonValue(decision),
+      },
+    });
+  }
+
+  private async recordAssistantMessage(state: AgentState, content: string): Promise<void> {
+    state.addAssistantMessage(content);
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content },
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content },
+    });
+  }
+
+  private async recordCommandResult(sessionId: string, result: CommandResult): Promise<void> {
+    await this.sessionStore.appendRecord(sessionId, {
+      type: "COMMAND_RESULT",
+      payload: commandResultToPayload(result),
+    });
+    await this.eventStore.appendEvent(sessionId, {
+      type: "COMMAND_FINISHED",
+      payload: {
+        command: result.command,
+        exitCode: result.exitCode,
+        success: result.success,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+        truncated: result.truncated,
+      },
+    });
+
+    if (isTestCommand(result.command)) {
+      await this.eventStore.appendEvent(sessionId, {
+        type: result.success ? "TEST_PASSED" : "TEST_FAILED",
+        payload: {
+          command: result.command,
+          exitCode: result.exitCode,
+          stderrPreview: result.stderr.slice(0, 1000),
+        },
+      });
+    }
+  }
+
+  private async recordError(sessionId: string, message: string | null, error?: unknown): Promise<void> {
+    if (!message) {
+      return;
+    }
+
+    await this.sessionStore.appendRecord(sessionId, {
+      type: "ERROR",
+      payload: {
+        message,
+        code: error ? errorToCode(error, "AGENT_ERROR") : "AGENT_ERROR",
+        details: error ? toJsonValue(errorToDetails(error)) : null,
+      },
+    });
+  }
+
+  private async readFinalDiff(): Promise<string> {
+    const result = await this.patchManager.getDiff().catch(async () => {
+      const git = new GitManager({ repoPath: this.repoPath });
+      return await git.getDiff();
+    });
+    return result.diff;
+  }
+
+  private async emit(event: AgentProgressEvent): Promise<void> {
+    await this.onProgress?.(event);
+  }
+}
+
+function commandResultToPayload(result: CommandResult): JsonObject {
+  return toJsonObject({
+    command: result.command,
+    cwd: result.cwd,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    durationMs: result.durationMs,
+    success: result.success,
+    timedOut: result.timedOut,
+    truncated: result.truncated,
+    error: result.error,
+  });
+}
+
+function toJsonObject(value: Record<string, unknown>): JsonObject {
+  const output: JsonObject = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    output[key] = toJsonValue(nestedValue);
+  }
+  return output;
+}
+
+function isTestCommand(command: string): boolean {
+  const normalized = command.toLowerCase();
+  return [
+    "mvn test",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "go test",
+    "pytest",
+    "gradle test",
+    "echo test passed",
+  ].some((keyword) => normalized.includes(keyword));
+}
+
+function isGitDiffData(value: unknown): value is { diff: string } {
+  return typeof value === "object"
+    && value !== null
+    && "diff" in value
+    && typeof value.diff === "string";
+}
+
+function stableDecisionKey(decision: AgentDecision): string {
+  return JSON.stringify(sortJsonValue(decision));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sortJsonValue(item));
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const output: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      output[key] = sortJsonValue((value as Record<string, unknown>)[key]);
+    }
+    return output;
+  }
+
+  return value;
+}

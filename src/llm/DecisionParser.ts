@@ -1,0 +1,142 @@
+import { z } from "zod";
+import { AgentDecisionSchema } from "../agent/AgentDecision.js";
+import type { AgentDecision } from "../agent/AgentDecision.js";
+import { InvalidAgentDecisionError } from "../utils/errors.js";
+
+export class DecisionParser {
+  parse(rawText: string): AgentDecision {
+    const jsonText = extractJsonText(rawText);
+    const value = parseJson(jsonText);
+    assertRequiredDecisionFields(value);
+
+    const parsed = AgentDecisionSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new InvalidAgentDecisionError("AgentDecision schema validation failed", z.treeifyError(parsed.error));
+    }
+
+    return parsed.data;
+  }
+}
+
+export function parseAgentDecision(rawText: string): AgentDecision {
+  return new DecisionParser().parse(rawText);
+}
+
+function extractJsonText(rawText: string): string {
+  const text = rawText.trim();
+  if (text.length === 0) {
+    throw new InvalidAgentDecisionError("LLM response is empty");
+  }
+
+  const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (codeBlock?.[1]) {
+    return codeBlock[1].trim();
+  }
+
+  if (text.startsWith("{") && text.endsWith("}")) {
+    return text;
+  }
+
+  const objectText = extractFirstJsonObject(text);
+  if (objectText) {
+    return objectText;
+  }
+
+  throw new InvalidAgentDecisionError("LLM response did not contain a JSON object");
+}
+
+function parseJson(jsonText: string): unknown {
+  try {
+    return JSON.parse(jsonText) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidAgentDecisionError(`Invalid JSON in LLM response: ${message}`);
+  }
+}
+
+function extractFirstJsonObject(text: string): string | undefined {
+  const start = text.indexOf("{");
+  if (start < 0) {
+    return undefined;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function assertRequiredDecisionFields(value: unknown): void {
+  if (!isObject(value)) {
+    throw new InvalidAgentDecisionError("AgentDecision must be a JSON object");
+  }
+
+  if (typeof value.type !== "string") {
+    throw new InvalidAgentDecisionError("AgentDecision is missing type");
+  }
+
+  switch (value.type) {
+    case "PLAN":
+    case "ASK_USER":
+    case "FINAL":
+    case "FAILED":
+      return;
+    case "TOOL_CALL":
+      if (typeof value.toolName !== "string" || value.toolName.trim().length === 0) {
+        throw new InvalidAgentDecisionError("TOOL_CALL decision is missing toolName");
+      }
+      return;
+    case "APPLY_PATCH":
+      if (typeof value.patch !== "string" || value.patch.trim().length === 0) {
+        throw new InvalidAgentDecisionError("APPLY_PATCH decision is missing patch");
+      }
+      return;
+    case "RUN_COMMAND":
+      if (typeof value.command !== "string" || value.command.trim().length === 0) {
+        throw new InvalidAgentDecisionError("RUN_COMMAND decision is missing command");
+      }
+      return;
+    default:
+      throw new InvalidAgentDecisionError(`Unknown AgentDecision type: ${value.type}`);
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
