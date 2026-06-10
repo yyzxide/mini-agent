@@ -2,6 +2,12 @@
 
 This module is the Java control-plane backend for `mini-coding-agent`. It does not reimplement the TypeScript AgentLoop or tool system. Instead, it accepts coding tasks over HTTP, starts the compiled TypeScript CLI runner locally or inside Docker, stores logs/events in H2, and exposes REST APIs for task inspection, sandbox status, session records, session events, and final diffs.
 
+Chinese architecture and interview notes are available in:
+
+- [架构设计说明](../docs/zh-CN/ARCHITECTURE.md)
+- [面试讲解稿](../docs/zh-CN/INTERVIEW_GUIDE.md)
+- [演示脚本](../docs/zh-CN/DEMO_SCRIPT.md)
+
 ## Responsibilities
 
 - Create an `AgentTask` from an HTTP request.

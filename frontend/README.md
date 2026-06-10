@@ -2,6 +2,12 @@
 
 React + TypeScript + Vite web console for `mini-coding-agent`. The frontend talks to the Java backend only; Agent execution still lives in the TypeScript runner launched by the backend.
 
+Chinese architecture and demo notes are available in:
+
+- [架构设计说明](../docs/zh-CN/ARCHITECTURE.md)
+- [演示脚本](../docs/zh-CN/DEMO_SCRIPT.md)
+- [面试问答](../docs/zh-CN/INTERVIEW_QA.md)
+
 ## Install
 
 ```bash

@@ -2,6 +2,16 @@
 
 `mini-coding-agent` is a local conversational AI coding agent CLI. The first milestone focuses on a small but real loop inspired by Codex CLI and Claude Code: inspect a repository, call local tools, apply patches with review, run approved commands, capture feedback, and store every step in local JSONL session files.
 
+## Chinese Docs
+
+- [中文文档总览](docs/zh-CN/README.md)
+- [架构设计说明](docs/zh-CN/ARCHITECTURE.md)
+- [面试讲解稿](docs/zh-CN/INTERVIEW_GUIDE.md)
+- [演示脚本](docs/zh-CN/DEMO_SCRIPT.md)
+- [自测清单](docs/zh-CN/SELF_TEST_CHECKLIST.md)
+- [面试问答](docs/zh-CN/INTERVIEW_QA.md)
+- [后续规划](docs/zh-CN/ROADMAP.md)
+
 ## Current Stage
 
 Phase 1 through Phase 11 are implemented:
@@ -35,6 +45,18 @@ Later phases will improve real-model planning quality, repair loops, and remote 
 pnpm install
 pnpm build
 pnpm test
+```
+
+Run all local verification targets:
+
+```bash
+pnpm verify
+```
+
+If `pnpm` is not available as a global command, use:
+
+```bash
+corepack pnpm verify
 ```
 
 For local CLI usage from this repository:
