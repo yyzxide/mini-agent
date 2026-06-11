@@ -62,6 +62,38 @@ pnpm verify:frontend
 pnpm run docker:build-sandbox
 ```
 
+## 推荐真实模型配置
+
+正常使用 Coding Agent 时建议配置真实 OpenAI-compatible 模型，而不是长期使用 Mock：
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your_api_key" \
+  --model "your_model"
+
+node dist/cli/index.js config show
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+```
+
+配置会写入当前仓库的 `.mini-agent/config.json`，该目录已被 `.gitignore` 忽略。`config show` 默认会把 API key 显示为 `<redacted>`。
+
+如果不想把 key 直接写入文件，可以只写环境变量名：
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --api-key-env MINI_AGENT_API_KEY \
+  --model "your_model"
+```
+
+临时切回 Mock：
+
+```bash
+node dist/cli/index.js run "demo task" --mock
+```
+
 ## 面试时的叙述主线
 
 可以按下面顺序讲：

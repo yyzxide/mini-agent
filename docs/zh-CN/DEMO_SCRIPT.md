@@ -97,11 +97,13 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js git diff
 如果有 OpenAI-compatible 服务：
 
 ```bash
-export MINI_AGENT_BASE_URL="https://api.openai.com/v1"
-export MINI_AGENT_API_KEY="your-api-key"
-export MINI_AGENT_MODEL="your-model"
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your-api-key" \
+  --model "your-model"
 
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前项目结构并总结修改入口" --real --max-steps 8
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前项目结构并总结修改入口" --max-steps 8
 ```
 
 建议现场先用只读任务，不要一上来让真实模型修改大仓库。
@@ -310,4 +312,3 @@ docker images
 - 任务状态是 `COMPLETED`。
 - diff 非空。
 - 目标仓库是 Git 仓库。
-

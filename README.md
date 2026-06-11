@@ -74,9 +74,62 @@ Or run the TypeScript entry directly during development:
 pnpm dev
 ```
 
-## Environment Variables
+## Model Configuration
 
-The CLI defaults to `MockLlmClient` and can run without any LLM configuration. To use a real OpenAI-compatible model, set:
+The CLI can run with `MockLlmClient` for deterministic local demos, but normal coding-agent usage should use a real OpenAI-compatible model.
+
+Recommended local config:
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your_api_key" \
+  --model "your_model"
+
+node dist/cli/index.js config show
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+```
+
+This writes `.mini-agent/config.json` in the current repository. `.mini-agent/` is ignored by git, and `config show` redacts the API key by default.
+
+Example config:
+
+```json
+{
+  "version": 1,
+  "repoPath": "/path/to/repo",
+  "createdAt": "2026-06-11T00:00:00.000Z",
+  "llm": {
+    "mode": "real",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "your_api_key",
+    "model": "your_model",
+    "temperature": 0.2,
+    "maxTokens": 4096,
+    "timeoutMs": 60000
+  }
+}
+```
+
+You can avoid storing the key directly by using an environment variable reference:
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key-env MINI_AGENT_API_KEY \
+  --model "your_model"
+```
+
+CLI flags override config for one run:
+
+```bash
+node dist/cli/index.js run "demo task" --mock
+node dist/cli/index.js run "demo task" --real --model "another_model"
+```
+
+Environment variables are still supported as a fallback:
 
 ```bash
 MINI_AGENT_BASE_URL=https://api.openai.com/v1
@@ -87,7 +140,7 @@ MINI_AGENT_MAX_TOKENS=4096
 MINI_AGENT_TIMEOUT_MS=60000
 ```
 
-`MINI_AGENT_API_KEY` and `MINI_AGENT_MODEL` are required for `--real`. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
+For real model mode, an API key and model are required, either from `.mini-agent/config.json`, from environment variables, or from CLI overrides where available. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
 
 ## CLI Commands
 
@@ -99,6 +152,8 @@ mini-agent run "demo: 给 demo.txt 增加一行 hello" --real --model your_model
 mini-agent run "demo: 给 demo.txt 增加 hello" --mock --yes --event-stream
 mini-agent resume <sessionId>
 mini-agent sessions
+mini-agent config init --real --api-key your_api_key --model your_model
+mini-agent config show
 mini-agent session create --title "tool test"
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
@@ -140,11 +195,11 @@ Interactive mode supports:
 - `/status`: print current git status.
 - `/sessions`: list local sessions.
 
-Any other non-empty input is treated as a coding task and executed through `AgentLoop` with the default mock LLM.
+Any other non-empty input is treated as a coding task and executed through `AgentLoop`. It uses `.mini-agent/config.json` when configured, otherwise it falls back to the mock LLM.
 
 ### `mini-agent run "task"`
 
-Runs a one-shot task through `AgentLoop`. The default is `MockLlmClient`:
+Runs a one-shot task through `AgentLoop`. With no model config it uses `MockLlmClient`; after `mini-agent config init --real ...`, it uses `OpenAICompatibleClient` by default:
 
 ```bash
 node dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
@@ -155,10 +210,10 @@ Options:
 - `--session <sessionId>` appends the task to an existing session.
 - `--yes` auto-approves REVIEW and DANGEROUS actions that are not blocked.
 - `--max-steps <number>` overrides the default 20 loop steps.
-- `--mock` selects the deterministic mock LLM path, which is the default.
+- `--mock` selects the deterministic mock LLM path for this run.
 - `--real` selects `OpenAICompatibleClient`.
-- `--model <model>` overrides `MINI_AGENT_MODEL`.
-- `--base-url <url>` overrides `MINI_AGENT_BASE_URL`.
+- `--model <model>` overrides configured model or `MINI_AGENT_MODEL`.
+- `--base-url <url>` overrides configured base URL or `MINI_AGENT_BASE_URL`.
 - `--event-stream` prints `MINI_AGENT_EVENT {...}` lines for the Java backend while still writing normal session/event JSONL files.
 
 Typical output:
@@ -179,12 +234,14 @@ Typical output:
 Real model example:
 
 ```bash
-export MINI_AGENT_BASE_URL="https://api.openai.com/v1"
-export MINI_AGENT_API_KEY="your-api-key"
-export MINI_AGENT_MODEL="your-model"
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your-api-key" \
+  --model "your-model"
 
-node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --real
-node dist/cli/index.js run "demo: 给 demo.txt 增加一行 hello from real model" --real --yes
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
+node dist/cli/index.js run "demo: 给 demo.txt 增加一行 hello from real model" --yes
 ```
 
 ### `mini-agent resume <sessionId>`
@@ -764,8 +821,8 @@ When a patch is applied with `--session`, the tool writes:
 
 ## Common Errors
 
-- `Missing MINI_AGENT_API_KEY`: set the API key before using `--real`.
-- `Missing MINI_AGENT_MODEL`: set `MINI_AGENT_MODEL` or pass `--model`.
+- `Missing MINI_AGENT_API_KEY`: set the API key in `.mini-agent/config.json`, set `MINI_AGENT_API_KEY`, or configure `apiKeyEnv`.
+- `Missing MINI_AGENT_MODEL`: set the model in `.mini-agent/config.json`, set `MINI_AGENT_MODEL`, or pass `--model`.
 - `LLM request failed: <status>`: check `MINI_AGENT_BASE_URL`, model name, credentials, and provider compatibility.
 - `LLM response did not include content`: the provider returned no assistant text.
 - `INVALID_AGENT_DECISION`: the model returned JSON that does not match the AgentDecision protocol.

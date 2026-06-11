@@ -9,6 +9,12 @@ import { AgentLoop } from "../agent/AgentLoop.js";
 import type { AgentProgressEvent } from "../agent/AgentLoop.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
+import {
+  initAgentConfig,
+  loadAgentConfig,
+  redactAgentConfig,
+  resolveLlmConfig,
+} from "../config/AgentConfig.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
 import type { LlmClient } from "../llm/LlmClient.js";
@@ -44,6 +50,18 @@ interface AgentCliOptions {
   eventStream?: boolean;
 }
 
+interface ConfigInitOptions {
+  mock?: boolean;
+  real?: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+}
+
 export function createProgram(): Command {
   const program = new Command();
 
@@ -62,7 +80,7 @@ export function createProgram(): Command {
     .option("--session <sessionId>", "Session id used for the task")
     .option("--yes", "Auto-approve patch application and command execution")
     .option("--max-steps <number>", "Maximum agent loop steps", parsePositiveInteger)
-    .option("--mock", "Use MockLlmClient (default)")
+    .option("--mock", "Use MockLlmClient for this run")
     .option("--real", "Use OpenAICompatibleClient")
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
@@ -81,6 +99,63 @@ export function createProgram(): Command {
       if (!result.success) {
         process.exitCode = 1;
       }
+    });
+
+  const configCommand = program
+    .command("config")
+    .description("Manage local mini-agent configuration");
+
+  configCommand
+    .command("init")
+    .description("Create or update .mini-agent/config.json")
+    .option("--mock", "Configure MockLlmClient as the default")
+    .option("--real", "Configure OpenAICompatibleClient as the default")
+    .option("--base-url <url>", "OpenAI-compatible base URL")
+    .option("--api-key <key>", "OpenAI-compatible API key stored in .mini-agent/config.json")
+    .option("--api-key-env <name>", "Environment variable name that stores the API key")
+    .option("--model <model>", "OpenAI-compatible model name")
+    .option("--temperature <number>", "Model temperature", parseNumber)
+    .option("--max-tokens <number>", "Maximum output tokens", parsePositiveInteger)
+    .option("--timeout-ms <number>", "LLM request timeout in milliseconds", parsePositiveInteger)
+    .action(async (options: ConfigInitOptions) => {
+      await runJsonAction(async () => {
+        if (options.mock && options.real) {
+          throw new Error("Choose either --mock or --real, not both.");
+        }
+
+        const hasRealConfig = options.real === true
+          || Boolean(options.apiKey)
+          || Boolean(options.apiKeyEnv)
+          || Boolean(options.model)
+          || Boolean(options.baseUrl);
+
+        const mode = options.mock ? "mock" : hasRealConfig ? "real" : "mock";
+        const config = await initAgentConfig(process.cwd(), {
+          llm: {
+            mode,
+            ...(options.baseUrl ? { baseUrl: options.baseUrl } : mode === "real" ? { baseUrl: "https://api.openai.com/v1" } : {}),
+            ...(options.apiKey ? { apiKey: options.apiKey } : {}),
+            ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
+            ...(options.model ? { model: options.model } : {}),
+            ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+            ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+            ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          },
+        });
+
+        writeJson(redactAgentConfig(config));
+      });
+    });
+
+  configCommand
+    .command("show")
+    .description("Show .mini-agent/config.json with secrets redacted")
+    .option("--raw", "Print raw config including secrets")
+    .action(async (options: { raw?: boolean }) => {
+      await runJsonAction(async () => {
+        const config = await loadAgentConfig(process.cwd());
+        writeJson(options.raw ? config : redactAgentConfig(config));
+      });
     });
 
   program
@@ -493,7 +568,7 @@ async function runAgentTask(
 
   const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
-  const llmClient = createLlmClient(options);
+  const llmClient = await createLlmClient(repoPath, options);
   const loop = new AgentLoop({
     repoPath,
     llmClient,
@@ -517,16 +592,16 @@ async function runAgentTask(
   });
 }
 
-function createLlmClient(options: AgentCliOptions): LlmClient {
-  if (options.mock && options.real) {
-    throw new Error("Choose either --mock or --real, not both.");
-  }
+async function createLlmClient(repoPath: string, options: AgentCliOptions): Promise<LlmClient> {
+  const resolvedConfig = resolveLlmConfig(await loadAgentConfig(repoPath), {
+    mock: options.mock,
+    real: options.real,
+    baseUrl: options.baseUrl,
+    model: options.model,
+  });
 
-  if (options.real) {
-    return new OpenAICompatibleClient({
-      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
-      ...(options.model ? { model: options.model } : {}),
-    });
+  if (resolvedConfig.mode === "real") {
+    return new OpenAICompatibleClient(resolvedConfig.openai);
   }
 
   return new MockLlmClient();
@@ -639,6 +714,15 @@ function parsePositiveInteger(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`Expected a positive integer, got: ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseNumber(value: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Expected a number, got: ${value}`);
   }
 
   return parsed;

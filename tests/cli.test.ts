@@ -29,7 +29,7 @@ describe("mini-agent CLI", () => {
       .commands.map((command) => command.name())
       .sort();
 
-    expect(commandNames).toEqual(["command", "diff", "git", "patch", "resume", "run", "session", "sessions", "tool"]);
+    expect(commandNames).toEqual(["command", "config", "diff", "git", "patch", "resume", "run", "session", "sessions", "tool"]);
   });
 
   it("uses the expected binary name", () => {
@@ -66,6 +66,45 @@ describe("mini-agent CLI", () => {
       sessionId: created.sessionId,
       title: "Listed Session",
     }));
+  });
+
+  it("initializes and shows a redacted real-model config", async () => {
+    process.chdir(tempRoot);
+
+    const initOutput = await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "config",
+        "init",
+        "--real",
+        "--base-url",
+        "https://llm.example/v1",
+        "--api-key",
+        "secret-key",
+        "--model",
+        "agent-model",
+      ], { from: "user" });
+    });
+    const initialized = JSON.parse(initOutput) as {
+      llm?: {
+        mode?: string;
+        baseUrl?: string;
+        apiKey?: string;
+        model?: string;
+      };
+    };
+
+    expect(initialized.llm).toMatchObject({
+      mode: "real",
+      baseUrl: "https://llm.example/v1",
+      apiKey: "<redacted>",
+      model: "agent-model",
+    });
+
+    const showOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["config", "show"], { from: "user" });
+    });
+    const shown = JSON.parse(showOutput) as { llm?: { apiKey?: string } };
+    expect(shown.llm?.apiKey).toBe("<redacted>");
   });
 
   it("runs a command from the CLI", async () => {
@@ -236,6 +275,56 @@ describe("mini-agent CLI", () => {
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
+  });
+
+  it("runs with OpenAICompatibleClient from .mini-agent/config.json without --real", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    await fs.writeFile(path.join(tempRoot, "demo.txt"), "demo file\n", "utf8");
+    await execFileAsync("git", ["add", "demo.txt"], { cwd: tempRoot });
+
+    await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "config",
+        "init",
+        "--real",
+        "--base-url",
+        "https://llm.example/v1",
+        "--api-key",
+        "config-key",
+        "--model",
+        "config-model",
+      ], { from: "user" });
+    });
+
+    const responses = [
+      "{\"type\":\"PLAN\",\"message\":\"Configured real client\"}",
+      "{\"type\":\"FINAL\",\"summary\":\"Configured client completed\",\"success\":true}",
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: responses.shift() ?? responses[0] } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "run",
+        "inspect repository from config",
+        "--max-steps",
+        "3",
+        "--yes",
+      ], { from: "user" });
+    });
+
+    expect(output).toContain("[plan] Configured real client");
+    expect(output).toContain("[summary] Configured client completed");
+    expect(fetchMock).toHaveBeenCalled();
+
+    const call = fetchMock.mock.calls[0];
+    const init = call?.[1] as RequestInit | undefined;
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    expect(init?.headers).toMatchObject({ authorization: "Bearer config-key" });
+    expect(body.model).toBe("config-model");
   });
 });
 

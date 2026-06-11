@@ -74,6 +74,7 @@ node dist/cli/index.js --help
 预期能看到：
 
 - `run`
+- `config`
 - `resume`
 - `sessions`
 - `diff`
@@ -101,6 +102,30 @@ node dist/cli/index.js tool run git_diff '{}'
 - `read_file` 能返回内容和行号。
 - `search_code` 能返回匹配路径、行号和文本。
 - `git_status` 和 `git_diff` 在 Git 仓库中正常返回。
+
+## 4.5 真实模型配置验证
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your_api_key" \
+  --model "your_model"
+
+node dist/cli/index.js config show
+```
+
+预期：
+
+- `.mini-agent/config.json` 被创建或更新。
+- `config show` 中 `apiKey` 显示为 `<redacted>`。
+- 后续 `run` 不带 `--real` 也会默认使用真实模型。
+
+临时切回 Mock：
+
+```bash
+node dist/cli/index.js run "demo task" --mock
+```
 
 ## 5. Mock Agent 闭环验证
 

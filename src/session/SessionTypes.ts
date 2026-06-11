@@ -80,6 +80,16 @@ export interface MiniAgentConfig {
   version: 1;
   repoPath: string;
   createdAt: string;
+  llm?: {
+    mode?: "mock" | "real";
+    baseUrl?: string;
+    apiKey?: string;
+    apiKeyEnv?: string;
+    model?: string;
+    temperature?: number;
+    maxTokens?: number;
+    timeoutMs?: number;
+  };
 }
 
 export interface CreateSessionInput {
