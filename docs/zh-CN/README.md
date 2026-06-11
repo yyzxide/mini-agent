@@ -8,6 +8,8 @@
 ## 文档导航
 
 - [架构设计说明](ARCHITECTURE.md)：从 TypeScript Runner、Java Backend、React Frontend、Docker Sandbox 和 Git Workflow 五层说明系统设计。
+- [测试计划](TEST_PLAN.md)：定义测试阶段范围、分层策略、命令、风险项和进入/退出标准。
+- [测试报告 2026-06-11](TEST_REPORT_2026-06-11.md)：记录当前基线验证结果和测试缺口。
 - [面试讲解稿](INTERVIEW_GUIDE.md)：包含 30 秒、1 分钟、3 分钟版本，以及技术亮点、难点和取舍。
 - [演示脚本](DEMO_SCRIPT.md)：按步骤演示 CLI、后端、前端、Docker 沙箱和 Git Workflow。
 - [自测清单](SELF_TEST_CHECKLIST.md)：提交前、演示前、面试前可以逐项检查的验证表。

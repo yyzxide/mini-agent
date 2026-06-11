@@ -6,6 +6,8 @@
 
 - [中文文档总览](docs/zh-CN/README.md)
 - [架构设计说明](docs/zh-CN/ARCHITECTURE.md)
+- [测试计划](docs/zh-CN/TEST_PLAN.md)
+- [测试报告 2026-06-11](docs/zh-CN/TEST_REPORT_2026-06-11.md)
 - [面试讲解稿](docs/zh-CN/INTERVIEW_GUIDE.md)
 - [演示脚本](docs/zh-CN/DEMO_SCRIPT.md)
 - [自测清单](docs/zh-CN/SELF_TEST_CHECKLIST.md)
