@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { ensureDir, pathExists, readJsonFile, resolveMiniAgentPath, writeJsonFileAtomic } from "../utils/fs.js";
+import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJsonFileAtomic } from "../utils/fs.js";
+
+export const USER_CONFIG_FILE = "mini-agent.config.json";
+export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
 
 export type LlmMode = "mock" | "real";
 
@@ -63,8 +66,8 @@ const agentConfigSchema = z.object({
 }).passthrough();
 
 export async function loadAgentConfig(repoPath: string): Promise<AgentConfig> {
-  const configPath = resolveMiniAgentPath(repoPath, "config.json");
-  if (!(await pathExists(configPath))) {
+  const configPath = await findAgentConfigPath(repoPath);
+  if (!configPath) {
     return {
       version: 1,
       repoPath,
@@ -75,7 +78,7 @@ export async function loadAgentConfig(repoPath: string): Promise<AgentConfig> {
   const parsed = agentConfigSchema.safeParse(rawConfig);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
-    throw new Error(`Invalid .mini-agent/config.json${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`);
+    throw new Error(`Invalid ${configPath}${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`);
   }
 
   return parsed.data as AgentConfig;
@@ -92,8 +95,7 @@ export async function initAgentConfig(repoPath: string, input: InitAgentConfigIn
     ...(input.llm ? { llm: normalizeLlmConfig({ ...existing.llm, ...input.llm }) } : {}),
   };
 
-  await ensureDir(resolveMiniAgentPath(repoPath));
-  await writeJsonFileAtomic(resolveMiniAgentPath(repoPath, "config.json"), config);
+  await writeJsonFileAtomic(resolveRepoPath(repoPath, USER_CONFIG_FILE), config);
   return config;
 }
 
@@ -162,4 +164,18 @@ function normalizeLlmConfig(config: LlmConfig): LlmConfig {
   }
 
   return parsed.data as LlmConfig;
+}
+
+async function findAgentConfigPath(repoPath: string): Promise<string | undefined> {
+  const userConfigPath = resolveRepoPath(repoPath, USER_CONFIG_FILE);
+  if (await pathExists(userConfigPath)) {
+    return userConfigPath;
+  }
+
+  const legacyConfigPath = resolveMiniAgentPath(repoPath, "config.json");
+  if (await pathExists(legacyConfigPath)) {
+    return legacyConfigPath;
+  }
+
+  return undefined;
 }

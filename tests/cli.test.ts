@@ -277,7 +277,7 @@ describe("mini-agent CLI", () => {
     }
   });
 
-  it("runs with OpenAICompatibleClient from .mini-agent/config.json without --real", async () => {
+  it("runs with OpenAICompatibleClient from mini-agent.config.json without --real", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
     await fs.writeFile(path.join(tempRoot, "demo.txt"), "demo file\n", "utf8");

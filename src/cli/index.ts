@@ -107,11 +107,11 @@ export function createProgram(): Command {
 
   configCommand
     .command("init")
-    .description("Create or update .mini-agent/config.json")
+    .description("Create or update mini-agent.config.json")
     .option("--mock", "Configure MockLlmClient as the default")
     .option("--real", "Configure OpenAICompatibleClient as the default")
     .option("--base-url <url>", "OpenAI-compatible base URL")
-    .option("--api-key <key>", "OpenAI-compatible API key stored in .mini-agent/config.json")
+    .option("--api-key <key>", "OpenAI-compatible API key stored in mini-agent.config.json")
     .option("--api-key-env <name>", "Environment variable name that stores the API key")
     .option("--model <model>", "OpenAI-compatible model name")
     .option("--temperature <number>", "Model temperature", parseNumber)
@@ -149,7 +149,7 @@ export function createProgram(): Command {
 
   configCommand
     .command("show")
-    .description("Show .mini-agent/config.json with secrets redacted")
+    .description("Show mini-agent.config.json with secrets redacted")
     .option("--raw", "Print raw config including secrets")
     .action(async (options: { raw?: boolean }) => {
       await runJsonAction(async () => {

@@ -5,6 +5,7 @@ dist/
 .mini-agent/
 coverage/
 *.log
+mini-agent.config.json
 backend/.m2/
 backend/target/
 backend/data/

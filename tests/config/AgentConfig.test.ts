@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 describe("AgentConfig", () => {
-  it("loads a minimal config when .mini-agent/config.json does not exist", async () => {
+  it("loads a minimal config when no config file exists", async () => {
     const config = await loadAgentConfig(tempRoot);
 
     expect(config.version).toBe(1);
@@ -28,7 +28,7 @@ describe("AgentConfig", () => {
     expect(config.llm).toBeUndefined();
   });
 
-  it("writes and resolves real-model config from .mini-agent/config.json", async () => {
+  it("writes and resolves real-model config from mini-agent.config.json", async () => {
     await initAgentConfig(tempRoot, {
       llm: {
         mode: "real",
@@ -43,6 +43,7 @@ describe("AgentConfig", () => {
 
     const loaded = await loadAgentConfig(tempRoot);
     const resolved = resolveLlmConfig(loaded);
+    const configFile = await fs.readFile(path.join(tempRoot, "mini-agent.config.json"), "utf8");
 
     expect(resolved).toEqual({
       mode: "real",
@@ -55,6 +56,56 @@ describe("AgentConfig", () => {
         timeoutMs: 30000,
       },
     });
+    expect(configFile).toContain("secret-key");
+  });
+
+  it("loads legacy .mini-agent/config.json when root config is not present", async () => {
+    await fs.mkdir(path.join(tempRoot, ".mini-agent"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, ".mini-agent", "config.json"), JSON.stringify({
+      version: 1,
+      llm: {
+        mode: "real",
+        baseUrl: "https://legacy.example/v1",
+        apiKey: "legacy-key",
+        model: "legacy-model",
+      },
+    }), "utf8");
+
+    const resolved = resolveLlmConfig(await loadAgentConfig(tempRoot));
+
+    expect(resolved).toEqual({
+      mode: "real",
+      openai: {
+        baseUrl: "https://legacy.example/v1",
+        apiKey: "legacy-key",
+        model: "legacy-model",
+      },
+    });
+  });
+
+  it("prefers root config over legacy .mini-agent/config.json", async () => {
+    await fs.mkdir(path.join(tempRoot, ".mini-agent"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, ".mini-agent", "config.json"), JSON.stringify({
+      version: 1,
+      llm: {
+        mode: "real",
+        apiKey: "legacy-key",
+        model: "legacy-model",
+      },
+    }), "utf8");
+    await fs.writeFile(path.join(tempRoot, "mini-agent.config.json"), JSON.stringify({
+      version: 1,
+      llm: {
+        mode: "real",
+        apiKey: "root-key",
+        model: "root-model",
+      },
+    }), "utf8");
+
+    const resolved = resolveLlmConfig(await loadAgentConfig(tempRoot));
+
+    expect(resolved.openai.apiKey).toBe("root-key");
+    expect(resolved.openai.model).toBe("root-model");
   });
 
   it("lets CLI overrides select mock even when config defaults to real", async () => {

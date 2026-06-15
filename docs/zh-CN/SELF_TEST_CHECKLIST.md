@@ -106,18 +106,19 @@ node dist/cli/index.js tool run git_diff '{}'
 ## 4.5 真实模型配置验证
 
 ```bash
-node dist/cli/index.js config init \
-  --real \
-  --base-url "https://api.openai.com/v1" \
-  --api-key "your_api_key" \
-  --model "your_model"
-
+cp mini-agent.config.example.json mini-agent.config.json
 node dist/cli/index.js config show
+```
+
+也可以用命令生成：
+
+```bash
+node dist/cli/index.js config init --real --base-url "https://api.openai.com/v1" --api-key "your_api_key" --model "your_model"
 ```
 
 预期：
 
-- `.mini-agent/config.json` 被创建或更新。
+- `mini-agent.config.json` 被创建或更新。
 - `config show` 中 `apiKey` 显示为 `<redacted>`。
 - 后续 `run` 不带 `--real` 也会默认使用真实模型。
 

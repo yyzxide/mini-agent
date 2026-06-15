@@ -78,28 +78,17 @@ pnpm dev
 
 The CLI can run with `MockLlmClient` for deterministic local demos, but normal coding-agent usage should use a real OpenAI-compatible model.
 
-Recommended local config:
+Recommended local config file:
 
 ```bash
-node dist/cli/index.js config init \
-  --real \
-  --base-url "https://api.openai.com/v1" \
-  --api-key "your_api_key" \
-  --model "your_model"
-
-node dist/cli/index.js config show
-node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+cp mini-agent.config.example.json mini-agent.config.json
 ```
 
-This writes `.mini-agent/config.json` in the current repository. `.mini-agent/` is ignored by git, and `config show` redacts the API key by default.
-
-Example config:
+Edit `mini-agent.config.json`:
 
 ```json
 {
   "version": 1,
-  "repoPath": "/path/to/repo",
-  "createdAt": "2026-06-11T00:00:00.000Z",
   "llm": {
     "mode": "real",
     "baseUrl": "https://api.openai.com/v1",
@@ -110,6 +99,25 @@ Example config:
     "timeoutMs": 60000
   }
 }
+```
+
+Then run:
+
+```bash
+node dist/cli/index.js config show
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+```
+
+`mini-agent.config.json` is ignored by git, and `config show` redacts the API key by default.
+
+You can also generate the file from CLI:
+
+```bash
+node dist/cli/index.js config init \
+  --real \
+  --base-url "https://api.openai.com/v1" \
+  --api-key "your_api_key" \
+  --model "your_model"
 ```
 
 You can avoid storing the key directly by using an environment variable reference:
@@ -140,7 +148,7 @@ MINI_AGENT_MAX_TOKENS=4096
 MINI_AGENT_TIMEOUT_MS=60000
 ```
 
-For real model mode, an API key and model are required, either from `.mini-agent/config.json`, from environment variables, or from CLI overrides where available. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
+For real model mode, an API key and model are required, either from `mini-agent.config.json`, from environment variables, or from CLI overrides where available. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
 
 ## CLI Commands
 
@@ -195,7 +203,7 @@ Interactive mode supports:
 - `/status`: print current git status.
 - `/sessions`: list local sessions.
 
-Any other non-empty input is treated as a coding task and executed through `AgentLoop`. It uses `.mini-agent/config.json` when configured, otherwise it falls back to the mock LLM.
+Any other non-empty input is treated as a coding task and executed through `AgentLoop`. It uses `mini-agent.config.json` when configured, otherwise it falls back to the mock LLM.
 
 ### `mini-agent run "task"`
 
@@ -821,8 +829,8 @@ When a patch is applied with `--session`, the tool writes:
 
 ## Common Errors
 
-- `Missing MINI_AGENT_API_KEY`: set the API key in `.mini-agent/config.json`, set `MINI_AGENT_API_KEY`, or configure `apiKeyEnv`.
-- `Missing MINI_AGENT_MODEL`: set the model in `.mini-agent/config.json`, set `MINI_AGENT_MODEL`, or pass `--model`.
+- `Missing MINI_AGENT_API_KEY`: set the API key in `mini-agent.config.json`, set `MINI_AGENT_API_KEY`, or configure `apiKeyEnv`.
+- `Missing MINI_AGENT_MODEL`: set the model in `mini-agent.config.json`, set `MINI_AGENT_MODEL`, or pass `--model`.
 - `LLM request failed: <status>`: check `MINI_AGENT_BASE_URL`, model name, credentials, and provider compatibility.
 - `LLM response did not include content`: the provider returned no assistant text.
 - `INVALID_AGENT_DECISION`: the model returned JSON that does not match the AgentDecision protocol.

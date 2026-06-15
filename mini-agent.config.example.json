@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "llm": {
+    "mode": "real",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "replace-with-your-api-key",
+    "model": "replace-with-your-model",
+    "temperature": 0.2,
+    "maxTokens": 4096,
+    "timeoutMs": 60000
+  }
+}

@@ -176,7 +176,7 @@ Session 记录面向恢复和审计，Event 记录面向时间线和后端消费
 
 ### 3.8 模型配置
 
-Runner 支持从 `.mini-agent/config.json` 读取默认模型配置：
+Runner 支持从仓库根目录的 `mini-agent.config.json` 读取默认模型配置：
 
 ```json
 {
@@ -193,11 +193,11 @@ Runner 支持从 `.mini-agent/config.json` 读取默认模型配置：
 配置优先级：
 
 1. CLI 参数，例如 `--mock`、`--real`、`--model`、`--base-url`。
-2. 当前仓库 `.mini-agent/config.json`。
+2. 当前仓库 `mini-agent.config.json`。
 3. 环境变量，例如 `MINI_AGENT_API_KEY`、`MINI_AGENT_MODEL`。
 4. 默认 Mock 模式。
 
-`.mini-agent/` 已被 git 忽略，避免 API key 被提交。需要更安全时，可以配置 `apiKeyEnv`，只把环境变量名写入配置文件。
+`mini-agent.config.json` 已被 git 忽略，避免 API key 被提交。需要更安全时，可以配置 `apiKeyEnv`，只把环境变量名写入配置文件。旧版本 `.mini-agent/config.json` 仍作为兼容路径读取，但不再推荐手写到那里。
 
 ## 4. Java Backend
 

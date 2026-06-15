@@ -97,12 +97,12 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js git diff
 如果有 OpenAI-compatible 服务：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js config init \
-  --real \
-  --base-url "https://api.openai.com/v1" \
-  --api-key "your-api-key" \
-  --model "your-model"
+cp /home/sid/miniagent/mini-coding-agent/mini-agent.config.example.json ./mini-agent.config.json
+```
 
+编辑当前仓库的 `mini-agent.config.json`，填入真实 `apiKey` 和 `model` 后运行：
+
+```bash
 node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前项目结构并总结修改入口" --max-steps 8
 ```
 
