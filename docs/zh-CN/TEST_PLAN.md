@@ -127,7 +127,7 @@ P1 通过标准：
 在临时 Git 仓库中执行：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 ```
 
 P2 通过标准：
@@ -314,4 +314,3 @@ P4 通过标准：
 3. 每天结束时生成一份短测试报告。
 4. 每个功能阶段结束后跑 P1/P2/P3 手工回归。
 5. Docker 相关改动必须跑 P4。
-

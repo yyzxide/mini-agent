@@ -91,7 +91,7 @@ cp mini-agent.config.example.json mini-agent.config.json
 
 ```bash
 node dist/cli/index.js config show
-node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
 ```
 
 `mini-agent.config.json` 已被 `.gitignore` 忽略。`config show` 默认会把 API key 显示为 `<redacted>`。

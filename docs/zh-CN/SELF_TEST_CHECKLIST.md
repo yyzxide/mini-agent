@@ -142,7 +142,7 @@ git config user.email "smoke@example.com"
 printf "initial line\n" > demo.txt
 git add demo.txt
 git commit -m "chore: init"
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 git diff
 ```
 
@@ -157,7 +157,7 @@ git diff
 在任意 Git 仓库中：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js command run "echo hello" --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js command run "echo hello"
 ```
 
 预期：
@@ -169,7 +169,7 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js command run "echo h
 危险命令验证：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js command run "sudo ls" --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js command run "sudo ls"
 ```
 
 预期：
@@ -202,7 +202,7 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js patch preview /tmp/
 应用：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js patch apply /tmp/demo.patch --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js patch apply /tmp/demo.patch
 ```
 
 预期：

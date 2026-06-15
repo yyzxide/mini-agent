@@ -12,7 +12,7 @@ class DockerCommandBuilderTest {
     void buildsDockerRunCommandWithLimitsNetworkNoneMountsAndMockRunner() {
         DockerCommandBuilder builder = new DockerCommandBuilder();
 
-        var command = builder.buildCommand(baseRequest(false, true));
+        var command = builder.buildCommand(baseRequest(false));
 
         assertThat(command)
                 .containsSubsequence("docker", "run", "--name", "mini-agent-task-1")
@@ -23,7 +23,8 @@ class DockerCommandBuilderTest {
                 .containsSubsequence("-v", "/tmp/mini-agent:/opt/mini-agent:ro")
                 .containsSubsequence("-w", "/workspace", "mini-coding-agent-sandbox:latest")
                 .containsSubsequence("node", "/opt/mini-agent/dist/cli/index.js", "run", "给 demo.txt 增加 hello")
-                .contains("--mock", "--yes", "--event-stream")
+                .contains("--mock", "--event-stream")
+                .doesNotContain("--yes")
                 .containsSubsequence("--max-steps", "20");
     }
 
@@ -31,12 +32,12 @@ class DockerCommandBuilderTest {
     void buildsRealModelCommandWithoutNetworkNoneWhenEnabled() {
         DockerCommandBuilder builder = new DockerCommandBuilder();
 
-        var command = builder.buildCommand(baseRequest(true, false));
+        var command = builder.buildCommand(baseRequest(true));
 
         assertThat(command).contains("--real").doesNotContain("--mock", "--yes", "--network", "none");
     }
 
-    private DockerRunRequest baseRequest(boolean useRealModel, boolean autoApprove) {
+    private DockerRunRequest baseRequest(boolean useRealModel) {
         return DockerRunRequest.builder()
                 .taskId(1L)
                 .image("mini-coding-agent-sandbox:latest")
@@ -46,7 +47,6 @@ class DockerCommandBuilderTest {
                 .runnerMountPath("/opt/mini-agent")
                 .userGoal("给 demo.txt 增加 hello")
                 .useRealModel(useRealModel)
-                .autoApprove(autoApprove)
                 .maxSteps(20)
                 .cpuLimit("2")
                 .memoryLimit("2g")

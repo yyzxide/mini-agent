@@ -16,7 +16,6 @@ export function TaskCreateForm({ loading = false, onSubmit }: TaskCreateFormProp
       initialValues={{
         executionMode: "DOCKER",
         maxSteps: 20,
-        autoApprove: true,
         useRealModel: false,
       }}
       onFinish={onSubmit}
@@ -50,10 +49,6 @@ export function TaskCreateForm({ loading = false, onSubmit }: TaskCreateFormProp
 
         <Form.Item name="maxSteps" label="Max steps" rules={[{ required: true }]}>
           <InputNumber min={1} max={100} />
-        </Form.Item>
-
-        <Form.Item name="autoApprove" label="Auto approve" valuePropName="checked">
-          <Switch />
         </Form.Item>
 
         <Form.Item name="useRealModel" label="Use real model" valuePropName="checked">

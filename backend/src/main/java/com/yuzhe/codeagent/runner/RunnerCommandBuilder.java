@@ -25,10 +25,6 @@ public class RunnerCommandBuilder {
         command.add(task.getUserGoal());
         command.add(task.getUseRealModel() ? "--real" : "--mock");
 
-        if (Boolean.TRUE.equals(task.getAutoApprove())) {
-            command.add("--yes");
-        }
-
         command.add("--max-steps");
         command.add(String.valueOf(task.getMaxSteps()));
         command.add("--event-stream");

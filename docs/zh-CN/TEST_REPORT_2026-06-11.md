@@ -127,7 +127,7 @@ node dist/cli/index.js git status
 并在临时仓库中跑：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 ```
 
 ## 5. 当前测试覆盖评价
@@ -182,4 +182,3 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo
 - CI 已配置。
 - 测试缺口已明确。
 - 后续可以按 `TEST_PLAN.md` 分层推进。
-

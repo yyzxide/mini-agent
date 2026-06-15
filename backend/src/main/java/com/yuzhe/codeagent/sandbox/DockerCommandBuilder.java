@@ -61,10 +61,6 @@ public class DockerCommandBuilder {
         command.add(request.getUserGoal());
         command.add(request.isUseRealModel() ? "--real" : "--mock");
 
-        if (request.isAutoApprove()) {
-            command.add("--yes");
-        }
-
         command.add("--max-steps");
         command.add(String.valueOf(request.getMaxSteps()));
         command.add("--event-stream");

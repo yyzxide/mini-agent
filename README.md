@@ -30,7 +30,7 @@ Phase 1 through Phase 11 are implemented:
 - Command execution with permission checks, timeout, output capture, and session/event logging.
 - Patch preview/check/apply with git diff generation and session/event logging.
 - AgentLoop, AgentState, AgentDecision, ContextBuilder, RepoScanner, and MockLlmClient.
-- `mini-agent run "demo..." --yes` runs the full mock coding loop: plan, search, read, patch, command, diff, summary.
+- `mini-agent run "demo..."` runs the full mock coding loop: plan, search, read, patch, command, diff, summary.
 - OpenAI-compatible model client, structured AgentDecision parsing, JSON protocol validation, and `--real` CLI mode.
 - Java Spring Boot backend module under `backend/`.
 - Backend task APIs for starting the TypeScript runner, storing stdout/stderr logs, parsing `MINI_AGENT_EVENT` lines, querying task events, reading session JSONL files, and streaming events with SSE.
@@ -105,7 +105,7 @@ Then run:
 
 ```bash
 node dist/cli/index.js config show
-node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改" --yes
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
 ```
 
 `mini-agent.config.json` is ignored by git, and `config show` redacts the API key by default.
@@ -154,10 +154,10 @@ For real model mode, an API key and model are required, either from `mini-agent.
 
 ```bash
 mini-agent
-mini-agent run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+mini-agent run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 mini-agent run "inspect this repo" --real --max-steps 10
-mini-agent run "demo: 给 demo.txt 增加一行 hello" --real --model your_model --yes
-mini-agent run "demo: 给 demo.txt 增加 hello" --mock --yes --event-stream
+mini-agent run "demo: 给 demo.txt 增加一行 hello" --real --model your_model
+mini-agent run "demo: 给 demo.txt 增加 hello" --mock --event-stream
 mini-agent resume <sessionId>
 mini-agent sessions
 mini-agent config init --real --api-key your_api_key --model your_model
@@ -166,10 +166,10 @@ mini-agent session create --title "tool test"
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
 mini-agent diff
-mini-agent command run "echo hello" --yes
+mini-agent command run "echo hello"
 mini-agent command run "mvn test" --session <sessionId>
 mini-agent patch preview fix.patch
-mini-agent patch apply fix.patch --session <sessionId> --yes
+mini-agent patch apply fix.patch --session <sessionId>
 mini-agent tool list
 mini-agent tool run apply_patch '{"patch":"..."}' --session <sessionId>
 mini-agent tool run list_files '{"path":"."}' --session <sessionId>
@@ -210,13 +210,12 @@ Any other non-empty input is treated as a coding task and executed through `Agen
 Runs a one-shot task through `AgentLoop`. With no model config it uses `MockLlmClient`; after `mini-agent config init --real ...`, it uses `OpenAICompatibleClient` by default:
 
 ```bash
-node dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 ```
 
 Options:
 
 - `--session <sessionId>` appends the task to an existing session.
-- `--yes` auto-approves REVIEW and DANGEROUS actions that are not blocked.
 - `--max-steps <number>` overrides the default 20 loop steps.
 - `--mock` selects the deterministic mock LLM path for this run.
 - `--real` selects `OpenAICompatibleClient`.
@@ -249,7 +248,7 @@ node dist/cli/index.js config init \
   --model "your-model"
 
 node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
-node dist/cli/index.js run "demo: 给 demo.txt 增加一行 hello from real model" --yes
+node dist/cli/index.js run "demo: 给 demo.txt 增加一行 hello from real model"
 ```
 
 ### `mini-agent resume <sessionId>`
@@ -285,16 +284,15 @@ Prints `git diff` for the current repository through the `git_diff` tool.
 Runs a shell command through `PermissionManager` and `CommandRunner`, then prints `CommandResult` JSON:
 
 ```bash
-node dist/cli/index.js command run "echo hello" --yes
-node dist/cli/index.js command run "pwd" --cwd "backend" --yes
+node dist/cli/index.js command run "echo hello"
+node dist/cli/index.js command run "pwd" --cwd "backend"
 node dist/cli/index.js command run "mvn test" --session <sessionId>
-node dist/cli/index.js command run "sudo ls" --yes
+node dist/cli/index.js command run "sudo ls"
 ```
 
 Options:
 
 - `--session <sessionId>` records command records and events.
-- `--yes` auto-approves ordinary non-blocked commands.
 - `--timeout <ms>` overrides the default 60000ms timeout.
 - `--cwd <path>` runs from a repository-relative working directory.
 
@@ -315,12 +313,11 @@ Applies a unified diff patch through the `apply_patch` tool:
 
 ```bash
 node dist/cli/index.js patch apply fix.patch
-node dist/cli/index.js patch apply fix.patch --yes
-node dist/cli/index.js patch apply fix.patch --session <sessionId> --yes
-cat fix.patch | node dist/cli/index.js patch apply --yes
+node dist/cli/index.js patch apply fix.patch --session <sessionId>
+cat fix.patch | node dist/cli/index.js patch apply
 ```
 
-`patch apply` previews the patch, asks for REVIEW permission unless `--yes` is passed, runs `git apply --check`, applies the patch with `git apply`, then returns the resulting git diff as JSON.
+`patch apply` previews the patch, runs `git apply --check`, applies the patch with `git apply`, then returns the resulting git diff as JSON. Patch paths are still validated before application.
 
 ### `mini-agent tool list`
 
@@ -493,7 +490,6 @@ curl -s -X POST http://localhost:8080/api/agent/tasks \
     "repoPath": "/absolute/path/to/repo",
     "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
     "maxSteps": 20,
-    "autoApprove": true,
     "useRealModel": false,
     "executionMode": "DOCKER"
   }'
@@ -613,7 +609,7 @@ Complete browser demo:
 4. Go to `Tasks`, then `Create`.
 5. Enter the absolute `repoPath`.
 6. Enter `demo: 给 demo.txt 增加 hello from mini-agent`.
-7. Keep `executionMode` as `DOCKER`, `maxSteps` at `20`, `autoApprove` on, and `useRealModel` off.
+7. Keep `executionMode` as `DOCKER`, `maxSteps` at `20`, and `useRealModel` off.
 8. Submit and watch the task detail page.
 9. Confirm events arrive, logs render, sandbox info appears, and the final diff is available from the copied workspace.
 10. In the Diff tab, use Git Workflow to create a branch, commit, and generate a PR draft.
@@ -717,9 +713,9 @@ Implemented permission levels:
 - `REVIEW`: file-changing tools, require confirmation.
 - `DANGEROUS`: shell commands, require confirmation and risk checks.
 
-`command run` uses `DANGEROUS`. In interactive mode it asks for approval unless `--yes` is passed. In non-interactive auto-approve mode, ordinary commands are allowed, but dangerous commands are still blocked.
+`command run` uses `DANGEROUS`. Ordinary commands run directly through the local permission layer, but dangerous command patterns are still blocked before execution.
 
-`patch apply` uses `REVIEW`. In interactive mode it asks for approval with the patch summary. `--yes` auto-approves patch application, but path safety checks and `git apply --check` still run.
+`patch apply` uses `REVIEW`. The CLI no longer requires a second yes/no confirmation; path safety checks and `git apply --check` still run before any file change.
 
 Blocked command patterns include:
 
@@ -849,7 +845,7 @@ node dist/cli/index.js session events <sessionId>
 
 ## Safety Notes
 
-Read-only tools are allowed automatically. Patch application requires REVIEW permission and command execution requires DANGEROUS permission. `--yes` auto-approves ordinary REVIEW/DANGEROUS actions for non-interactive runs, but blocked command patterns such as `sudo`, `rm -rf /`, `mkfs`, `shutdown`, and `reboot` are still refused.
+Read-only tools are allowed automatically. Patch application and command execution now proceed without an extra yes/no prompt in the CLI, while blocked command patterns such as `sudo`, `rm -rf /`, `mkfs`, `shutdown`, and `reboot` are still refused.
 
 ## Demo
 
@@ -867,7 +863,7 @@ Run the mock agent from this project:
 
 ```bash
 cd /tmp/mini-agent-demo
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js diff
 node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js sessions
 ```

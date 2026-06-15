@@ -41,7 +41,6 @@ const VERSION = "0.1.0";
 
 interface AgentCliOptions {
   session?: string;
-  yes?: boolean;
   maxSteps?: number;
   mock?: boolean;
   real?: boolean;
@@ -78,7 +77,6 @@ export function createProgram(): Command {
     .description("Run a single coding task")
     .argument("<task...>", "Natural language coding task")
     .option("--session <sessionId>", "Session id used for the task")
-    .option("--yes", "Auto-approve patch application and command execution")
     .option("--max-steps <number>", "Maximum agent loop steps", parsePositiveInteger)
     .option("--mock", "Use MockLlmClient for this run")
     .option("--real", "Use OpenAICompatibleClient")
@@ -91,10 +89,7 @@ export function createProgram(): Command {
         throw new Error("Task cannot be empty.");
       }
 
-      const result = await runAgentTask(process.cwd(), task, {
-        ...options,
-        nonInteractive: options.yes === true,
-      });
+      const result = await runAgentTask(process.cwd(), task, options);
 
       if (!result.success) {
         process.exitCode = 1;
@@ -304,12 +299,10 @@ export function createProgram(): Command {
     .description("Run a shell command with permission checks")
     .argument("<command>", "Shell command to run")
     .option("--session <sessionId>", "Session id used for event and record logging")
-    .option("--yes", "Auto-approve non-blocked commands")
     .option("--timeout <ms>", "Command timeout in milliseconds", parsePositiveInteger)
     .option("--cwd <path>", "Working directory relative to the repository root")
     .action(async (command: string, options: {
       session?: string;
-      yes?: boolean;
       timeout?: number;
       cwd?: string;
     }) => {
@@ -321,8 +314,8 @@ export function createProgram(): Command {
           action: "run_command",
           description: "Run a shell command from the local repository.",
           command,
-          autoApprove: options.yes === true,
-          nonInteractive: options.yes === true,
+          autoApprove: true,
+          nonInteractive: true,
         });
 
         if (!permission.allowed) {
@@ -415,8 +408,7 @@ export function createProgram(): Command {
     .description("Apply a unified diff patch")
     .argument("[patchFile]", "Patch file path relative to the repository root")
     .option("--session <sessionId>", "Session id used for event and record logging")
-    .option("--yes", "Auto-approve patch application")
-    .action(async (patchFile: string | undefined, options: { session?: string; yes?: boolean }) => {
+    .action(async (patchFile: string | undefined, options: { session?: string }) => {
       await runJsonAction(async () => {
         const repoPath = process.cwd();
         const patch = await readPatchInput(repoPath, patchFile);
@@ -431,8 +423,8 @@ export function createProgram(): Command {
         const context: ToolContext = {
           repoPath,
           permissionManager: new PermissionManager(),
-          autoApprove: options.yes === true,
-          nonInteractive: options.yes === true,
+          autoApprove: true,
+          nonInteractive: true,
         };
 
         if (stores && options.session) {
@@ -483,6 +475,9 @@ export function createProgram(): Command {
 
         const toolContext: ToolContext = {
           repoPath: process.cwd(),
+          permissionManager: new PermissionManager(),
+          autoApprove: true,
+          nonInteractive: true,
         };
 
         if (options.session && stores) {
@@ -549,7 +544,6 @@ async function startInteractive(repoPath: string): Promise<void> {
       }
 
       await runAgentTask(repoPath, answer, {
-        autoApprove: false,
         nonInteractive: false,
       }, async (message) => await rl.question(message));
     }
@@ -561,7 +555,7 @@ async function startInteractive(repoPath: string): Promise<void> {
 async function runAgentTask(
   repoPath: string,
   userGoal: string,
-  options: AgentCliOptions & { nonInteractive?: boolean; autoApprove?: boolean },
+  options: AgentCliOptions & { nonInteractive?: boolean },
   prompt?: (message: string) => Promise<string>,
 ): Promise<{ success: boolean }> {
   process.stdout.write(`[task] ${userGoal}\n`);
@@ -587,7 +581,7 @@ async function runAgentTask(
     userGoal,
     ...(options.session ? { sessionId: options.session } : {}),
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
-    autoApprove: options.yes === true || options.autoApprove === true,
+    autoApprove: true,
     nonInteractive: options.nonInteractive === true,
   });
 }

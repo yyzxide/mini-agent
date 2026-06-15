@@ -57,7 +57,7 @@ git config user.email "demo@example.com"
 假设项目路径是 `/home/sid/miniagent/mini-coding-agent`：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
 ```
 
 重点观察输出：
@@ -89,7 +89,7 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js git diff
 讲解点：
 
 - Agent 没有直接写文件，而是通过 patch。
-- 命令执行需要权限，`--yes` 是演示时自动审批。
+- 命令执行经过权限层和风险拦截，普通命令不再需要二次确认。
 - session/event 都保存在本地，后续可以被后端读取。
 
 ## 3. 真实模型演示
@@ -139,7 +139,6 @@ Content-Type: application/json
   "repoPath": "/tmp/mini-agent-demo",
   "userGoal": "demo: 给 demo.txt 增加 hello from backend",
   "maxSteps": 20,
-  "autoApprove": true,
   "useRealModel": false,
   "executionMode": "LOCAL"
 }
@@ -185,9 +184,8 @@ http://localhost:5173
 2. repoPath 填 `/tmp/mini-agent-demo`。
 3. userGoal 填 `demo: 给 demo.txt 增加 hello from web console`。
 4. execution mode 选 `LOCAL`。
-5. autoApprove 打开。
-6. 提交任务。
-7. 在任务详情页观察事件、日志、diff、session。
+5. 提交任务。
+6. 在任务详情页观察事件、日志、diff、session。
 
 讲解点：
 
@@ -220,7 +218,6 @@ Content-Type: application/json
   "repoPath": "/tmp/mini-agent-demo",
   "userGoal": "demo: 给 demo.txt 增加 hello from docker sandbox",
   "maxSteps": 20,
-  "autoApprove": true,
   "useRealModel": false,
   "executionMode": "DOCKER"
 }

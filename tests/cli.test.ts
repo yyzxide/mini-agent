@@ -111,7 +111,7 @@ describe("mini-agent CLI", () => {
     process.chdir(tempRoot);
 
     const output = await captureStdout(async () => {
-      await createProgram().parseAsync(["command", "run", "echo hello", "--yes"], { from: "user" });
+      await createProgram().parseAsync(["command", "run", "echo hello"], { from: "user" });
     });
 
     const result = JSON.parse(output) as { success: boolean; stdout: string };
@@ -134,7 +134,6 @@ describe("mini-agent CLI", () => {
         "echo hello",
         "--session",
         session.sessionId,
-        "--yes",
       ], { from: "user" });
     });
 
@@ -162,7 +161,6 @@ describe("mini-agent CLI", () => {
         "echo ok # npm test",
         "--session",
         session.sessionId,
-        "--yes",
       ], { from: "user" });
     });
     await captureStdout(async () => {
@@ -172,7 +170,6 @@ describe("mini-agent CLI", () => {
         "false # npm test",
         "--session",
         session.sessionId,
-        "--yes",
       ], { from: "user" });
     });
 
@@ -199,7 +196,7 @@ describe("mini-agent CLI", () => {
     expect(preview.files[0]?.path).toBe("demo.txt");
 
     const applyOutput = await captureStdout(async () => {
-      await createProgram().parseAsync(["patch", "apply", "fix.patch", "--yes"], { from: "user" });
+      await createProgram().parseAsync(["patch", "apply", "fix.patch"], { from: "user" });
     });
     const applyResult = JSON.parse(applyOutput) as { success: boolean; data?: { applied: boolean } };
     expect(applyResult.success).toBe(true);
@@ -222,7 +219,6 @@ describe("mini-agent CLI", () => {
         "run",
         "demo: 给 demo.txt 增加 hello from mini-agent",
         "--mock",
-        "--yes",
       ], { from: "user" });
     });
 
@@ -265,7 +261,6 @@ describe("mini-agent CLI", () => {
           "https://llm.example/v1",
           "--max-steps",
           "3",
-          "--yes",
         ], { from: "user" });
       });
 
@@ -312,7 +307,6 @@ describe("mini-agent CLI", () => {
         "inspect repository from config",
         "--max-steps",
         "3",
-        "--yes",
       ], { from: "user" });
     });
 

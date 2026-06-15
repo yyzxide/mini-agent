@@ -60,7 +60,6 @@ export interface CreateAgentTaskRequest {
   userGoal: string;
   executionMode: AgentExecutionMode;
   maxSteps: number;
-  autoApprove: boolean;
   useRealModel: boolean;
 }
 

@@ -19,7 +19,7 @@ public class CreateAgentTaskRequest {
     @Positive
     private Integer maxSteps;
 
-    private Boolean autoApprove = Boolean.FALSE;
+    private Boolean autoApprove = Boolean.TRUE;
 
     private Boolean useRealModel = Boolean.FALSE;
 

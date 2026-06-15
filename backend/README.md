@@ -133,7 +133,7 @@ docker run --name mini-agent-task-1 --cpus 2 --memory 2g --network none --rm \
   -v /abs/mini-coding-agent:/opt/mini-agent:ro \
   -w /workspace \
   mini-coding-agent-sandbox:latest \
-  node /opt/mini-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes --max-steps 20 --event-stream
+  node /opt/mini-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --max-steps 20 --event-stream
 ```
 
 `DockerSandboxService` owns container lifecycle: create sandbox DB record, start `docker run`, read stdout/stderr asynchronously, parse `MINI_AGENT_EVENT` lines, stop containers on cancel/timeout, and update both task and sandbox status. By default Docker networking is disabled with `--network none`, CPU/memory limits are applied, the workspace is the only writable mount, and the runner mount is read-only.
@@ -181,7 +181,7 @@ PR drafts contain:
 `RunnerCommandBuilder` starts tasks with a command like:
 
 ```bash
-node ../dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --yes --max-steps 20 --event-stream
+node ../dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --max-steps 20 --event-stream
 ```
 
 `useRealModel: true` switches `--mock` to `--real`. In that mode, the TypeScript runner reads the same OpenAI-compatible environment variables documented in the root README.
@@ -206,7 +206,6 @@ Content-Type: application/json
   "repoPath": "/absolute/path/to/repo",
   "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
   "maxSteps": 20,
-  "autoApprove": true,
   "useRealModel": false,
   "executionMode": "DOCKER"
 }
@@ -295,7 +294,6 @@ curl -s -X POST http://localhost:8080/api/agent/tasks \
     "repoPath": "/home/sid/miniagent/mini-coding-agent/tmp/backend-demo",
     "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
     "maxSteps": 20,
-    "autoApprove": true,
     "useRealModel": false,
     "executionMode": "DOCKER"
   }'
@@ -361,7 +359,7 @@ mvn test
 Covered areas:
 
 - Runner command generation for mock/real modes.
-- `--yes`, `--max-steps`, and `--event-stream` command arguments.
+- Runner command generation for `--max-steps` and `--event-stream`.
 - Structured event parsing and invalid JSON handling.
 - Task creation/status/cancel service behavior.
 - LOCAL/DOCKER execution-mode routing.
