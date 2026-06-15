@@ -28,7 +28,7 @@ public class CodeAgentProperties {
         private String containerWorkdir = "/workspace";
         private String cpuLimit = "2";
         private String memoryLimit = "2g";
-        private boolean networkEnabled = false;
+        private boolean networkEnabled = true;
         private boolean autoRemoveContainer = true;
         private int containerTimeoutSeconds = 600;
         private String runnerMountPath = "/opt/mini-agent";

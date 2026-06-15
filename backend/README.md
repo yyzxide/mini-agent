@@ -91,7 +91,7 @@ code-agent:
     container-workdir: /workspace
     cpu-limit: "2"
     memory-limit: "2g"
-    network-enabled: false
+    network-enabled: true
     auto-remove-container: true
     container-timeout-seconds: 600
     runner-mount-path: /opt/mini-agent
@@ -128,17 +128,17 @@ It copies the submitted repository into `repo/`, keeps `.git`, skips `.mini-agen
 `DockerCommandBuilder` generates a list-form command similar to:
 
 ```bash
-docker run --name mini-agent-task-1 --cpus 2 --memory 2g --network none --rm \
+docker run --name mini-agent-task-1 --cpus 2 --memory 2g --rm \
   -v /abs/backend/data/workspaces/task_1/repo:/workspace \
   -v /abs/mini-coding-agent:/opt/mini-agent:ro \
   -w /workspace \
   mini-coding-agent-sandbox:latest \
-  node /opt/mini-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --max-steps 20 --event-stream
+  node /opt/mini-agent/dist/cli/index.js run "给 demo.txt 增加 hello from mini-agent" --max-steps 20 --event-stream
 ```
 
-`DockerSandboxService` owns container lifecycle: create sandbox DB record, start `docker run`, read stdout/stderr asynchronously, parse `MINI_AGENT_EVENT` lines, stop containers on cancel/timeout, and update both task and sandbox status. By default Docker networking is disabled with `--network none`, CPU/memory limits are applied, the workspace is the only writable mount, and the runner mount is read-only.
+`DockerSandboxService` owns container lifecycle: create sandbox DB record, start `docker run`, read stdout/stderr asynchronously, parse `MINI_AGENT_EVENT` lines, stop containers on cancel/timeout, and update both task and sandbox status. Docker networking is enabled by default so the runner can reach the configured model API; CPU/memory limits are applied, the workspace is the only writable mount, and the runner mount is read-only.
 
-When `useRealModel` is true, the backend passes OpenAI-compatible environment variable names to Docker with `-e`; API key values are not written to the DB or command logs.
+The backend passes OpenAI-compatible environment variable names to Docker with `-e`; API key values are not written to the DB or command logs.
 
 ## Git Workflow
 
@@ -181,10 +181,10 @@ PR drafts contain:
 `RunnerCommandBuilder` starts tasks with a command like:
 
 ```bash
-node ../dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock --max-steps 20 --event-stream
+node ../dist/cli/index.js run "给 demo.txt 增加 hello from mini-agent" --max-steps 20 --event-stream
 ```
 
-`useRealModel: true` switches `--mock` to `--real`. In that mode, the TypeScript runner reads the same OpenAI-compatible environment variables documented in the root README.
+The TypeScript runner reads the same OpenAI-compatible environment variables documented in the root README.
 
 The `--event-stream` flag makes the runner print structured lines:
 
@@ -204,9 +204,8 @@ Content-Type: application/json
 
 {
   "repoPath": "/absolute/path/to/repo",
-  "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
+  "userGoal": "查看当前项目结构并总结可以从哪里开始修改",
   "maxSteps": 20,
-  "useRealModel": false,
   "executionMode": "DOCKER"
 }
 ```
@@ -292,9 +291,8 @@ curl -s -X POST http://localhost:8080/api/agent/tasks \
   -H 'Content-Type: application/json' \
   -d '{
     "repoPath": "/home/sid/miniagent/mini-coding-agent/tmp/backend-demo",
-    "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
+    "userGoal": "查看当前项目结构并总结可以从哪里开始修改",
     "maxSteps": 20,
-    "useRealModel": false,
     "executionMode": "DOCKER"
   }'
 ```
@@ -358,7 +356,6 @@ mvn test
 
 Covered areas:
 
-- Runner command generation for mock/real modes.
 - Runner command generation for `--max-steps` and `--event-stream`.
 - Structured event parsing and invalid JSON handling.
 - Task creation/status/cancel service behavior.

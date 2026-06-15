@@ -108,18 +108,34 @@ describe("AgentConfig", () => {
     expect(resolved.openai.model).toBe("root-model");
   });
 
-  it("lets CLI overrides select mock even when config defaults to real", async () => {
+  it("uses environment variables as real-model fallback values", async () => {
     await initAgentConfig(tempRoot, {
       llm: {
         mode: "real",
-        apiKey: "secret-key",
-        model: "agent-model",
+        baseUrl: "https://llm.example/v1",
       },
     });
 
-    const resolved = resolveLlmConfig(await loadAgentConfig(tempRoot), { mock: true });
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    const oldModel = process.env.MINI_AGENT_MODEL;
+    process.env.MINI_AGENT_API_KEY = "env-key";
+    process.env.MINI_AGENT_MODEL = "env-model";
 
-    expect(resolved.mode).toBe("mock");
+    try {
+      const resolved = resolveLlmConfig(await loadAgentConfig(tempRoot));
+
+      expect(resolved).toEqual({
+        mode: "real",
+        openai: {
+          baseUrl: "https://llm.example/v1",
+          apiKey: "env-key",
+          model: "env-model",
+        },
+      });
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+      restoreEnv("MINI_AGENT_MODEL", oldModel);
+    }
   });
 
   it("redacts API keys before printing config", async () => {
@@ -134,3 +150,11 @@ describe("AgentConfig", () => {
     expect(redactAgentConfig(config).llm?.apiKey).toBe("<redacted>");
   });
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}

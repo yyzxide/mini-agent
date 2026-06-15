@@ -29,9 +29,9 @@ Phase 1 through Phase 11 are implemented:
 - Tool debug runs can be attached to a session with `--session`.
 - Command execution with permission checks, timeout, output capture, and session/event logging.
 - Patch preview/check/apply with git diff generation and session/event logging.
-- AgentLoop, AgentState, AgentDecision, ContextBuilder, RepoScanner, and MockLlmClient.
-- `mini-agent run "demo..."` runs the full mock coding loop: plan, search, read, patch, command, diff, summary.
-- OpenAI-compatible model client, structured AgentDecision parsing, JSON protocol validation, and `--real` CLI mode.
+- AgentLoop, AgentState, AgentDecision, ContextBuilder, RepoScanner, and an OpenAI-compatible model client.
+- `mini-agent run "task..."` runs the real coding loop: plan, search, read, patch, command, diff, summary.
+- Structured AgentDecision parsing and JSON protocol validation for real model output.
 - Java Spring Boot backend module under `backend/`.
 - Backend task APIs for starting the TypeScript runner, storing stdout/stderr logs, parsing `MINI_AGENT_EVENT` lines, querying task events, reading session JSONL files, and streaming events with SSE.
 - React + Vite web console under `frontend/`.
@@ -39,7 +39,7 @@ Phase 1 through Phase 11 are implemented:
 - Docker sandbox execution mode for backend tasks: isolated task workspace, Docker container lifecycle, CPU/memory/network limits, container cancellation, sandbox persistence, and workspace session/event reads.
 - Git Workflow delivery flow: create a task branch, commit final diff, generate a PR title/description draft, expose backend APIs, and operate from the web task detail page.
 
-Later phases will improve real-model planning quality, repair loops, and remote GitHub/GitLab PR creation.
+Later phases will improve planning quality, repair loops, and remote GitHub/GitLab PR creation.
 
 ## Install
 
@@ -76,7 +76,7 @@ pnpm dev
 
 ## Model Configuration
 
-The CLI can run with `MockLlmClient` for deterministic local demos, but normal coding-agent usage should use a real OpenAI-compatible model.
+The CLI always uses a real OpenAI-compatible model. Configure an API key and model before running coding tasks.
 
 Recommended local config file:
 
@@ -114,7 +114,6 @@ You can also generate the file from CLI:
 
 ```bash
 node dist/cli/index.js config init \
-  --real \
   --base-url "https://api.openai.com/v1" \
   --api-key "your_api_key" \
   --model "your_model"
@@ -124,17 +123,16 @@ You can avoid storing the key directly by using an environment variable referenc
 
 ```bash
 node dist/cli/index.js config init \
-  --real \
   --base-url "https://api.openai.com/v1" \
   --api-key-env MINI_AGENT_API_KEY \
   --model "your_model"
 ```
 
-CLI flags override config for one run:
+CLI flags can override model endpoint settings for one run:
 
 ```bash
-node dist/cli/index.js run "demo task" --mock
-node dist/cli/index.js run "demo task" --real --model "another_model"
+node dist/cli/index.js run "inspect this repository" --model "another_model"
+node dist/cli/index.js run "inspect this repository" --base-url "https://llm.example/v1"
 ```
 
 Environment variables are still supported as a fallback:
@@ -148,19 +146,18 @@ MINI_AGENT_MAX_TOKENS=4096
 MINI_AGENT_TIMEOUT_MS=60000
 ```
 
-For real model mode, an API key and model are required, either from `mini-agent.config.json`, from environment variables, or from CLI overrides where available. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
+An API key and model are required, either from `mini-agent.config.json`, from environment variables, or from CLI overrides where available. `MINI_AGENT_BASE_URL` defaults to `https://api.openai.com/v1`; the remaining values are optional defaults.
 
 ## CLI Commands
 
 ```bash
 mini-agent
-mini-agent run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
-mini-agent run "inspect this repo" --real --max-steps 10
-mini-agent run "demo: 给 demo.txt 增加一行 hello" --real --model your_model
-mini-agent run "demo: 给 demo.txt 增加 hello" --mock --event-stream
+mini-agent run "inspect this repo" --max-steps 10
+mini-agent run "给 demo.txt 增加一行 hello" --model your_model
+mini-agent run "给 demo.txt 增加 hello" --event-stream
 mini-agent resume <sessionId>
 mini-agent sessions
-mini-agent config init --real --api-key your_api_key --model your_model
+mini-agent config init --api-key your_api_key --model your_model
 mini-agent config show
 mini-agent session create --title "tool test"
 mini-agent session show <sessionId>
@@ -203,22 +200,20 @@ Interactive mode supports:
 - `/status`: print current git status.
 - `/sessions`: list local sessions.
 
-Any other non-empty input is treated as a coding task and executed through `AgentLoop`. It uses `mini-agent.config.json` when configured, otherwise it falls back to the mock LLM.
+Any other non-empty input is treated as a coding task and executed through `AgentLoop`. It requires model credentials from `mini-agent.config.json` or environment variables.
 
 ### `mini-agent run "task"`
 
-Runs a one-shot task through `AgentLoop`. With no model config it uses `MockLlmClient`; after `mini-agent config init --real ...`, it uses `OpenAICompatibleClient` by default:
+Runs a one-shot task through `AgentLoop` and the OpenAI-compatible model client:
 
 ```bash
-node dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
 ```
 
 Options:
 
 - `--session <sessionId>` appends the task to an existing session.
 - `--max-steps <number>` overrides the default 20 loop steps.
-- `--mock` selects the deterministic mock LLM path for this run.
-- `--real` selects `OpenAICompatibleClient`.
 - `--model <model>` overrides configured model or `MINI_AGENT_MODEL`.
 - `--base-url <url>` overrides configured base URL or `MINI_AGENT_BASE_URL`.
 - `--event-stream` prints `MINI_AGENT_EVENT {...}` lines for the Java backend while still writing normal session/event JSONL files.
@@ -226,7 +221,7 @@ Options:
 Typical output:
 
 ```text
-[task] demo: 给 demo.txt 增加 hello from mini-agent
+[task] 给 demo.txt 增加 hello from mini-agent
 [session] 7a5f...
 [plan] 我会先搜索 demo 相关内容，读取 demo.txt，然后生成 patch、运行验证命令并查看 diff。
 [tool] search_code
@@ -242,13 +237,12 @@ Real model example:
 
 ```bash
 node dist/cli/index.js config init \
-  --real \
   --base-url "https://api.openai.com/v1" \
   --api-key "your-api-key" \
   --model "your-model"
 
 node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
-node dist/cli/index.js run "demo: 给 demo.txt 增加一行 hello from real model"
+node dist/cli/index.js run "给 demo.txt 增加一行 hello"
 ```
 
 ### `mini-agent resume <sessionId>`
@@ -384,12 +378,6 @@ When a tool is executed with `--session`, the registry writes:
 6. Writes session records and events throughout the run.
 7. Stops at `FINAL`, `FAILED`, or the max step limit.
 
-`MockLlmClient` has deterministic flows:
-
-- Tasks containing `demo` or `hello`: `PLAN -> search_code -> read_file -> apply_patch -> echo test passed -> git_diff -> FINAL`.
-- Tasks containing `upload`: search for `upload`, read the first match when available, then summarize.
-- Other tasks: inspect with `git_status`, `list_files`, and `git_diff`.
-
 `ContextBuilder` keeps the prompt bounded, with a default maximum of 30000 characters.
 
 `OpenAICompatibleClient` calls an OpenAI-compatible `/chat/completions` endpoint with:
@@ -445,7 +433,7 @@ code-agent:
     container-workdir: /workspace
     cpu-limit: "2"
     memory-limit: "2g"
-    network-enabled: false
+    network-enabled: true
     auto-remove-container: true
     container-timeout-seconds: 600
     runner-mount-path: /opt/mini-agent
@@ -488,9 +476,8 @@ curl -s -X POST http://localhost:8080/api/agent/tasks \
   -H 'Content-Type: application/json' \
   -d '{
     "repoPath": "/absolute/path/to/repo",
-    "userGoal": "demo: 给 demo.txt 增加 hello from mini-agent",
+    "userGoal": "查看当前项目结构并总结可以从哪里开始修改",
     "maxSteps": 20,
-    "useRealModel": false,
     "executionMode": "DOCKER"
   }'
 ```
@@ -608,8 +595,8 @@ Complete browser demo:
 3. Open `http://localhost:5173`.
 4. Go to `Tasks`, then `Create`.
 5. Enter the absolute `repoPath`.
-6. Enter `demo: 给 demo.txt 增加 hello from mini-agent`.
-7. Keep `executionMode` as `DOCKER`, `maxSteps` at `20`, and `useRealModel` off.
+6. Enter a real coding task, for example `查看当前项目结构并总结可以从哪里开始修改`.
+7. Keep `executionMode` as `DOCKER` and `maxSteps` at `20`.
 8. Submit and watch the task detail page.
 9. Confirm events arrive, logs render, sandbox info appears, and the final diff is available from the copied workspace.
 10. In the Diff tab, use Git Workflow to create a branch, commit, and generate a PR draft.
@@ -819,7 +806,7 @@ When a patch is applied with `--session`, the tool writes:
 3. JSONL session and event stores.
 4. Permission manager and command runner.
 5. Patch manager and `apply_patch`.
-6. Agent loop, state, decisions, planner, and mock LLM.
+6. Agent loop, state, decisions, planner, and real-model client.
 7. OpenAI-compatible real-model client and decision parser.
 8. Expanded repair loops and end-to-end UX polish.
 
@@ -859,11 +846,11 @@ printf "demo file\n" > demo.txt
 git add demo.txt
 ```
 
-Run the mock agent from this project:
+Run the real agent from this project after configuring `mini-agent.config.json` or environment variables:
 
 ```bash
 cd /tmp/mini-agent-demo
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "给 demo.txt 增加 hello from mini-agent"
 node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js diff
 node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js sessions
 ```

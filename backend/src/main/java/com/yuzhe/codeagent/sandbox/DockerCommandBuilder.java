@@ -39,14 +39,12 @@ public class DockerCommandBuilder {
             command.add("--rm");
         }
 
-        if (request.isUseRealModel()) {
-            MODEL_ENV_KEYS.forEach(key -> {
-                if (System.getenv(key) != null) {
-                    command.add("-e");
-                    command.add(key);
-                }
-            });
-        }
+        MODEL_ENV_KEYS.forEach(key -> {
+            if (System.getenv(key) != null) {
+                command.add("-e");
+                command.add(key);
+            }
+        });
 
         command.add("-v");
         command.add(toAbsolutePath(request.getRepoWorkspacePath()) + ":" + request.getContainerWorkdir());
@@ -59,7 +57,6 @@ public class DockerCommandBuilder {
         command.add(request.getRunnerMountPath() + "/dist/cli/index.js");
         command.add("run");
         command.add(request.getUserGoal());
-        command.add(request.isUseRealModel() ? "--real" : "--mock");
 
         command.add("--max-steps");
         command.add(String.valueOf(request.getMaxSteps()));

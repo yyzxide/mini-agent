@@ -52,12 +52,18 @@ git config user.name "Demo User"
 git config user.email "demo@example.com"
 ```
 
-### 2.2 执行 Mock Agent 任务
+### 2.2 配置真实模型并执行 Agent 任务
 
 假设项目路径是 `/home/sid/miniagent/mini-coding-agent`：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+cp /home/sid/miniagent/mini-coding-agent/mini-agent.config.example.json ./mini-agent.config.json
+```
+
+编辑当前仓库的 `mini-agent.config.json`，填入真实 `apiKey` 和 `model`，然后先跑只读任务：
+
+```bash
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 8
 ```
 
 重点观察输出：
@@ -65,8 +71,8 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo
 - `[plan]`
 - `[tool] search_code`
 - `[tool] read_file`
-- `[patch]`
-- `[command]`
+- `[patch]`，当模型决定修改文件时出现
+- `[command]`，当模型决定运行验证命令时出现
 - `[diff]`
 - `[summary]`
 
@@ -92,23 +98,13 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js git diff
 - 命令执行经过权限层和风险拦截，普通命令不再需要二次确认。
 - session/event 都保存在本地，后续可以被后端读取。
 
-## 3. 真实模型演示
-
-如果有 OpenAI-compatible 服务：
+如果确认只读任务稳定，再演示一个小修改任务：
 
 ```bash
-cp /home/sid/miniagent/mini-coding-agent/mini-agent.config.example.json ./mini-agent.config.json
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "给 demo.txt 增加一行 hello from mini-agent" --max-steps 12
 ```
 
-编辑当前仓库的 `mini-agent.config.json`，填入真实 `apiKey` 和 `model` 后运行：
-
-```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前项目结构并总结修改入口" --max-steps 8
-```
-
-建议现场先用只读任务，不要一上来让真实模型修改大仓库。
-
-## 4. 后端演示
+## 3. 后端演示
 
 在项目根目录先构建 Runner：
 
@@ -137,9 +133,8 @@ Content-Type: application/json
 
 {
   "repoPath": "/tmp/mini-agent-demo",
-  "userGoal": "demo: 给 demo.txt 增加 hello from backend",
+  "userGoal": "查看当前仓库结构并总结可以从哪里开始修改",
   "maxSteps": 20,
-  "useRealModel": false,
   "executionMode": "LOCAL"
 }
 ```
@@ -182,7 +177,7 @@ http://localhost:5173
 
 1. 进入创建任务页。
 2. repoPath 填 `/tmp/mini-agent-demo`。
-3. userGoal 填 `demo: 给 demo.txt 增加 hello from web console`。
+3. userGoal 填 `查看当前仓库结构并总结可以从哪里开始修改`。
 4. execution mode 选 `LOCAL`。
 5. 提交任务。
 6. 在任务详情页观察事件、日志、diff、session。
@@ -193,7 +188,7 @@ http://localhost:5173
 - SSE 断开会回退轮询。
 - 详情页同时展示过程数据和最终交付数据。
 
-## 6. Docker 沙箱演示
+## 5. Docker 沙箱演示
 
 先构建镜像：
 
@@ -216,9 +211,8 @@ Content-Type: application/json
 
 {
   "repoPath": "/tmp/mini-agent-demo",
-  "userGoal": "demo: 给 demo.txt 增加 hello from docker sandbox",
+  "userGoal": "查看当前仓库结构并总结可以从哪里开始修改",
   "maxSteps": 20,
-  "useRealModel": false,
   "executionMode": "DOCKER"
 }
 ```
@@ -233,7 +227,7 @@ GET /api/agent/tasks/{id}/sandbox
 
 - Docker 模式复制仓库到 `backend/data/workspaces/task_<id>/repo`。
 - Agent 修改的是 workspace 副本，不是原始仓库。
-- 容器默认无网络，runner 只读挂载。
+- 容器默认联网以访问模型端点，runner 只读挂载；需要更强隔离时可以关闭 Docker 网络。
 
 如果 Docker 镜像拉取慢或环境不可用，可以直接说明：Docker 部分已有命令构造、workspace 复制和服务测试，现场演示切回 LOCAL。
 

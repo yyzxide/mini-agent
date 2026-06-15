@@ -10,7 +10,6 @@ import type { AgentProgressEvent } from "../../src/agent/AgentLoop.js";
 import { CommandRunner } from "../../src/command/CommandRunner.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
 import type { LlmClient, LlmInput } from "../../src/llm/LlmClient.js";
-import { MockLlmClient } from "../../src/llm/MockLlmClient.js";
 import { PatchManager } from "../../src/patch/PatchManager.js";
 import { PermissionManager } from "../../src/permission/PermissionManager.js";
 import { EventStore } from "../../src/session/EventStore.js";
@@ -34,7 +33,7 @@ afterEach(async () => {
 });
 
 describe("AgentLoop", () => {
-  it("runs the complete mock demo flow and records session data", async () => {
+  it("runs a complete scripted model flow and records session data", async () => {
     const progress: AgentProgressEvent[] = [];
     const sessionStore = new SessionStore({ repoPath });
     const eventStore = new EventStore({ repoPath });
@@ -47,7 +46,7 @@ describe("AgentLoop", () => {
     });
 
     const result = await loop.run({
-      userGoal: "demo: give demo.txt hello from mini-agent",
+      userGoal: "give demo.txt hello from mini-agent",
       autoApprove: true,
       nonInteractive: true,
     });
@@ -240,7 +239,7 @@ function createLoop(options: {
 
   return new AgentLoop({
     repoPath,
-    llmClient: options.llmClient ?? new MockLlmClient(),
+    llmClient: options.llmClient ?? new SequenceLlmClient(scriptedDemoDecisions()),
     toolRegistry: createDefaultToolRegistry(),
     sessionStore,
     eventStore,
@@ -267,6 +266,53 @@ class SequenceLlmClient implements LlmClient {
       error: "No decision configured",
     };
   }
+}
+
+function scriptedDemoDecisions(): AgentDecision[] {
+  return [
+    {
+      type: "PLAN",
+      message: "Search demo.txt, apply a patch, run a verification command, then inspect diff.",
+    },
+    {
+      type: "TOOL_CALL",
+      toolName: "search_code",
+      input: { query: "demo", path: ".", maxResults: 20 },
+    },
+    {
+      type: "TOOL_CALL",
+      toolName: "read_file",
+      input: { path: "demo.txt", maxLines: 300 },
+    },
+    {
+      type: "APPLY_PATCH",
+      description: "Add hello from mini-agent to demo.txt",
+      patch: [
+        "diff --git a/demo.txt b/demo.txt",
+        "--- a/demo.txt",
+        "+++ b/demo.txt",
+        "@@ -1 +1,2 @@",
+        " demo file",
+        "+hello from mini-agent",
+        "",
+      ].join("\n"),
+    },
+    {
+      type: "RUN_COMMAND",
+      command: "echo test passed",
+      description: "Run a lightweight verification command",
+    },
+    {
+      type: "TOOL_CALL",
+      toolName: "git_diff",
+      input: {},
+    },
+    {
+      type: "FINAL",
+      success: true,
+      summary: "Updated demo.txt and verified the change.",
+    },
+  ];
 }
 
 function recordTypes(records: SessionRecord[]): string[] {

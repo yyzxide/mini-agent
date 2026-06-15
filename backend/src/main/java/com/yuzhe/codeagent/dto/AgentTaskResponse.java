@@ -23,8 +23,6 @@ public class AgentTaskResponse {
     private String sessionId;
     private AgentTaskStatus status;
     private Integer maxSteps;
-    private Boolean autoApprove;
-    private Boolean useRealModel;
     private Long runnerPid;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
@@ -52,8 +50,6 @@ public class AgentTaskResponse {
                 .sessionId(task.getSessionId())
                 .status(task.getStatus())
                 .maxSteps(task.getMaxSteps())
-                .autoApprove(task.getAutoApprove())
-                .useRealModel(task.getUseRealModel())
                 .runnerPid(task.getRunnerPid())
                 .startedAt(task.getStartedAt())
                 .finishedAt(task.getFinishedAt())

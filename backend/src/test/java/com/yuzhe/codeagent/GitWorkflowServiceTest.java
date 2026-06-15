@@ -157,8 +157,6 @@ class GitWorkflowServiceTest {
         task.setUserGoal("demo: update demo file");
         task.setStatus(AgentTaskStatus.COMPLETED);
         task.setMaxSteps(20);
-        task.setAutoApprove(true);
-        task.setUseRealModel(false);
         task.setFinalSummary("tests passed");
         return task;
     }

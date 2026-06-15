@@ -210,7 +210,6 @@ class AgentTaskServiceTest {
         CreateAgentTaskRequest request = new CreateAgentTaskRequest();
         request.setRepoPath(repo.toString());
         request.setUserGoal("demo");
-        request.setAutoApprove(true);
         request.setExecutionMode(executionMode);
         return request;
     }
@@ -232,8 +231,6 @@ class AgentTaskServiceTest {
         task.setUserGoal("demo");
         task.setStatus(AgentTaskStatus.RUNNING);
         task.setMaxSteps(20);
-        task.setAutoApprove(true);
-        task.setUseRealModel(false);
         return task;
     }
 }

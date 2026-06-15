@@ -10,8 +10,6 @@ CREATE TABLE IF NOT EXISTS agent_task (
   session_id VARCHAR(128),
   status VARCHAR(32) NOT NULL,
   max_steps INT NOT NULL,
-  auto_approve BOOLEAN NOT NULL,
-  use_real_model BOOLEAN NOT NULL,
   runner_pid BIGINT,
   started_at TIMESTAMP,
   finished_at TIMESTAMP,

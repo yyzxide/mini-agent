@@ -23,7 +23,6 @@ public class RunnerCommandBuilder {
         command.add(runnerPath.toString());
         command.add("run");
         command.add(task.getUserGoal());
-        command.add(task.getUseRealModel() ? "--real" : "--mock");
 
         command.add("--max-steps");
         command.add(String.valueOf(task.getMaxSteps()));

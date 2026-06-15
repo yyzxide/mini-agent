@@ -4,7 +4,7 @@ import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJ
 export const USER_CONFIG_FILE = "mini-agent.config.json";
 export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
 
-export type LlmMode = "mock" | "real";
+export type LlmMode = "real";
 
 export interface LlmConfig {
   mode?: LlmMode | undefined;
@@ -29,8 +29,6 @@ export interface InitAgentConfigInput {
 }
 
 export interface LlmCliOverrides {
-  mock?: boolean | undefined;
-  real?: boolean | undefined;
   baseUrl?: string | undefined;
   model?: string | undefined;
 }
@@ -48,7 +46,7 @@ export interface ResolvedLlmConfig {
 }
 
 const llmConfigSchema = z.object({
-  mode: z.enum(["mock", "real"]).optional(),
+  mode: z.literal("real").optional(),
   baseUrl: z.string().trim().min(1).optional(),
   apiKey: z.string().min(1).optional(),
   apiKeyEnv: z.string().trim().min(1).optional(),
@@ -100,17 +98,12 @@ export async function initAgentConfig(repoPath: string, input: InitAgentConfigIn
 }
 
 export function resolveLlmConfig(config: AgentConfig, overrides: LlmCliOverrides = {}): ResolvedLlmConfig {
-  if (overrides.mock && overrides.real) {
-    throw new Error("Choose either --mock or --real, not both.");
-  }
-
   const configured = config.llm ?? {};
-  const mode = overrides.mock ? "mock" : overrides.real ? "real" : configured.mode ?? "mock";
   const apiKeyFromConfiguredEnv = configured.apiKeyEnv ? process.env[configured.apiKeyEnv] : undefined;
   const openai: ResolvedLlmConfig["openai"] = {};
-  const baseUrl = overrides.baseUrl ?? configured.baseUrl;
-  const apiKey = configured.apiKey ?? apiKeyFromConfiguredEnv;
-  const model = overrides.model ?? configured.model;
+  const baseUrl = overrides.baseUrl ?? configured.baseUrl ?? process.env.MINI_AGENT_BASE_URL;
+  const apiKey = configured.apiKey ?? apiKeyFromConfiguredEnv ?? process.env.MINI_AGENT_API_KEY;
+  const model = overrides.model ?? configured.model ?? process.env.MINI_AGENT_MODEL;
 
   if (baseUrl) {
     openai.baseUrl = baseUrl;
@@ -137,7 +130,7 @@ export function resolveLlmConfig(config: AgentConfig, overrides: LlmCliOverrides
   }
 
   return {
-    mode,
+    mode: "real",
     openai,
   };
 }

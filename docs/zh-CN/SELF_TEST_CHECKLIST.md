@@ -113,22 +113,16 @@ node dist/cli/index.js config show
 也可以用命令生成：
 
 ```bash
-node dist/cli/index.js config init --real --base-url "https://api.openai.com/v1" --api-key "your_api_key" --model "your_model"
+node dist/cli/index.js config init --base-url "https://api.openai.com/v1" --api-key "your_api_key" --model "your_model"
 ```
 
 预期：
 
 - `mini-agent.config.json` 被创建或更新。
 - `config show` 中 `apiKey` 显示为 `<redacted>`。
-- 后续 `run` 不带 `--real` 也会默认使用真实模型。
+- 后续 `run` 默认使用真实模型。
 
-临时切回 Mock：
-
-```bash
-node dist/cli/index.js run "demo task" --mock
-```
-
-## 5. Mock Agent 闭环验证
+## 5. 真实 API Agent 冒烟验证
 
 建议在临时仓库里验证，避免污染项目仓库：
 
@@ -142,7 +136,7 @@ git config user.email "smoke@example.com"
 printf "initial line\n" > demo.txt
 git add demo.txt
 git commit -m "chore: init"
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 6
 git diff
 ```
 
@@ -314,5 +308,5 @@ chore: ...
 - 能解释为什么要 ToolRegistry。
 - 能解释 session/event 的作用。
 - 能说明 Docker 沙箱边界和不足。
-- 能现场跑 CLI mock demo。
+- 能现场跑 CLI 真实 API 冒烟任务。
 - 能承认当前真实模型质量和生产安全还有提升空间。

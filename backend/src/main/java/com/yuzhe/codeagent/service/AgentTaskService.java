@@ -77,8 +77,6 @@ public class AgentTaskService {
         task.setUserGoal(request.getUserGoal());
         task.setStatus(AgentTaskStatus.CREATED);
         task.setMaxSteps(request.getMaxSteps() == null ? properties.getDefaultMaxSteps() : request.getMaxSteps());
-        task.setAutoApprove(Boolean.TRUE);
-        task.setUseRealModel(Boolean.TRUE.equals(request.getUseRealModel()));
 
         AgentTask saved = taskRepository.save(task);
         try {

@@ -60,12 +60,6 @@ public class AgentTask {
     @Column(name = "max_steps", nullable = false)
     private Integer maxSteps;
 
-    @Column(name = "auto_approve", nullable = false)
-    private Boolean autoApprove;
-
-    @Column(name = "use_real_model", nullable = false)
-    private Boolean useRealModel;
-
     @Column(name = "runner_pid")
     private Long runnerPid;
 

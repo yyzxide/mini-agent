@@ -88,8 +88,6 @@ class SessionAndEventReadServiceTest {
         task.setUserGoal("demo");
         task.setStatus(AgentTaskStatus.COMPLETED);
         task.setMaxSteps(20);
-        task.setAutoApprove(true);
-        task.setUseRealModel(false);
 
         assertThat(sessionReadService.readSessionRecords(task, "s1")).hasSize(1);
         assertThat(eventReadService.readEvents(task, "s1")).hasSize(1);

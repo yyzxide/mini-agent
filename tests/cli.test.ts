@@ -75,7 +75,6 @@ describe("mini-agent CLI", () => {
       await createProgram().parseAsync([
         "config",
         "init",
-        "--real",
         "--base-url",
         "https://llm.example/v1",
         "--api-key",
@@ -208,19 +207,32 @@ describe("mini-agent CLI", () => {
     expect(diffOutput).toContain("+world");
   });
 
-  it("runs the mock agent demo flow from the CLI", async () => {
+  it("runs an agent flow through the OpenAI-compatible client from the CLI", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
     await fs.writeFile(path.join(tempRoot, "demo.txt"), "demo file\n", "utf8");
     await execFileAsync("git", ["add", "demo.txt"], { cwd: tempRoot });
 
-    const output = await captureStdout(async () => {
-      await createProgram().parseAsync([
-        "run",
-        "demo: 给 demo.txt 增加 hello from mini-agent",
-        "--mock",
-      ], { from: "user" });
-    });
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = stubDecisionResponses(scriptedDemoDecisionResponses());
+    vi.stubGlobal("fetch", fetchMock);
+
+    let output = "";
+    try {
+      output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "给 demo.txt 增加 hello from mini-agent",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
 
     expect(output).toContain("[session]");
     expect(output).toContain("[plan]");
@@ -229,10 +241,11 @@ describe("mini-agent CLI", () => {
     expect(output).toContain("[patch]");
     expect(output).toContain("[command] echo test passed");
     expect(output).toContain("[summary]");
+    expect(fetchMock).toHaveBeenCalled();
     await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toContain("hello from mini-agent");
   });
 
-  it("runs with OpenAICompatibleClient when --real is passed", async () => {
+  it("runs with OpenAICompatibleClient by default", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
     await fs.writeFile(path.join(tempRoot, "demo.txt"), "demo file\n", "utf8");
@@ -254,7 +267,6 @@ describe("mini-agent CLI", () => {
         await createProgram().parseAsync([
           "run",
           "inspect repository",
-          "--real",
           "--model",
           "test-model",
           "--base-url",
@@ -272,7 +284,7 @@ describe("mini-agent CLI", () => {
     }
   });
 
-  it("runs with OpenAICompatibleClient from mini-agent.config.json without --real", async () => {
+  it("runs with OpenAICompatibleClient from mini-agent.config.json", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
     await fs.writeFile(path.join(tempRoot, "demo.txt"), "demo file\n", "utf8");
@@ -282,7 +294,6 @@ describe("mini-agent CLI", () => {
       await createProgram().parseAsync([
         "config",
         "init",
-        "--real",
         "--base-url",
         "https://llm.example/v1",
         "--api-key",
@@ -348,6 +359,36 @@ function modifyDemoPatch(): string {
     "+world",
     "",
   ].join("\n");
+}
+
+function scriptedDemoDecisionResponses(): string[] {
+  return [
+    "{\"type\":\"PLAN\",\"message\":\"Inspect demo.txt and prepare a patch\"}",
+    "{\"type\":\"TOOL_CALL\",\"toolName\":\"search_code\",\"input\":{\"query\":\"demo\",\"path\":\".\",\"maxResults\":20}}",
+    "{\"type\":\"TOOL_CALL\",\"toolName\":\"read_file\",\"input\":{\"path\":\"demo.txt\",\"maxLines\":300}}",
+    JSON.stringify({
+      type: "APPLY_PATCH",
+      description: "Add hello from mini-agent to demo.txt",
+      patch: [
+        "diff --git a/demo.txt b/demo.txt",
+        "--- a/demo.txt",
+        "+++ b/demo.txt",
+        "@@ -1 +1,2 @@",
+        " demo file",
+        "+hello from mini-agent",
+        "",
+      ].join("\n"),
+    }),
+    "{\"type\":\"RUN_COMMAND\",\"command\":\"echo test passed\",\"description\":\"Run a lightweight verification command\"}",
+    "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
+    "{\"type\":\"FINAL\",\"summary\":\"Updated demo.txt and verified the change\",\"success\":true}",
+  ];
+}
+
+function stubDecisionResponses(responses: string[]) {
+  return vi.fn(async () => new Response(JSON.stringify({
+    choices: [{ message: { content: responses.shift() ?? responses[responses.length - 1] } }],
+  }), { status: 200 }));
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

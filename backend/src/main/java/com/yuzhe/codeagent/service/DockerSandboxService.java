@@ -164,7 +164,6 @@ public class DockerSandboxService {
                 .runnerHostPath(properties.getSandbox().getRunnerHostPath())
                 .runnerMountPath(properties.getSandbox().getRunnerMountPath())
                 .userGoal(task.getUserGoal())
-                .useRealModel(Boolean.TRUE.equals(task.getUseRealModel()))
                 .maxSteps(task.getMaxSteps())
                 .cpuLimit(sandbox.getCpuLimit())
                 .memoryLimit(sandbox.getMemoryLimit())

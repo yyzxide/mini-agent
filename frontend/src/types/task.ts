@@ -43,8 +43,6 @@ export interface AgentTask {
   sessionId?: string;
   status: AgentTaskStatus;
   maxSteps: number;
-  autoApprove: boolean;
-  useRealModel: boolean;
   runnerPid?: number;
   startedAt?: string;
   finishedAt?: string;
@@ -60,7 +58,6 @@ export interface CreateAgentTaskRequest {
   userGoal: string;
   executionMode: AgentExecutionMode;
   maxSteps: number;
-  useRealModel: boolean;
 }
 
 export interface GitWorkflow {

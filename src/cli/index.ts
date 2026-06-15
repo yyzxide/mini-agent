@@ -18,7 +18,6 @@ import {
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
 import type { LlmClient } from "../llm/LlmClient.js";
-import { MockLlmClient } from "../llm/MockLlmClient.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
@@ -42,16 +41,12 @@ const VERSION = "0.1.0";
 interface AgentCliOptions {
   session?: string;
   maxSteps?: number;
-  mock?: boolean;
-  real?: boolean;
   model?: string;
   baseUrl?: string;
   eventStream?: boolean;
 }
 
 interface ConfigInitOptions {
-  mock?: boolean;
-  real?: boolean;
   baseUrl?: string;
   apiKey?: string;
   apiKeyEnv?: string;
@@ -78,8 +73,6 @@ export function createProgram(): Command {
     .argument("<task...>", "Natural language coding task")
     .option("--session <sessionId>", "Session id used for the task")
     .option("--max-steps <number>", "Maximum agent loop steps", parsePositiveInteger)
-    .option("--mock", "Use MockLlmClient for this run")
-    .option("--real", "Use OpenAICompatibleClient")
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for backend integrations")
@@ -103,8 +96,6 @@ export function createProgram(): Command {
   configCommand
     .command("init")
     .description("Create or update mini-agent.config.json")
-    .option("--mock", "Configure MockLlmClient as the default")
-    .option("--real", "Configure OpenAICompatibleClient as the default")
     .option("--base-url <url>", "OpenAI-compatible base URL")
     .option("--api-key <key>", "OpenAI-compatible API key stored in mini-agent.config.json")
     .option("--api-key-env <name>", "Environment variable name that stores the API key")
@@ -114,21 +105,10 @@ export function createProgram(): Command {
     .option("--timeout-ms <number>", "LLM request timeout in milliseconds", parsePositiveInteger)
     .action(async (options: ConfigInitOptions) => {
       await runJsonAction(async () => {
-        if (options.mock && options.real) {
-          throw new Error("Choose either --mock or --real, not both.");
-        }
-
-        const hasRealConfig = options.real === true
-          || Boolean(options.apiKey)
-          || Boolean(options.apiKeyEnv)
-          || Boolean(options.model)
-          || Boolean(options.baseUrl);
-
-        const mode = options.mock ? "mock" : hasRealConfig ? "real" : "mock";
         const config = await initAgentConfig(process.cwd(), {
           llm: {
-            mode,
-            ...(options.baseUrl ? { baseUrl: options.baseUrl } : mode === "real" ? { baseUrl: "https://api.openai.com/v1" } : {}),
+            mode: "real",
+            baseUrl: options.baseUrl ?? "https://api.openai.com/v1",
             ...(options.apiKey ? { apiKey: options.apiKey } : {}),
             ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
             ...(options.model ? { model: options.model } : {}),
@@ -588,17 +568,11 @@ async function runAgentTask(
 
 async function createLlmClient(repoPath: string, options: AgentCliOptions): Promise<LlmClient> {
   const resolvedConfig = resolveLlmConfig(await loadAgentConfig(repoPath), {
-    mock: options.mock,
-    real: options.real,
     baseUrl: options.baseUrl,
     model: options.model,
   });
 
-  if (resolvedConfig.mode === "real") {
-    return new OpenAICompatibleClient(resolvedConfig.openai);
-  }
-
-  return new MockLlmClient();
+  return new OpenAICompatibleClient(resolvedConfig.openai);
 }
 
 function writeAgentProgress(event: AgentProgressEvent): void {

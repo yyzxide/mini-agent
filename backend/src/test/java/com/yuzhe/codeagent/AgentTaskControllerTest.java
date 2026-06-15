@@ -80,8 +80,6 @@ class AgentTaskControllerTest {
                 .sessionId("s1")
                 .status(AgentTaskStatus.RUNNING)
                 .maxSteps(20)
-                .autoApprove(true)
-                .useRealModel(false)
                 .build();
     }
 }

@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 class RunnerCommandBuilderTest {
 
     @Test
-    void buildsMockCommandWithMaxStepsAndEventStream() {
+    void buildsCommandWithMaxStepsAndEventStream() {
         CodeAgentProperties properties = new CodeAgentProperties();
         properties.setNodePath("node");
         properties.setRunnerPath("../dist/cli/index.js");
@@ -19,11 +19,10 @@ class RunnerCommandBuilderTest {
         AgentTask task = new AgentTask();
         task.setUserGoal("demo task");
         task.setMaxSteps(20);
-        task.setUseRealModel(false);
 
         assertThat(builder.buildCommand(task))
-                .contains("node", "run", "demo task", "--mock", "--max-steps", "20", "--event-stream")
-                .doesNotContain("--yes");
+                .contains("node", "run", "demo task", "--max-steps", "20", "--event-stream")
+                .doesNotContain("--yes", "--mock", "--real");
     }
 
     @Test
@@ -34,10 +33,9 @@ class RunnerCommandBuilderTest {
         AgentTask task = new AgentTask();
         task.setUserGoal("real task");
         task.setMaxSteps(30);
-        task.setUseRealModel(true);
 
         assertThat(builder.buildCommand(task))
-                .contains("run", "real task", "--real", "--max-steps", "30", "--event-stream")
-                .doesNotContain("--yes", "--mock");
+                .contains("run", "real task", "--max-steps", "30", "--event-stream")
+                .doesNotContain("--yes", "--mock", "--real");
     }
 }

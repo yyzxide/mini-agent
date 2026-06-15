@@ -14,7 +14,6 @@ public class DockerRunRequest {
     private String runnerHostPath;
     private String runnerMountPath;
     private String userGoal;
-    private boolean useRealModel;
     private int maxSteps;
     private String cpuLimit;
     private String memoryLimit;

@@ -24,7 +24,7 @@
 - CommandRunner：stdout/stderr/exitCode、timeout、输出截断。
 - PermissionManager：SAFE、REVIEW、DANGEROUS、危险命令拦截。
 - SessionStore/EventStore：JSONL 写入、读取、索引。
-- AgentLoop：Mock LLM 全链路。
+- AgentLoop：scripted model 全链路。
 - OpenAICompatibleClient：请求构造、响应解析、错误处理。
 - DecisionParser：结构化 decision 协议。
 
@@ -68,7 +68,7 @@
 人工或集成覆盖：
 
 - 镜像构建。
-- 无网络模式。
+- Docker 网络开关。
 - workspace 可写、runner 只读。
 - 原始仓库不被 DOCKER 模式直接修改。
 - stdout/stderr/event 正常回传。
@@ -122,17 +122,19 @@ P1 通过标准：
 - 输出 JSON 或帮助文本正常。
 - 不产生非预期文件修改。
 
-### P2：Mock Agent 端到端
+### P2：真实 API Agent 冒烟
 
 在临时 Git 仓库中执行：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 6
 ```
 
 P2 通过标准：
 
-- 输出包含 plan/tool/patch/command/diff/summary。
+- 能成功调用 OpenAI-compatible API。
+- 输出包含 session、plan 或 summary。
+- `.mini-agent` 下产生 session/event 记录。
 - 文件确实被 patch 修改。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 生成 JSONL。
 - `git diff` 可查看最终变更。
@@ -155,7 +157,7 @@ corepack pnpm dev
 
 P3 通过标准：
 
-- 能创建 LOCAL mock task。
+- 能创建 LOCAL real-agent task。
 - 任务详情能看到 event、stdout/stderr、diff、session。
 - SSE 正常或轮询兜底正常。
 - 取消任务不会导致后端异常。
@@ -170,7 +172,7 @@ P4 通过标准：
 
 - 镜像构建成功。
 - DOCKER 任务成功创建 workspace。
-- 容器无网络模式可运行 mock task。
+- Docker 默认联网以访问模型端点；关闭网络后只能运行不依赖外网的工具/任务流程。
 - 原始 repo 不被修改。
 - workspace repo 有最终 diff/session。
 
@@ -178,13 +180,13 @@ P4 通过标准：
 
 | 模块 | 当前覆盖 | 状态 |
 | --- | --- | --- |
-| CLI | 命令注册、session、command、patch、mock agent、real client stub | 已覆盖 |
+| CLI | 命令注册、session、command、patch、OpenAI-compatible client stub | 已覆盖 |
 | Tools | list/read/search/git status/git diff/apply patch | 已覆盖 |
 | Permission | 权限等级、审批、危险命令 | 已覆盖 |
 | Session/Event | JSONL 写入读取、事件记录 | 已覆盖 |
 | Patch | preview/check/apply/diff | 已覆盖 |
 | Command | 成功、失败、超时、输出 | 已覆盖 |
-| LLM | Mock、OpenAI-compatible、decision parser | 已覆盖 |
+| LLM | OpenAI-compatible client、decision parser、测试 stub | 已覆盖 |
 | Context | ContextBuilder 基础上下文 | 已覆盖 |
 | Backend Controller | 任务查询、日志、事件 | 已覆盖 |
 | Backend Service | 任务、Runner、Docker、Git Workflow 核心分支 | 已覆盖 |
@@ -197,7 +199,7 @@ P4 通过标准：
 
 - 单元测试使用临时目录，不依赖用户真实仓库。
 - CLI E2E 使用 `/tmp` 下的临时 Git 仓库。
-- Backend 测试使用 mock 或临时 workspace。
+- Backend 测试使用 Mockito 或临时 workspace。
 - Maven 本地仓库使用 `backend/.m2`，避免受限环境写用户主目录。
 - Docker 手工测试使用可删除的临时仓库，不使用真实业务仓库。
 

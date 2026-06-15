@@ -1,4 +1,4 @@
-import { Button, Form, Input, InputNumber, Select, Space, Switch } from "antd";
+import { Button, Form, Input, InputNumber, Select, Space } from "antd";
 import type { CreateAgentTaskRequest } from "../types/task";
 
 interface TaskCreateFormProps {
@@ -16,7 +16,6 @@ export function TaskCreateForm({ loading = false, onSubmit }: TaskCreateFormProp
       initialValues={{
         executionMode: "DOCKER",
         maxSteps: 20,
-        useRealModel: false,
       }}
       onFinish={onSubmit}
       className="task-form"
@@ -31,7 +30,7 @@ export function TaskCreateForm({ loading = false, onSubmit }: TaskCreateFormProp
 
       <Form.Item name="userGoal" label="User goal" rules={[{ required: true, message: "User goal is required" }]}>
         <Input.TextArea
-          placeholder="demo: 给 demo.txt 增加 hello from mini-agent"
+          placeholder="查看当前仓库结构并总结可以从哪里开始修改"
           autoSize={{ minRows: 5, maxRows: 10 }}
         />
       </Form.Item>
@@ -51,9 +50,6 @@ export function TaskCreateForm({ loading = false, onSubmit }: TaskCreateFormProp
           <InputNumber min={1} max={100} />
         </Form.Item>
 
-        <Form.Item name="useRealModel" label="Use real model" valuePropName="checked">
-          <Switch />
-        </Form.Item>
       </Space>
 
       <Form.Item>

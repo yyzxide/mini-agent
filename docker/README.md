@@ -13,7 +13,6 @@ Manual smoke test after `pnpm build`:
 
 ```bash
 docker run --rm \
-  --network none \
   -v "$PWD:/opt/mini-agent:ro" \
   -v "$PWD:/workspace" \
   -w /workspace \

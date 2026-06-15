@@ -36,7 +36,7 @@ code-agent:
     container-workdir: /workspace
     cpu-limit: "2"
     memory-limit: "2g"
-    network-enabled: false
+    network-enabled: true
     auto-remove-container: true
     container-timeout-seconds: 600
     runner-mount-path: /opt/mini-agent

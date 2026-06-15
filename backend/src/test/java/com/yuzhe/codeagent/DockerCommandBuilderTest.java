@@ -9,35 +9,37 @@ import org.junit.jupiter.api.Test;
 class DockerCommandBuilderTest {
 
     @Test
-    void buildsDockerRunCommandWithLimitsNetworkNoneMountsAndMockRunner() {
+    void buildsDockerRunCommandWithLimitsMountsAndRunner() {
         DockerCommandBuilder builder = new DockerCommandBuilder();
 
-        var command = builder.buildCommand(baseRequest(false));
+        var command = builder.buildCommand(baseRequest(true));
 
         assertThat(command)
                 .containsSubsequence("docker", "run", "--name", "mini-agent-task-1")
                 .containsSubsequence("--cpus", "2")
                 .containsSubsequence("--memory", "2g")
-                .containsSubsequence("--network", "none")
                 .containsSubsequence("-v", "/tmp/workspace/repo:/workspace")
                 .containsSubsequence("-v", "/tmp/mini-agent:/opt/mini-agent:ro")
                 .containsSubsequence("-w", "/workspace", "mini-coding-agent-sandbox:latest")
                 .containsSubsequence("node", "/opt/mini-agent/dist/cli/index.js", "run", "给 demo.txt 增加 hello")
-                .contains("--mock", "--event-stream")
-                .doesNotContain("--yes")
+                .contains("--event-stream")
+                .doesNotContain("--yes", "--mock", "--real")
+                .doesNotContain("--network", "none")
                 .containsSubsequence("--max-steps", "20");
     }
 
     @Test
-    void buildsRealModelCommandWithoutNetworkNoneWhenEnabled() {
+    void addsNetworkNoneWhenNetworkIsDisabled() {
         DockerCommandBuilder builder = new DockerCommandBuilder();
 
-        var command = builder.buildCommand(baseRequest(true));
+        var command = builder.buildCommand(baseRequest(false));
 
-        assertThat(command).contains("--real").doesNotContain("--mock", "--yes", "--network", "none");
+        assertThat(command)
+                .containsSubsequence("--network", "none")
+                .doesNotContain("--mock", "--real", "--yes");
     }
 
-    private DockerRunRequest baseRequest(boolean useRealModel) {
+    private DockerRunRequest baseRequest(boolean networkEnabled) {
         return DockerRunRequest.builder()
                 .taskId(1L)
                 .image("mini-coding-agent-sandbox:latest")
@@ -46,11 +48,10 @@ class DockerCommandBuilderTest {
                 .runnerHostPath("/tmp/mini-agent")
                 .runnerMountPath("/opt/mini-agent")
                 .userGoal("给 demo.txt 增加 hello")
-                .useRealModel(useRealModel)
                 .maxSteps(20)
                 .cpuLimit("2")
                 .memoryLimit("2g")
-                .networkEnabled(useRealModel)
+                .networkEnabled(networkEnabled)
                 .autoRemoveContainer(true)
                 .containerWorkdir("/workspace")
                 .build();

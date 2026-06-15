@@ -45,8 +45,7 @@ Tests       78 passed (78)
 - SessionStore/EventStore。
 - PatchManager。
 - ContextBuilder。
-- AgentLoop Mock 流程。
-- MockLlmClient。
+- AgentLoop scripted model 流程。
 - OpenAICompatibleClient stub。
 - DecisionParser。
 
@@ -127,7 +126,7 @@ node dist/cli/index.js git status
 并在临时仓库中跑：
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo.txt 增加 hello from mini-agent" --mock
+node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 6
 ```
 
 ## 5. 当前测试覆盖评价
@@ -139,7 +138,7 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo
 - 命令执行和权限。
 - patch 应用。
 - session/event JSONL。
-- Mock Agent E2E。
+- Agent scripted-flow E2E。
 - 后端任务服务、事件解析、session 读取。
 - Docker 命令构造和 workspace 逻辑。
 - Git Workflow 生成和执行器基础规则。
@@ -161,7 +160,7 @@ node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "demo: 给 demo
 | Docker runtime 依赖本机环境 | CI 中可能难以稳定跑真实容器 | 已识别 | 先保留手工 P4，再评估 GitHub Actions service |
 | registry 网络波动 | 干净环境安装可能失败 | 本次不阻塞 | 固定 registry 或使用缓存 |
 | 大 chunk warning | 首屏资源偏大 | 不阻塞 | 后续按路由或重组件 code splitting |
-| 真实模型不稳定 | 自动化难复现 | 已隔离 | 使用 Mock 和 stub 做确定性测试 |
+| 真实模型不稳定 | 自动化难复现 | 已隔离 | 使用 scripted LLM 和 fetch stub 做确定性测试 |
 
 ## 7. 下一步建议
 

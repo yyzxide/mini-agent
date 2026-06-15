@@ -81,7 +81,7 @@ export interface MiniAgentConfig {
   repoPath: string;
   createdAt: string;
   llm?: {
-    mode?: "mock" | "real";
+    mode?: "real";
     baseUrl?: string;
     apiKey?: string;
     apiKeyEnv?: string;

@@ -168,7 +168,6 @@ export function TaskDetailPage() {
               <Descriptions.Item label="Mode">{task.executionMode}</Descriptions.Item>
               <Descriptions.Item label="Runner PID">{task.runnerPid ?? "-"}</Descriptions.Item>
               <Descriptions.Item label="Max steps">{task.maxSteps}</Descriptions.Item>
-              <Descriptions.Item label="Real model">{String(task.useRealModel)}</Descriptions.Item>
               <Descriptions.Item label="Started">{formatTime(task.startedAt)}</Descriptions.Item>
               <Descriptions.Item label="Finished">{formatTime(task.finishedAt)}</Descriptions.Item>
               <Descriptions.Item label="Created">{formatTime(task.createdAt)}</Descriptions.Item>
