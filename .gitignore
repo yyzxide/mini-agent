@@ -6,9 +6,3 @@ dist/
 coverage/
 *.log
 mini-agent.config.json
-backend/.m2/
-backend/target/
-backend/data/
-frontend/node_modules/
-frontend/dist/
-frontend/tsconfig.tsbuildinfo

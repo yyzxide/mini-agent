@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "docs",
-    "README.md"
+    "README.md",
+    "mini-agent.config.example.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,11 +18,7 @@
     "test": "vitest run",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify:runner": "corepack pnpm build && corepack pnpm test",
-    "verify:backend": "mvn -Dmaven.repo.local=backend/.m2 -f backend/pom.xml test",
-    "verify:frontend": "corepack pnpm --dir frontend install --frozen-lockfile && corepack pnpm --dir frontend build",
-    "verify": "corepack pnpm verify:runner && corepack pnpm verify:backend && corepack pnpm verify:frontend",
-    "docker:build-sandbox": "docker build -t mini-coding-agent-sandbox:latest -f docker/sandbox/Dockerfile ."
+    "verify": "npm run build && npm test"
   },
   "keywords": [
     "agent",

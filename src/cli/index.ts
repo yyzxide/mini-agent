@@ -75,7 +75,7 @@ export function createProgram(): Command {
     .option("--max-steps <number>", "Maximum agent loop steps", parsePositiveInteger)
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
-    .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for backend integrations")
+    .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (task.length === 0) {

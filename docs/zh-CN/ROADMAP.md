@@ -1,170 +1,83 @@
-# 后续规划
+# Roadmap
 
-## 1. 短期：把 MVP 打磨得更稳
+当前路线：先把本地 CLI Coding Agent 打磨扎实，再考虑外部集成。
 
-### 1.1 更强的真实模型协议
+## 1. 近期：让 CLI 更可靠
 
-当前已经有 OpenAI-compatible client 和结构化 decision 解析。下一步可以：
+### 1.1 Prompt 和 DecisionParser
 
-- 使用严格 JSON schema。
-- 为每类 decision 增加 few-shot 示例。
-- 对格式错误做一次自动修复 retry。
-- 把工具列表和权限信息动态注入 prompt。
-- 对 final 输出增加固定字段：summary、tests、diffSummary、risks。
+- 强化工具调用格式约束。
+- 增加模型输出自修复逻辑。
+- 对非法 JSON、未知 decision、缺字段提供更清楚的错误。
 
-### 1.2 更完整的失败修复循环
+### 1.2 上下文质量
 
-目标是让测试失败后最多自动修 3 轮：
+- 更好地摘要 README、构建文件和目录树。
+- 最近工具结果按重要性截断。
+- 命令失败日志保留关键片段。
+- git diff 摘要区分新增、删除、修改文件。
 
-1. 命令失败结果进入上下文。
-2. 提取关键 stderr/stdout。
-3. 搜索相关文件。
-4. 生成最小 patch。
-5. 重新运行同一测试命令。
-6. 仍失败则输出失败原因和当前 diff。
+### 1.3 测试命令识别
 
-可以新增：
+- Node 项目识别 `npm test`、`pnpm test`、`vitest`。
+- Java 项目识别 `mvn test`、`gradle test`。
+- Go 项目识别 `go test ./...`。
+- Python 项目识别 `pytest`。
 
-- `TestFailureAnalyzer`
-- `CommandErrorSummarizer`
-- `RepairAttemptState`
+## 2. 中期：提升开发体验
 
-### 1.3 工具增强
+### 2.1 Dry-run 模式
 
-可新增工具：
+新增：
 
-- `write_file_preview`：生成文件替换预览，但仍通过 patch 应用。
-- `list_symbols`：基于语言服务或 tree-sitter 提取符号。
-- `find_tests`：按文件或符号定位测试。
-- `package_scripts`：读取 package.json scripts、pom.xml goals 等。
-- `dependency_summary`：总结主要依赖。
-
-## 2. 中期：让沙箱和控制面更接近生产
-
-### 2.1 Docker 沙箱加固
-
-可做：
-
-- 非 root 用户运行。
-- `--read-only` 根文件系统。
-- 单独 tmpfs。
-- drop capabilities。
-- seccomp/AppArmor profile。
-- 限制进程数。
-- 更细资源配额。
-- 网络 allowlist，而不是简单开关。
-
-### 2.2 Secret 管理
-
-当前真实模型环境变量不会写入数据库命令日志，但还可以继续加强：
-
-- 后端统一 redaction。
-- 前端避免展示敏感 env。
-- API key 只从服务端安全配置读取。
-- Docker 任务使用临时 env 注入。
-- session/event 输出脱敏。
-
-### 2.3 任务队列
-
-当前后端适合本地单机演示。中期可以加：
-
-- 队列和并发限制。
-- 任务优先级。
-- 任务超时和重试。
-- Runner worker 池。
-- 更明确的取消语义。
-
-## 3. 中期：提升 Web 体验
-
-### 3.1 Diff 交互
-
-- 文件级 diff 折叠。
-- 行级高亮。
-- patch 摘要。
-- 一键复制 diff。
-- 显示修改文件列表。
-
-### 3.2 事件时间线
-
-- 按 tool/command/patch 分类筛选。
-- 展示 duration。
-- 失败事件聚合。
-- 关联 session record。
-
-### 3.3 任务创建体验
-
-- 记住最近 repoPath。
-- 校验 repoPath 是否可访问。
-- 自动识别项目类型。
-- 推荐测试命令。
-- 预设 execution mode。
-
-## 4. 中期：GitHub/GitLab PR
-
-在现有 Git Workflow 上扩展：
-
-```text
-branch -> commit -> push -> create PR/MR -> update workflow URL
+```bash
+mini-agent run "..." --dry-run
 ```
 
-需要新增：
+只展示计划、工具调用和 patch 预览，不真正落盘或执行危险命令。
 
-- `GitRemoteProvider` 接口。
-- GitHub/GitLab token 配置。
-- remote branch 命名策略。
-- PR label/reviewer/assignee 配置。
-- PR 创建失败的重试和回滚策略。
+### 2.2 Session Replay
 
-## 5. 长期：多用户和平台化
+支持：
 
-如果要从本地工具变成团队平台：
+```bash
+mini-agent session replay <sessionId>
+```
 
-- 用户登录和权限。
-- workspace/project 管理。
-- 模型配置按项目隔离。
-- 任务成本统计。
-- 审计日志。
-- 组织级 policy。
-- 集中式数据库。
-- 对象存储保存 session、diff 和日志。
-- Runner 节点横向扩展。
+按时间线重放工具调用、命令结果和最终 diff，方便复盘和面试演示。
 
-## 6. 长期：智能能力
+### 2.3 更好的终端输出
 
-### 6.1 上下文系统
+- 分组展示 plan、tool、patch、command、result。
+- 对长输出折叠。
+- 对 diff 做文件级摘要。
+- 对错误给出下一步建议。
 
-- 文件重要性排序。
-- 历史编辑摘要。
-- 最近失败优先。
-- build/test 文件优先。
-- 符号图谱。
-- 向量检索作为补充，而不是唯一入口。
+## 3. 安全增强
 
-### 6.2 代码理解
+- 更细粒度的命令白名单/黑名单。
+- patch 修改文件数量和单文件大小限制。
+- 工作树脏状态提醒。
+- API key redaction 覆盖所有日志和错误。
+- 可选只读扫描模式。
 
-- tree-sitter AST。
-- TypeScript/Java 语言服务。
-- 调用链分析。
-- 测试覆盖映射。
-- 变更影响分析。
+## 4. 外部集成
 
-### 6.3 评审能力
+保持 CLI 为核心，只提供轻量集成点：
 
-- 自动生成 review checklist。
-- 检测高风险 diff。
-- 检测未更新测试。
-- 检测 API 兼容性风险。
-- 输出 reviewer notes。
+- `--event-stream` 给其他系统读取事件。
+- session/event JSONL 作为稳定数据格式。
+- 可选导出 Markdown 报告。
+- 可选生成 commit message 和 PR description 草稿。
 
-## 7. 推荐下一步优先级
+## 5. 暂不做
 
-如果继续开发，推荐顺序：
+当前不在本仓库内做：
 
-1. 加强真实模型 JSON 协议和错误重试。
-2. 完成测试失败三轮修复闭环。
-3. 前端 diff 文件列表和事件 duration。
-4. Docker 非 root 和 read-only rootfs。
-5. GitHub PR 创建。
+- 业务后台。
+- Web 控制台。
+- 多用户管理。
+- 远程 PR 自动创建。
+- 生产级沙箱。
 
-这个顺序的原因是：先提高 Agent 真实任务成功率，再增强演示体验，然后逐步补安全和交付能力。
-
+这些可以以后作为独立项目或插件实现。

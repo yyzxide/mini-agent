@@ -1,130 +1,73 @@
 # mini-coding-agent 中文文档
 
-这组文档面向两类场景：
+`mini-coding-agent` 现在定位为一个纯本地运行的 AI Coding Agent CLI。
 
-1. 自己继续开发时，快速找回项目结构、验证命令和扩展方向。
-2. 面试或项目汇报时，用清晰的工程语言讲明白“我做了什么、为什么这么做、边界在哪里”。
+它不再内置 Java 后端、Web 前端或沙箱控制面。项目主线收敛为：
 
-## 文档导航
-
-- [架构设计说明](ARCHITECTURE.md)：从 TypeScript Runner、Java Backend、React Frontend、Docker Sandbox 和 Git Workflow 五层说明系统设计。
-- [测试计划](TEST_PLAN.md)：定义测试阶段范围、分层策略、命令、风险项和进入/退出标准。
-- [测试报告 2026-06-11](TEST_REPORT_2026-06-11.md)：记录当前基线验证结果和测试缺口。
-- [面试讲解稿](INTERVIEW_GUIDE.md)：包含 30 秒、1 分钟、3 分钟版本，以及技术亮点、难点和取舍。
-- [演示脚本](DEMO_SCRIPT.md)：按步骤演示 CLI、后端、前端、Docker 沙箱和 Git Workflow。
-- [自测清单](SELF_TEST_CHECKLIST.md)：提交前、演示前、面试前可以逐项检查的验证表。
-- [面试问答](INTERVIEW_QA.md)：整理高频问题和可直接复述的回答。
-- [后续规划](ROADMAP.md)：列出短期补强、中期能力升级和长期产品化方向。
-
-## 项目一句话
-
-`mini-coding-agent` 是一个本地运行的对话式 AI Coding Agent 原型。它用 TypeScript 实现核心 Agent Loop 和工具调用，用 Java Spring Boot 做任务控制面，用 React 提供 Web 控制台，并通过 Docker 沙箱和 Git Workflow 支持更接近真实交付的本地开发流程。
-
-## 当前能力快照
-
-- 本地 CLI 可执行自然语言任务。
-- 真实 OpenAI-compatible 模型可驱动搜索、读文件、打补丁、执行命令、生成 diff 的闭环。
-- 工具系统包含文件列表、文件读取、代码搜索、patch、命令执行、git status/diff。
-- 本地 session 和 event 以 JSONL 记录，便于审计和恢复。
-- Java 后端可启动任务、记录日志事件、读取 session、提供 SSE。
-- React 前端可创建任务、查看事件、日志、diff、session 和 Git Workflow 状态。
-- Docker 沙箱可隔离任务工作区，并限制网络、CPU、内存和挂载权限。
-- Git Workflow 可创建任务分支、提交 diff、生成 PR 草稿。
-
-## 推荐验证命令
-
-从仓库根目录执行：
-
-```bash
-pnpm install
-pnpm verify
+```text
+自然语言任务
+-> 构建仓库上下文
+-> 调用真实大模型
+-> 搜索/读取代码
+-> 生成并应用 patch
+-> 执行命令或测试
+-> 根据失败日志继续修复
+-> 输出总结和 git diff
+-> 保存本地 session/event
 ```
 
-如果本机没有全局 `pnpm` 命令，可以使用：
+## 文档索引
+
+- [架构设计说明](ARCHITECTURE.md)：解释 CLI Agent 的模块拆分、工具系统、权限、session 和 LLM 接入。
+- [演示脚本](DEMO_SCRIPT.md)：用于本地演示和录屏的操作步骤。
+- [面试讲解稿](INTERVIEW_GUIDE.md)：把项目讲成一个完整工程故事。
+- [面试问答](INTERVIEW_QA.md)：常见追问和回答。
+- [测试计划](TEST_PLAN.md)：CLI 项目的自动化和手工测试范围。
+- [自测清单](SELF_TEST_CHECKLIST.md)：提交前按项检查。
+- [Roadmap](ROADMAP.md)：后续增强方向。
+
+## 一句话介绍
+
+这是一个 TypeScript 实现的本地 AI Coding Agent CLI。它可以在任意 git 仓库中接收自然语言任务，通过受控工具搜索代码、读取文件、应用补丁、执行命令、查看测试反馈，并把整个过程记录到本地 JSONL session。
+
+## 核心能力
+
+- 真实 OpenAI-compatible API 接入。
+- 统一 ToolRegistry 和 zod 参数校验。
+- `list_files`、`read_file`、`search_code`、`git_status`、`git_diff`、`apply_patch`。
+- 命令执行超时、输出截断和危险命令拦截。
+- patch 应用前 `git apply --check`。
+- `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
+- `mini-agent config` 管理本地模型配置。
+- `mini-agent --help`、`mini-agent run`、`mini-agent tool` 等调试命令。
+
+## 快速验证
 
 ```bash
-corepack pnpm install
-corepack pnpm verify
+npm install
+npm run build
+npm test
+npm link
+mini-agent --help
+mini-agent tool list
 ```
 
-如果只想分别验证：
-
-```bash
-pnpm verify:runner
-pnpm verify:backend
-pnpm verify:frontend
-```
-
-如果需要 Docker 沙箱：
-
-```bash
-pnpm run docker:build-sandbox
-```
-
-## 推荐真实模型配置
-
-使用 Coding Agent 前需要配置真实 OpenAI-compatible 模型：
+配置真实模型：
 
 ```bash
 cp mini-agent.config.example.json mini-agent.config.json
 ```
 
-然后直接编辑 `mini-agent.config.json`：
+然后编辑 `mini-agent.config.json` 中的 `baseUrl`、`apiKey` 和 `model`。
 
-```json
-{
-  "version": 1,
-  "llm": {
-    "mode": "real",
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "your_api_key",
-    "model": "your_model",
-    "temperature": 0.2,
-    "maxTokens": 4096,
-    "timeoutMs": 60000
-  }
-}
-```
+## 项目边界
 
-之后运行：
+当前版本故意不包含：
 
-```bash
-node dist/cli/index.js config show
-node dist/cli/index.js run "查看当前项目结构并总结可以从哪里开始修改"
-```
+- Web 页面。
+- Java 后端。
+- Swagger。
+- Docker 控制面。
+- 远程 PR 自动创建。
 
-`mini-agent.config.json` 已被 `.gitignore` 忽略。`config show` 默认会把 API key 显示为 `<redacted>`。
-
-也可以用命令生成配置文件：
-
-```bash
-node dist/cli/index.js config init \
-  --base-url "https://api.openai.com/v1" \
-  --api-key "your_api_key" \
-  --model "your_model"
-```
-
-如果不想把 key 直接写入文件，可以只写环境变量名：
-
-```bash
-node dist/cli/index.js config init \
-  --api-key-env MINI_AGENT_API_KEY \
-  --model "your_model"
-```
-
-## 面试时的叙述主线
-
-可以按下面顺序讲：
-
-1. 先讲目标：做一个简化版本地 Coding Agent，而不是只做一个聊天壳。
-2. 再讲闭环：任务输入、上下文构建、工具调用、权限审批、patch、测试、diff、session 审计。
-3. 然后讲分层：TypeScript Runner 负责 Agent 能力，Java Backend 负责任务控制，React Frontend 负责可视化。
-4. 接着讲安全：路径越权、防危险命令、patch check、Docker 沙箱、只读 runner mount、网络开关。
-5. 最后讲扩展：修复循环、远程 PR、多用户和权限体系。
-
-## 适合强调的工程点
-
-- 没有把所有逻辑堆在 CLI：核心 Runner、控制面、前端和沙箱职责分开。
-- 没有让模型直接操作系统：所有动作都经过工具 schema、权限和结构化记录。
-- 没有把会话记录当日志附属品：session/event 是后端、前端、审计和恢复共同依赖的数据流。
-- 没有假装沙箱已经解决所有安全问题：Docker 仅作为第一层隔离，仍需要路径、命令、patch 和密钥边界。
+如果要做企业后台或软件商店后台，建议作为独立项目实现，不混进这个 CLI Agent 仓库。

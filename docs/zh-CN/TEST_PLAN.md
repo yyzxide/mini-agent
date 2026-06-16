@@ -1,318 +1,167 @@
 # 测试计划
 
-## 1. 测试阶段目标
+当前项目只保留本地 CLI Agent，因此测试目标也收缩为：保证 CLI、工具系统、AgentLoop、LLM 客户端、patch、命令执行和 session 记录稳定。
 
-当前项目已经完成 CLI Runner、Java Backend、React Frontend、Docker Sandbox 和 Git Workflow 的 MVP。测试阶段的目标不是一次性追求“覆盖率数字好看”，而是先把关键闭环稳定下来：
+## 1. 自动化测试范围
 
-1. 核心 Agent Runner 的工具、权限、patch、命令、session 可靠。
-2. Java Backend 能稳定启动 Runner、保存日志事件、读取 session、处理 Docker/Git Workflow。
-3. React Frontend 能构建通过，并在人工验证中完成任务创建、任务详情、日志、事件、diff 和 Git Workflow 操作。
-4. Docker Sandbox 的命令构造、workspace 复制和隔离策略有自动测试与人工验证路径。
-5. 每次提交前有明确的自动化验证命令和人工回归清单。
+### 1.1 ToolRegistry 和工具
 
-## 2. 测试范围
+覆盖：
 
-### 2.1 TypeScript Runner
+- 工具注册、获取、列表。
+- zod 参数校验失败。
+- 工具不存在。
+- `list_files` 忽略目录和数量限制。
+- `read_file` 行范围、二进制拒绝、路径越权。
+- `search_code` 调用 ripgrep。
+- `git_status` 和 `git_diff`。
+- `apply_patch` 权限、check、apply、失败返回。
 
-必须覆盖：
+### 1.2 CommandRunner
 
-- CLI 命令注册和基础输出。
-- ToolRegistry 注册、参数校验、异常包装。
-- 文件工具：list_files、read_file、search_code。
-- Git 工具：git_status、git_diff。
-- PatchManager：preview、check、apply、diff。
-- CommandRunner：stdout/stderr/exitCode、timeout、输出截断。
-- PermissionManager：SAFE、REVIEW、DANGEROUS、危险命令拦截。
-- SessionStore/EventStore：JSONL 写入、读取、索引。
-- AgentLoop：scripted model 全链路。
-- OpenAICompatibleClient：请求构造、响应解析、错误处理。
-- DecisionParser：结构化 decision 协议。
+覆盖：
 
-### 2.2 Java Backend
+- 成功命令。
+- 失败命令。
+- stdout/stderr 捕获。
+- 超时。
+- 输出截断。
+- cwd 设置。
 
-必须覆盖：
+### 1.3 PermissionManager
 
-- Controller API 基础行为。
-- AgentTaskService 任务创建、状态流转、取消。
-- RunnerCommandBuilder 参数构造。
-- RunnerEventParser 事件解析。
-- SessionReadService/EventReadService 读取 JSONL。
-- PathSecurityService 路径边界。
-- WorkspaceService 仓库复制和忽略规则。
-- DockerCommandBuilder 参数构造。
-- DockerSandboxService 生命周期中的关键分支。
-- GitCommandExecutor 分支/提交安全规则。
-- GitWorkflowService 状态流转。
-- PR draft 和 commit message 生成。
+覆盖：
 
-### 2.3 React Frontend
+- `SAFE` 自动允许。
+- `REVIEW` 和 `DANGEROUS` 的交互式确认。
+- 非交互模式拒绝。
+- autoApprove。
+- 危险命令拦截。
 
-当前自动化主要是 TypeScript/Vite build。测试阶段需要补齐：
+### 1.4 Session/Event
 
-- API 层单元测试：成功响应、错误响应、base URL。
-- hooks 测试：SSE 成功、SSE 断开后轮询兜底、去重。
-- 组件测试：TaskStatusTag、DiffViewer、EventTimeline、LogViewer。
-- 页面冒烟：任务列表、任务创建、任务详情。
-- GitWorkflowPanel 操作状态：按钮禁用、成功响应、错误提示。
+覆盖：
 
-### 2.4 Docker Sandbox
+- 初始化 `.mini-agent`。
+- 创建 session。
+- 追加 JSONL。
+- 读取 session。
+- 写入工具、命令、patch、diff、任务完成事件。
 
-自动化覆盖：
+### 1.5 LLM
 
-- docker run 参数构造。
-- workspace 目录边界。
-- repo 复制忽略规则。
-- sandbox 状态保存。
-- 容器取消命令构造。
+覆盖：
 
-人工或集成覆盖：
+- OpenAI-compatible 请求格式。
+- API key header。
+- baseUrl 拼接。
+- 超时配置。
+- 模型返回 decision 解析。
+- 配置缺失时给出清晰错误。
 
-- 镜像构建。
-- Docker 网络开关。
-- workspace 可写、runner 只读。
-- 原始仓库不被 DOCKER 模式直接修改。
-- stdout/stderr/event 正常回传。
+测试中可以 stub `fetch`，避免依赖真实网络。
 
-### 2.5 Git Workflow
+### 1.6 AgentLoop
 
-必须覆盖：
+覆盖：
 
-- 分支名校验。
-- 空 diff 不允许提交。
-- commit message 生成。
-- PR draft 生成。
-- LOCAL/DOCKER 模式下实际 repo path 选择。
-- workflow 状态展示和失败处理。
+- tool_call -> tool result -> final。
+- apply_patch -> git diff -> final。
+- run_command 成功。
+- run_command 失败后进入下一轮。
+- 最大步数终止。
+- session/event 写入。
 
-## 3. 测试分层
+## 2. 手工测试范围
 
-### P0：提交前必跑
+### 2.1 CLI help
 
 ```bash
-corepack pnpm verify
+mini-agent --help
+mini-agent run --help
+mini-agent tool --help
+mini-agent command --help
+mini-agent patch --help
+mini-agent config --help
 ```
 
-等价于：
+### 2.2 工具调试
 
 ```bash
-corepack pnpm verify:runner
-corepack pnpm verify:backend
-corepack pnpm verify:frontend
+mini-agent tool list
+mini-agent tool run list_files '{"path":"."}'
+mini-agent tool run read_file '{"path":"README.md"}'
+mini-agent tool run search_code '{"query":"AgentLoop","path":"src"}'
+mini-agent tool run git_status '{}'
+mini-agent tool run git_diff '{}'
 ```
 
-P0 通过标准：
-
-- Runner build 通过。
-- Runner Vitest 全通过。
-- Backend Maven test 全通过。
-- Frontend TypeScript/Vite build 通过。
-
-### P1：CLI 冒烟
+### 2.3 命令执行
 
 ```bash
-node dist/cli/index.js --help
-node dist/cli/index.js tool list
-node dist/cli/index.js tool run read_file '{"path":"README.md","maxLines":5}'
-node dist/cli/index.js git status
+mini-agent command run "echo hello"
+mini-agent command run "npm test"
+mini-agent command run "sudo reboot"
 ```
 
-P1 通过标准：
+第三条应该被拦截。
 
-- 命令退出码为 0。
-- 输出 JSON 或帮助文本正常。
-- 不产生非预期文件修改。
-
-### P2：真实 API Agent 冒烟
-
-在临时 Git 仓库中执行：
+### 2.4 真实模型任务
 
 ```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 6
+mini-agent run "总结这个仓库的 src/agent、src/tools、src/session 分别做什么"
 ```
 
-P2 通过标准：
+观察：
 
-- 能成功调用 OpenAI-compatible API。
-- 输出包含 session、plan 或 summary。
-- `.mini-agent` 下产生 session/event 记录。
-- 文件确实被 patch 修改。
-- `.mini-agent/sessions` 和 `.mini-agent/events` 生成 JSONL。
-- `git diff` 可查看最终变更。
+- 是否调用工具。
+- 是否输出最终 summary。
+- 是否写 session/event。
 
-### P3：Backend + Frontend 手工回归
+### 2.5 修改类任务
 
-后端：
+在可丢弃分支或临时仓库里测试：
 
 ```bash
-cd backend
-mvn spring-boot:run
+mini-agent run "给 README 增加一段说明，解释本项目为什么是纯 CLI Agent"
+git diff
 ```
 
-前端：
+观察：
+
+- patch 是否能应用。
+- diff 是否符合预期。
+- session 是否记录 patch 事件。
+
+## 3. 提交前命令
 
 ```bash
-cd frontend
-corepack pnpm dev
+npm run build
+npm test
+npm run verify
+git diff --check
 ```
 
-P3 通过标准：
+## 4. 风险点
 
-- 能创建 LOCAL real-agent task。
-- 任务详情能看到 event、stdout/stderr、diff、session。
-- SSE 正常或轮询兜底正常。
-- 取消任务不会导致后端异常。
+| 风险 | 检查方式 |
+| --- | --- |
+| 模型输出非 JSON | LLM/DecisionParser 测试 |
+| 工具参数错误 | ToolRegistry 测试 |
+| 路径越权 | fs/read_file/apply_patch 测试 |
+| 命令卡死 | CommandRunner 超时测试 |
+| patch 损坏 | PatchManager check 测试 |
+| session 丢失 | SessionStore/EventStore 测试 |
+| 真实 API 不可用 | 配置错误提示和 fetch stub 测试 |
 
-### P4：Docker Sandbox 手工回归
+## 5. 当前不测
 
-```bash
-corepack pnpm run docker:build-sandbox
-```
+因为项目已经删除后端和前端，所以不再测试：
 
-P4 通过标准：
+- Java 服务启动。
+- Swagger。
+- React 页面。
+- 浏览器交互。
+- Docker 控制面。
 
-- 镜像构建成功。
-- DOCKER 任务成功创建 workspace。
-- Docker 默认联网以访问模型端点；关闭网络后只能运行不依赖外网的工具/任务流程。
-- 原始 repo 不被修改。
-- workspace repo 有最终 diff/session。
-
-## 4. 当前自动化覆盖地图
-
-| 模块 | 当前覆盖 | 状态 |
-| --- | --- | --- |
-| CLI | 命令注册、session、command、patch、OpenAI-compatible client stub | 已覆盖 |
-| Tools | list/read/search/git status/git diff/apply patch | 已覆盖 |
-| Permission | 权限等级、审批、危险命令 | 已覆盖 |
-| Session/Event | JSONL 写入读取、事件记录 | 已覆盖 |
-| Patch | preview/check/apply/diff | 已覆盖 |
-| Command | 成功、失败、超时、输出 | 已覆盖 |
-| LLM | OpenAI-compatible client、decision parser、测试 stub | 已覆盖 |
-| Context | ContextBuilder 基础上下文 | 已覆盖 |
-| Backend Controller | 任务查询、日志、事件 | 已覆盖 |
-| Backend Service | 任务、Runner、Docker、Git Workflow 核心分支 | 已覆盖 |
-| Frontend | TypeScript 编译和生产构建 | 部分覆盖 |
-| Docker Runtime | 命令构造和 workspace 自动测，真实容器需手工 | 部分覆盖 |
-| Real Model E2E | 无真实 API 自动化 | 未覆盖 |
-| Remote PR | 当前尚未实现 | 不适用 |
-
-## 5. 测试数据策略
-
-- 单元测试使用临时目录，不依赖用户真实仓库。
-- CLI E2E 使用 `/tmp` 下的临时 Git 仓库。
-- Backend 测试使用 Mockito 或临时 workspace。
-- Maven 本地仓库使用 `backend/.m2`，避免受限环境写用户主目录。
-- Docker 手工测试使用可删除的临时仓库，不使用真实业务仓库。
-
-## 6. 风险用例
-
-### 6.1 路径越权
-
-必须覆盖：
-
-- `../outside.txt`
-- 绝对路径 `/etc/passwd`
-- symlink 逃逸
-- patch 修改 repo 外路径
-
-当前状态：
-
-- 普通相对路径和绝对路径逃逸已有覆盖。
-- symlink 逃逸建议补充专项测试。
-
-### 6.2 危险命令
-
-必须覆盖：
-
-- `sudo`
-- `rm -rf /`
-- `mkfs`
-- `shutdown`
-- `reboot`
-- `chmod 777 /`
-
-当前状态：
-
-- 已有基础危险命令测试。
-- 后续应增加 shell 变体，例如多空格、换行、路径参数混淆。
-
-### 6.3 大输出与超时
-
-必须覆盖：
-
-- stdout 超长。
-- stderr 超长。
-- 命令超时。
-- 非 0 exitCode。
-
-当前状态：
-
-- CommandRunner 已覆盖核心分支。
-
-### 6.4 Patch 风险
-
-必须覆盖：
-
-- 非法 patch。
-- patch check 失败。
-- patch 修改多个文件。
-- patch 目标路径逃逸。
-- patch 二次应用失败。
-
-当前状态：
-
-- 已覆盖主要成功/失败分支。
-- 多文件 patch 和路径逃逸可继续加强。
-
-## 7. 缺口和优先级
-
-### 高优先级
-
-1. 前端单元测试框架：Vitest + React Testing Library。
-2. symlink 路径逃逸测试。
-3. 多文件 patch 测试。
-4. Docker runtime smoke 文档化，并尽量脚本化。
-
-### 中优先级
-
-1. 后端 SSE 流式接口测试。
-2. 真实模型 JSON 格式错误 retry 测试。
-3. Agent 修复循环测试。
-4. Git Workflow LOCAL/DOCKER 更完整集成测试。
-
-### 低优先级
-
-1. 覆盖率统计门禁。
-2. 性能基准。
-3. 大仓库扫描压测。
-4. 跨平台 Windows shell 行为测试。
-
-## 8. 进入标准
-
-进入测试阶段前需要：
-
-- 功能主干已完成。
-- 基础文档齐备。
-- `pnpm verify` 至少跑通一次。
-- CI 已配置。
-- 当前未规划大规模重构。
-
-当前项目满足进入标准。
-
-## 9. 退出标准
-
-测试阶段的第一个里程碑可以定义为：
-
-- P0 自动验证稳定通过。
-- P1/P2 CLI 冒烟稳定通过。
-- 前端至少补齐 API/hook/核心组件测试。
-- Docker runtime smoke 有可复现脚本或清单。
-- 已知风险记录在测试报告中。
-- `main` 分支保持绿色。
-
-## 10. 推荐执行节奏
-
-1. 每次代码修改后跑对应模块测试。
-2. 每次提交前跑 `corepack pnpm verify`。
-3. 每天结束时生成一份短测试报告。
-4. 每个功能阶段结束后跑 P1/P2/P3 手工回归。
-5. Docker 相关改动必须跑 P4。
+这些属于独立业务项目或未来外部集成，不是当前 CLI 仓库范围。

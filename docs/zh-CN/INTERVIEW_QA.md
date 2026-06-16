@@ -1,95 +1,69 @@
 # 面试问答
 
-## Q1：这个项目和普通 ChatGPT 调 API 有什么区别？
+## Q1：这个项目解决什么问题？
 
-普通聊天应用主要是输入 prompt、输出文本。这个项目的重点是让模型输出可执行但受控的动作：搜索代码、读取文件、应用 patch、运行命令、读取测试结果和生成 diff。每个动作都有 schema、权限、结构化结果和 session/event 记录，所以它更接近一个本地 Coding Agent 执行系统。
+它解决的是“让 AI 在本地仓库中可控地完成代码任务”。普通 ChatGPT 只能给建议，`mini-coding-agent` 能在仓库里搜索代码、读文件、应用 patch、执行命令、根据错误继续修复，并把全过程记录下来。
 
-## Q2：为什么产品运行路径只保留真实 API？
+## Q2：为什么做成 CLI？
 
-第一阶段的替身模型价值是降低不确定性，先把工具系统、patch、命令执行、session、后端事件和前端展示跑通。进入实战阶段后，我把产品运行路径收敛为真实 OpenAI-compatible API，避免用户把演示流程误认为实际能力。测试里仍然用 scripted LLM 和 fetch stub 保持确定性，但这只是自动化测试手段，不再是产品功能。
+Coding Agent 最核心的场景发生在开发者本地仓库。CLI 最短、最直接，不需要后端服务和页面就能跑通核心闭环。先把 CLI 做扎实，比先做一个漂亮页面更有价值。
 
-## Q3：真实模型输出不稳定怎么办？
+## Q3：为什么删掉后端和前端？
 
-我把真实模型输出限制为结构化 `AgentDecision`，并用 parser 和 schema 做校验。解析失败时会返回结构化错误，而不是直接执行。后续还可以加强三点：第一，使用更严格的 JSON schema；第二，给模型提供少量工具调用示例；第三，加入自动修复格式的 retry。
+因为它们不是当前项目的核心。后端和前端会把叙事带向普通业务系统，而这个项目真正要展示的是 AgentLoop、工具系统、权限、安全边界、session 和真实模型调用。业务后台可以作为另一个独立项目做。
 
-## Q4：工具调用为什么要统一 ToolRegistry？
+## Q4：AgentLoop 怎么工作？
 
-统一注册表可以集中处理输入校验、工具不存在、异常包装和权限元信息。如果每个工具在 AgentLoop 里手写分支，后续新增工具会让主循环越来越复杂，也很难做审计和测试。
+每轮循环会构建上下文，调用 LLM，得到结构化 `AgentDecision`。如果是 `tool_call` 就执行工具，如果是 `apply_patch` 就检查并应用 patch，如果是 `run_command` 就执行命令，如果失败则把日志放回上下文继续修复，直到 `final` 或达到最大步数。
 
-## Q5：路径安全怎么做？
+## Q5：模型会不会直接操作文件？
 
-文件类工具会把 repoPath 和目标路径解析成绝对路径，然后确认结果仍在 repoPath 内。这样 `../` 和绝对路径逃逸都会被拒绝。后端也有一层 workspace-root 校验，确保 HTTP 请求不能访问配置边界外的目录。
+不会。模型只返回结构化决策。文件读取、搜索、patch 应用和命令执行都由本地 TypeScript 工程代码负责。
 
-## Q6：命令执行安全吗？
+## Q6：工具系统怎么设计？
 
-当前是 MVP 级安全：执行前有权限层、默认超时、输出截断和危险字符串拦截，例如 `sudo`、`rm -rf /`、`mkfs`、`shutdown`。这能挡住明显高风险命令，但生产级还需要更强的 shell 解析、命令 allowlist、容器隔离、权限降级和审计策略。
+每个工具都有统一接口：`name`、`description`、`inputSchema`、`permissionLevel`、`execute`。`ToolRegistry` 负责注册、查找、输入校验、执行和错误包装。
 
-## Q7：为什么 patch 用 git apply，而不是直接改文件？
+## Q7：为什么用 zod？
 
-patch 更适合作为 Agent 的修改边界。它可以在应用前预览，可以用 `git apply --check` 校验，也可以自然生成最终 diff。直接写文件虽然简单，但不利于用户审核和后续 Git Workflow。
+LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和 TypeScript 类型联系起来，工具输入错误时能返回结构化错误，而不是让主流程崩掉。
 
-## Q8：Session 为什么用 JSONL？
+## Q8：如何保证路径安全？
 
-JSONL 适合本地 Agent：可追加、易读、无需数据库、出错时也方便人工检查。每条记录一行，后端可以按行读取，前端也可以展示。等到多用户和集中化部署时，可以再把 session/event 投递到数据库或对象存储。
+所有路径都会通过 `resolveRepoPath(repoPath, targetPath)` 解析成绝对路径，再判断结果是否仍在仓库目录内。这样 `../` 和绝对路径逃逸都会被拒绝。
 
-## Q9：Java 后端为什么不直接用 Node.js？
+## Q9：patch 为什么不用直接写文件？
 
-Runner 已经用 TypeScript 实现，后端我选择 Java 是为了展示控制面的工程能力：任务状态机、数据库、REST/SSE、Docker 编排、路径安全和 Git Workflow。这个拆分也让 Runner 和控制面职责更清晰。
+patch 更适合审计和回滚。应用前可以预览，可以 `git apply --check`，失败时能得到明确错误，成功后可以直接用 `git diff` 展示最终变更。
 
-## Q10：Docker 沙箱解决了什么问题？
+## Q10：命令执行有什么保护？
 
-Docker 模式把任务执行从原始仓库挪到复制出来的 workspace。Agent 修改的是副本，容器默认联网以访问模型端点，但可以配置为无网络；CPU/内存有限制，runner 只读挂载。这降低了本地演示和危险任务对原始仓库的影响。
+命令有超时、输出截断和危险命令拦截。比如 `rm -rf /`、`sudo`、`mkfs`、`shutdown`、`reboot`、`chmod 777 /` 会被默认拦截。
 
-## Q11：Docker 沙箱是不是绝对安全？
+## Q11：为什么 session 用 JSONL？
 
-不是。Docker 是隔离层，但不是完整安全边界。生产级还需要非 root 用户、seccomp/AppArmor、只读根文件系统、capability drop、网络策略、secret 管理、镜像扫描和更强的审计。当前实现是 MVP 里最重要的第一层隔离。
+JSONL 适合本地 Agent：追加简单、人工可读、崩溃后已有记录不丢、无需数据库，也方便未来被其他系统消费。
 
-## Q12：后端如何拿到 CLI 执行过程？
+## Q12：现在是真模型还是 mock？
 
-Runner 有 `--event-stream` 模式，会在 stdout 中输出带 `MINI_AGENT_EVENT` 前缀的 JSON 行。后端读取 stdout 时识别这些行，解析成事件并落库。普通 stdout/stderr 仍然作为日志保存。
+产品运行路径是真实 OpenAI-compatible API。测试里仍然会 stub fetch 或用 scripted LLM，这是为了自动化测试稳定，不是产品功能。
 
-## Q13：SSE 为什么还要轮询兜底？
+## Q13：配置 API key 为什么放文件里？
 
-本地开发时代理、浏览器或后端重启都可能导致 SSE 断开。前端用 SSE 获得实时体验，同时在断开后轮询 `/events`，保证演示时不会因为连接问题导致页面完全不更新。
+本地开发时配置文件更直观。`mini-agent.config.json` 被 gitignore 忽略，`config show` 默认脱敏。也支持环境变量，适合 CI 或临时覆盖。
 
-## Q14：Git Workflow 做到什么程度？
+## Q14：这个项目难点在哪里？
 
-当前支持在任务完成后创建分支、提交 diff、生成 PR title 和 Markdown description，并在前端展示状态。它不自动 push，也不直接创建远程 PR。这样能先把本地交付闭环跑通，再接 GitHub/GitLab API。
+难点不在调用一次 API，而在把模型输出变成可控执行：结构化决策、工具 schema、路径安全、patch check、命令安全、测试反馈、session 审计和错误恢复。
 
-## Q15：如果测试失败，Agent 怎么继续修复？
+## Q15：如果测试失败，Agent 怎么继续？
 
-架构上，命令结果会进入 AgentState 和上下文，下一轮 LLM 可以读取 stderr/stdout 后继续搜索、读文件、打补丁。复杂真实修复能力还需要更强的 prompt、错误摘要、测试定位工具和最大修复次数策略。
+`CommandRunner` 会返回结构化失败结果，包括 stdout、stderr、exitCode。AgentLoop 把这些信息放回上下文，模型下一轮可以继续搜索、读取文件或生成修复 patch。
 
-## Q16：如何避免上下文越来越大？
+## Q16：有什么不足？
 
-当前 `ContextBuilder` 做的是基础拼接和最近结果裁剪，`read_file` 也限制读取行数。后续可以继续做 token budget、README/build 文件摘要缓存、最近失败日志优先、重要文件排序和历史消息压缩。
+当前不是生产级沙箱；上下文压缩还比较简单；复杂仓库的任务规划依赖模型能力；没有远程 PR 创建和多人控制面。
 
-## Q17：为什么前端不直接调用 CLI？
+## Q17：后续怎么扩展？
 
-浏览器不能也不应该直接访问本地文件系统和执行命令。前端只调用后端 API，后端负责路径校验、任务状态、日志事件、执行模式和安全策略。
-
-## Q18：如何支持多人使用？
-
-需要引入用户、项目、权限和任务隔离：
-
-- 每个用户只能访问授权 workspace。
-- 任务和 session 按用户隔离。
-- API key 和模型配置进入安全配置中心。
-- Docker workspace 按用户/任务隔离。
-- 操作审计和配额限制进入后端。
-
-## Q19：如果要接远程 PR，怎么扩展？
-
-可以在 Git Workflow 后增加 Provider 层：
-
-- `GitProvider` 接口：GitHub、GitLab、Gitea。
-- 使用 token 创建 remote branch。
-- push 本地 commit。
-- 调用 API 创建 PR/MR。
-- 把 PR URL 写回 `agent_git_workflow`。
-
-同时要做 token 加密保存、权限校验和失败重试。
-
-## Q20：这个项目最大价值是什么？
-
-它把 Coding Agent 的关键工程问题串起来了：受控工具调用、权限、patch、命令反馈、session 审计、任务控制、实时事件、沙箱和交付流程。即使模型能力继续变化，这套执行和治理框架仍然有价值。
+优先方向是增强 Prompt、改进决策解析、加入 dry-run、增强 session replay、识别项目测试命令。如果未来需要平台化，可以单独做后端/前端，不把它们绑死在 CLI 仓库里。

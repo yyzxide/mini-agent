@@ -1,305 +1,229 @@
-# 演示脚本
+# 本地演示脚本
 
-这份脚本按“最稳演示优先”的顺序组织。建议先演示 CLI 和 Web 本地模式，再根据现场环境决定是否演示 Docker。
+这份脚本用于演示纯 CLI 版 `mini-coding-agent`。目标是证明它能在本地仓库中完成“理解任务、调用工具、修改代码、执行命令、输出 diff、保存 session”的闭环。
 
-## 1. 演示前检查
-
-在仓库根目录执行：
-
-```bash
-pnpm install
-pnpm verify
-```
-
-如果只想快速验证 Runner：
-
-```bash
-pnpm verify:runner
-```
-
-如果要演示后端：
-
-```bash
-pnpm verify:backend
-```
-
-如果要演示前端：
-
-```bash
-pnpm verify:frontend
-```
-
-## 2. CLI 演示
-
-### 2.1 准备一个临时 Git 仓库
-
-不要直接在项目仓库里演示代码修改，建议用 `/tmp` 下的临时仓库：
-
-```bash
-rm -rf /tmp/mini-agent-demo
-mkdir -p /tmp/mini-agent-demo
-cd /tmp/mini-agent-demo
-git init
-printf "initial line\n" > demo.txt
-git add demo.txt
-git commit -m "chore: init demo"
-```
-
-如果本机没有配置 Git 用户，可以临时设置：
-
-```bash
-git config user.name "Demo User"
-git config user.email "demo@example.com"
-```
-
-### 2.2 配置真实模型并执行 Agent 任务
-
-假设项目路径是 `/home/sid/miniagent/mini-coding-agent`：
-
-```bash
-cp /home/sid/miniagent/mini-coding-agent/mini-agent.config.example.json ./mini-agent.config.json
-```
-
-编辑当前仓库的 `mini-agent.config.json`，填入真实 `apiKey` 和 `model`，然后先跑只读任务：
-
-```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "查看当前仓库结构并总结可以从哪里开始修改" --max-steps 8
-```
-
-重点观察输出：
-
-- `[plan]`
-- `[tool] search_code`
-- `[tool] read_file`
-- `[patch]`，当模型决定修改文件时出现
-- `[command]`，当模型决定运行验证命令时出现
-- `[diff]`
-- `[summary]`
-
-### 2.3 查看结果
-
-```bash
-git diff
-ls -R .mini-agent
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js sessions
-```
-
-可以补充展示工具调试命令：
-
-```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js tool list
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js tool run read_file '{"path":"demo.txt"}'
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js git diff
-```
-
-讲解点：
-
-- Agent 没有直接写文件，而是通过 patch。
-- 命令执行经过权限层和风险拦截，普通命令不再需要二次确认。
-- session/event 都保存在本地，后续可以被后端读取。
-
-如果确认只读任务稳定，再演示一个小修改任务：
-
-```bash
-node /home/sid/miniagent/mini-coding-agent/dist/cli/index.js run "给 demo.txt 增加一行 hello from mini-agent" --max-steps 12
-```
-
-## 3. 后端演示
-
-在项目根目录先构建 Runner：
-
-```bash
-pnpm build
-```
-
-启动后端：
-
-```bash
-cd backend
-mvn spring-boot:run
-```
-
-打开 Swagger：
-
-```text
-http://localhost:8080/swagger-ui.html
-```
-
-创建 LOCAL 任务：
-
-```http
-POST /api/agent/tasks
-Content-Type: application/json
-
-{
-  "repoPath": "/tmp/mini-agent-demo",
-  "userGoal": "查看当前仓库结构并总结可以从哪里开始修改",
-  "maxSteps": 20,
-  "executionMode": "LOCAL"
-}
-```
-
-然后查看：
-
-```text
-GET /api/agent/tasks
-GET /api/agent/tasks/{id}
-GET /api/agent/tasks/{id}/events
-GET /api/agent/tasks/{id}/logs
-GET /api/agent/tasks/{id}/diff
-GET /api/agent/tasks/{id}/session/records
-GET /api/agent/tasks/{id}/session/events
-```
-
-讲解点：
-
-- 后端不重写 Agent，只启动 Runner。
-- `MINI_AGENT_EVENT` 让 CLI 过程变成后端可消费的事件流。
-- H2 保存任务、日志和事件，session JSONL 仍保存在工作仓库。
-
-## 5. 前端演示
-
-后端启动后，新开终端：
-
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
-
-打开：
-
-```text
-http://localhost:5173
-```
-
-演示路径：
-
-1. 进入创建任务页。
-2. repoPath 填 `/tmp/mini-agent-demo`。
-3. userGoal 填 `查看当前仓库结构并总结可以从哪里开始修改`。
-4. execution mode 选 `LOCAL`。
-5. 提交任务。
-6. 在任务详情页观察事件、日志、diff、session。
-
-讲解点：
-
-- 前端展示的是后端控制面，不直接访问本地文件。
-- SSE 断开会回退轮询。
-- 详情页同时展示过程数据和最终交付数据。
-
-## 5. Docker 沙箱演示
-
-先构建镜像：
+## 1. 准备项目
 
 ```bash
 cd /home/sid/miniagent/mini-coding-agent
-pnpm run docker:build-sandbox
+npm install
+npm run build
+npm test
+npm link
+mini-agent --help
 ```
 
-确认 Docker 可用：
+如果不使用全局链接：
 
 ```bash
-docker images | grep mini-coding-agent-sandbox
+node dist/cli/index.js --help
 ```
 
-创建 DOCKER 任务：
+## 2. 配置模型
 
-```http
-POST /api/agent/tasks
-Content-Type: application/json
+```bash
+cp mini-agent.config.example.json mini-agent.config.json
+```
 
+编辑：
+
+```json
 {
-  "repoPath": "/tmp/mini-agent-demo",
-  "userGoal": "查看当前仓库结构并总结可以从哪里开始修改",
-  "maxSteps": 20,
-  "executionMode": "DOCKER"
+  "version": 1,
+  "llm": {
+    "mode": "real",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "your-api-key",
+    "model": "your-model",
+    "temperature": 0.2,
+    "maxTokens": 4096,
+    "timeoutMs": 60000
+  }
 }
 ```
 
-查看沙箱信息：
+验证配置脱敏输出：
 
-```text
-GET /api/agent/tasks/{id}/sandbox
+```bash
+mini-agent config show
 ```
 
 讲解点：
 
-- Docker 模式复制仓库到 `backend/data/workspaces/task_<id>/repo`。
-- Agent 修改的是 workspace 副本，不是原始仓库。
-- 容器默认联网以访问模型端点，runner 只读挂载；需要更强隔离时可以关闭 Docker 网络。
+- `mini-agent.config.json` 被 gitignore 忽略。
+- `config show` 默认隐藏 apiKey。
+- 也可以用环境变量覆盖配置。
 
-如果 Docker 镜像拉取慢或环境不可用，可以直接说明：Docker 部分已有命令构造、workspace 复制和服务测试，现场演示切回 LOCAL。
+## 3. 工具系统演示
 
-## 7. Git Workflow 演示
-
-当任务状态为 `COMPLETED` 且 diff 非空时，可以在前端任务详情页的 Diff/Git Workflow 区域操作：
-
-1. Create branch
-2. Commit
-3. Generate PR draft
-4. Complete workflow
-
-也可以通过接口调用：
-
-```text
-POST /api/agent/tasks/{id}/git/branch
-POST /api/agent/tasks/{id}/git/commit
-POST /api/agent/tasks/{id}/git/pr-draft
-POST /api/agent/tasks/{id}/git/complete
-GET  /api/agent/tasks/{id}/git
+```bash
+mini-agent tool list
+mini-agent tool run list_files '{"path":"src","maxDepth":2}'
+mini-agent tool run read_file '{"path":"README.md","maxLines":40}'
+mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":10}'
+mini-agent tool run git_status '{}'
+mini-agent tool run git_diff '{}'
 ```
 
 讲解点：
 
-- `LOCAL` 模式会修改原始仓库分支。
-- `DOCKER` 模式会修改 workspace 内的仓库。
-- 当前生成本地 commit 和 PR 草稿，不自动推送远端。
+- 所有工具都有 zod schema。
+- 文件路径必须限制在 repoPath 内。
+- `search_code` 调用的是 ripgrep。
+- 工具结果是结构化 JSON，便于 AgentLoop 和测试使用。
 
-## 8. 演示时常见问题
-
-### pnpm 命令不可用
-
-使用 corepack：
+## 4. 命令系统演示
 
 ```bash
-corepack enable
-corepack pnpm install
+mini-agent command run "echo hello"
+mini-agent command run "npm test"
 ```
 
-### 后端报 repoPath outside workspace-root
+讲解点：
 
-调整 `backend/src/main/resources/application.yml` 的 `code-agent.workspace-root`，或选择 workspace-root 下的仓库。
+- 命令结果包含 stdout、stderr、exitCode、durationMs。
+- 命令有超时和输出截断。
+- 危险命令会被 PermissionManager 拦截。
 
-### 前端无法连接后端
-
-确认后端在 `8080`：
-
-```text
-http://localhost:8080/swagger-ui.html
-```
-
-或设置：
+可以演示危险命令拦截：
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8080 pnpm dev
+mini-agent command run "sudo reboot"
 ```
 
-### Docker 任务失败
+## 5. Patch 演示
 
-优先检查：
+准备一个临时 patch 文件，例如修改 README 某一行，然后执行：
 
 ```bash
-docker ps -a
-docker images
+mini-agent patch preview < /tmp/demo.patch
+mini-agent patch apply < /tmp/demo.patch
+mini-agent diff
 ```
 
-然后在前端查看 stderr 日志和 sandbox 信息。
+讲解点：
 
-### Git Workflow 按钮不可用
+- `patch preview` 不落盘。
+- `patch apply` 会先跑 `git apply --check`。
+- 应用后可以直接看 `git diff`。
+
+## 6. Agent 一次性任务演示
+
+在当前仓库运行：
+
+```bash
+mini-agent run "阅读这个仓库，说明 CLI 入口、工具系统和 session 记录分别在哪里实现"
+```
+
+更接近真实开发的任务：
+
+```bash
+mini-agent run "给 README 增加一段说明，解释 mini-agent.config.json 为什么不应该提交到 git"
+```
+
+观察输出中的：
+
+- plan
+- tool call
+- patch
+- command
+- result
+- summary
+- diff
+
+## 7. Session 演示
+
+列出 session：
+
+```bash
+mini-agent sessions
+```
+
+查看某次 session：
+
+```bash
+mini-agent session show <sessionId>
+mini-agent session events <sessionId>
+```
+
+也可以直接看文件：
+
+```bash
+find .mini-agent -maxdepth 2 -type f
+```
+
+讲解点：
+
+- `.mini-agent/sessions` 保存会话状态。
+- `.mini-agent/events` 保存时间线事件。
+- JSONL 便于追加和人工排查。
+
+## 8. 面试讲解顺序
+
+推荐按这个顺序讲：
+
+1. 为什么做：想复刻一个简化版 Codex CLI/Claude Code。
+2. 怎么跑：`mini-agent run "任务"`。
+3. AgentLoop：模型只给决策，执行由本地受控代码完成。
+4. ToolRegistry：统一 schema、权限、错误包装。
+5. 安全边界：路径、patch check、命令拦截、超时。
+6. Session：每一步可追溯。
+7. 取舍：删掉后端和前端，专注 CLI Agent 本体。
+
+## 9. 常见问题
+
+### mini-agent: command not found
+
+说明还没有执行 `npm link`，或者当前 shell PATH 没有 Node 全局 bin。
+
+解决：
+
+```bash
+cd /home/sid/miniagent/mini-coding-agent
+npm link
+mini-agent --help
+```
+
+或直接：
+
+```bash
+node dist/cli/index.js --help
+```
+
+### mini-agent 没有输出
+
+旧版本在 `npm link` 场景下可能因为 symlink 入口判断失败直接退出。当前版本已修复，重新 build 即可：
+
+```bash
+npm run build
+mini-agent --help
+```
+
+### 模型调用失败
+
+检查：
+
+```bash
+mini-agent config show
+```
 
 确认：
 
-- 任务状态是 `COMPLETED`。
-- diff 非空。
-- 目标仓库是 Git 仓库。
+- `baseUrl` 正确。
+- `apiKey` 有值。
+- `model` 有值。
+- 当前网络能访问模型服务。
+
+### search_code 失败
+
+确认安装了 ripgrep：
+
+```bash
+rg --version
+```
+
+Ubuntu 安装：
+
+```bash
+sudo apt install ripgrep
+```
