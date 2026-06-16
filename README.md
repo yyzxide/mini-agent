@@ -9,6 +9,7 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 - Starts an interactive local coding-agent session with `mini-agent`.
 - Runs one-shot tasks with `mini-agent run "..."`.
 - Calls real OpenAI-compatible chat completions APIs.
+- Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Searches code with `rg`.
 - Reads files with repository path safety checks.
 - Applies unified diff patches after `git apply --check`.
@@ -104,6 +105,7 @@ mini-agent sessions
 mini-agent diff
 mini-agent tool list
 mini-agent tool run read_file '{"path":"README.md"}'
+mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent command run "echo hello"
 mini-agent patch preview < patch.diff
 ```
@@ -160,6 +162,7 @@ Available tools:
 | `search_code` | `SAFE` | Search with ripgrep. |
 | `git_status` | `SAFE` | Run `git status --short`. |
 | `git_diff` | `SAFE` | Run `git diff` or `git diff --cached`. |
+| `fetch_url` | `SAFE` | Fetch bounded text from a public HTTP(S) URL. |
 | `apply_patch` | `REVIEW` | Check and apply a unified diff patch. |
 
 Command execution is handled by the command subsystem rather than the tool registry:
@@ -177,6 +180,7 @@ The current MVP uses local guardrails:
 - Binary files are rejected by `read_file`.
 - `read_file` has line limits.
 - `search_code` limits result count.
+- `fetch_url` blocks localhost/private-network targets, limits timeout/download size, and returns only readable text-like content.
 - Patch application runs `git apply --check` before `git apply`.
 - Commands have a timeout and output truncation.
 - Dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
@@ -234,6 +238,7 @@ Debug examples:
 mini-agent tool list
 mini-agent tool run list_files '{"path":"."}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src"}'
+mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 mini-agent command run "echo hello"

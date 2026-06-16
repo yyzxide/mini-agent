@@ -24,6 +24,10 @@
 - Go 项目识别 `go test ./...`。
 - Python 项目识别 `pytest`。
 
+### 1.4 Web Search Provider
+
+当前已支持 `fetch_url` 读取指定公网 URL。下一步如果需要“搜索全网”，建议增加 `web_search` 工具，并通过配置接 Brave、Tavily 或 SerpAPI 这类稳定搜索 API。
+
 ## 2. 中期：提升开发体验
 
 ### 2.1 Dry-run 模式

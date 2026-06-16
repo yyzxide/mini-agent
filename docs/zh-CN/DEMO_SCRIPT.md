@@ -61,6 +61,7 @@ mini-agent tool list
 mini-agent tool run list_files '{"path":"src","maxDepth":2}'
 mini-agent tool run read_file '{"path":"README.md","maxLines":40}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":10}'
+mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 ```
@@ -70,6 +71,7 @@ mini-agent tool run git_diff '{}'
 - 所有工具都有 zod schema。
 - 文件路径必须限制在 repoPath 内。
 - `search_code` 调用的是 ripgrep。
+- `fetch_url` 用于读取公网文档，带超时、大小和内网目标限制。
 - 工具结果是结构化 JSON，便于 AgentLoop 和测试使用。
 
 ## 4. 命令系统演示

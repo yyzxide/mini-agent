@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ListFilesTool } from "../../src/tools/ListFilesTool.js";
 import { ReadFileTool } from "../../src/tools/ReadFileTool.js";
 import {
@@ -40,6 +40,18 @@ interface GitDiffData {
   truncated: boolean;
 }
 
+interface FetchUrlData {
+  url: string;
+  finalUrl: string;
+  status: number;
+  statusText: string;
+  contentType: string;
+  text: string;
+  bytesRead: number;
+  truncated: boolean;
+  outputTruncated: boolean;
+}
+
 let tempRoot: string;
 let repoPath: string;
 
@@ -60,6 +72,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(tempRoot, { recursive: true, force: true });
 });
 
@@ -174,6 +187,62 @@ describe("read-only repository tools", () => {
     expectSuccess<GitDiffData>(result);
     expect(result.data.diff).toContain("+changed line");
     expect(result.data.truncated).toBe(false);
+  });
+
+  it("fetch_url returns bounded text content from a public URL", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      "<html><head><style>.hidden{}</style></head><body><h1>Docs</h1><script>bad()</script><p>Hello &amp; welcome.</p></body></html>",
+      {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/html; charset=utf-8" },
+      },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", {
+      url: "https://example.com/docs",
+      maxBytes: 500,
+    }, { repoPath });
+
+    expectSuccess<FetchUrlData>(result);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(result.data.status).toBe(200);
+    expect(result.data.contentType).toContain("text/html");
+    expect(result.data.text).toContain("Docs");
+    expect(result.data.text).toContain("Hello & welcome.");
+    expect(result.data.text).not.toContain("bad()");
+    expect(result.data.truncated).toBe(false);
+  });
+
+  it("fetch_url refuses localhost and private network targets", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", { url: "http://localhost:8080" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("BLOCKED_NETWORK_TARGET");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fetch_url truncates long output by context limit", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("0123456789", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    })));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", {
+      url: "https://example.com/plain",
+      maxBytes: 100,
+    }, { repoPath, maxOutputChars: 4 });
+
+    expectSuccess<FetchUrlData>(result);
+    expect(result.data.text).toBe("0123");
+    expect(result.data.outputTruncated).toBe(true);
   });
 });
 

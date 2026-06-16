@@ -67,6 +67,7 @@ mini-agent config show
 mini-agent tool run list_files '{"path":"src","maxDepth":2}'
 mini-agent tool run read_file '{"path":"README.md","maxLines":20}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":5}'
+mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 ```
@@ -76,6 +77,7 @@ mini-agent tool run git_diff '{}'
 - 输出结构化 JSON。
 - `read_file` 有行号和内容。
 - `search_code` 能返回路径、行号和文本。
+- `fetch_url` 能返回公网文本内容。
 - git 工具在 git 仓库里正常。
 
 ## 6. 路径安全

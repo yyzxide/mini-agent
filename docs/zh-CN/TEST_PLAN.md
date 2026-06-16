@@ -14,6 +14,7 @@
 - `list_files` 忽略目录和数量限制。
 - `read_file` 行范围、二进制拒绝、路径越权。
 - `search_code` 调用 ripgrep。
+- `fetch_url` 能读取公网文本内容，拒绝 localhost/内网目标，并限制输出。
 - `git_status` 和 `git_diff`。
 - `apply_patch` 权限、check、apply、失败返回。
 
@@ -92,6 +93,7 @@ mini-agent tool list
 mini-agent tool run list_files '{"path":"."}'
 mini-agent tool run read_file '{"path":"README.md"}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src"}'
+mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 ```
@@ -150,6 +152,7 @@ git diff --check
 | 工具参数错误 | ToolRegistry 测试 |
 | 路径越权 | fs/read_file/apply_patch 测试 |
 | 命令卡死 | CommandRunner 超时测试 |
+| URL 读取失控 | fetch_url 超时、大小、内网目标测试 |
 | patch 损坏 | PatchManager check 测试 |
 | session 丢失 | SessionStore/EventStore 测试 |
 | 真实 API 不可用 | 配置错误提示和 fetch stub 测试 |

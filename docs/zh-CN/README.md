@@ -28,13 +28,13 @@
 
 ## 一句话介绍
 
-这是一个 TypeScript 实现的本地 AI Coding Agent CLI。它可以在任意 git 仓库中接收自然语言任务，通过受控工具搜索代码、读取文件、应用补丁、执行命令、查看测试反馈，并把整个过程记录到本地 JSONL session。
+这是一个 TypeScript 实现的本地 AI Coding Agent CLI。它可以在任意 git 仓库中接收自然语言任务，通过受控工具搜索代码、读取文件、读取公网文档、应用补丁、执行命令、查看测试反馈，并把整个过程记录到本地 JSONL session。
 
 ## 核心能力
 
 - 真实 OpenAI-compatible API 接入。
 - 统一 ToolRegistry 和 zod 参数校验。
-- `list_files`、`read_file`、`search_code`、`git_status`、`git_diff`、`apply_patch`。
+- `list_files`、`read_file`、`search_code`、`fetch_url`、`git_status`、`git_diff`、`apply_patch`。
 - 命令执行超时、输出截断和危险命令拦截。
 - patch 应用前 `git apply --check`。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。

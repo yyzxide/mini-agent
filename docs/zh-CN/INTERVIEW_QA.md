@@ -32,38 +32,42 @@ LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和
 
 所有路径都会通过 `resolveRepoPath(repoPath, targetPath)` 解析成绝对路径，再判断结果是否仍在仓库目录内。这样 `../` 和绝对路径逃逸都会被拒绝。
 
-## Q9：patch 为什么不用直接写文件？
+## Q9：联网能力怎么控制？
+
+联网不是让模型随便访问网络，而是通过 `fetch_url` 工具读取公网 HTTP(S) 文档。工具会限制超时、下载大小和输出长度，拒绝 localhost、`.local` 和明显的内网 IP，并且只返回文本类内容。全网搜索会作为下一阶段接入独立搜索 API。
+
+## Q10：patch 为什么不用直接写文件？
 
 patch 更适合审计和回滚。应用前可以预览，可以 `git apply --check`，失败时能得到明确错误，成功后可以直接用 `git diff` 展示最终变更。
 
-## Q10：命令执行有什么保护？
+## Q11：命令执行有什么保护？
 
 命令有超时、输出截断和危险命令拦截。比如 `rm -rf /`、`sudo`、`mkfs`、`shutdown`、`reboot`、`chmod 777 /` 会被默认拦截。
 
-## Q11：为什么 session 用 JSONL？
+## Q12：为什么 session 用 JSONL？
 
 JSONL 适合本地 Agent：追加简单、人工可读、崩溃后已有记录不丢、无需数据库，也方便未来被其他系统消费。
 
-## Q12：现在是真模型还是 mock？
+## Q13：现在是真模型还是 mock？
 
 产品运行路径是真实 OpenAI-compatible API。测试里仍然会 stub fetch 或用 scripted LLM，这是为了自动化测试稳定，不是产品功能。
 
-## Q13：配置 API key 为什么放文件里？
+## Q14：配置 API key 为什么放文件里？
 
 本地开发时配置文件更直观。`mini-agent.config.json` 被 gitignore 忽略，`config show` 默认脱敏。也支持环境变量，适合 CI 或临时覆盖。
 
-## Q14：这个项目难点在哪里？
+## Q15：这个项目难点在哪里？
 
 难点不在调用一次 API，而在把模型输出变成可控执行：结构化决策、工具 schema、路径安全、patch check、命令安全、测试反馈、session 审计和错误恢复。
 
-## Q15：如果测试失败，Agent 怎么继续？
+## Q16：如果测试失败，Agent 怎么继续？
 
 `CommandRunner` 会返回结构化失败结果，包括 stdout、stderr、exitCode。AgentLoop 把这些信息放回上下文，模型下一轮可以继续搜索、读取文件或生成修复 patch。
 
-## Q16：有什么不足？
+## Q17：有什么不足？
 
 当前不是生产级沙箱；上下文压缩还比较简单；复杂仓库的任务规划依赖模型能力；没有远程 PR 创建和多人控制面。
 
-## Q17：后续怎么扩展？
+## Q18：后续怎么扩展？
 
 优先方向是增强 Prompt、改进决策解析、加入 dry-run、增强 session replay、识别项目测试命令。如果未来需要平台化，可以单独做后端/前端，不把它们绑死在 CLI 仓库里。

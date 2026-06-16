@@ -2,7 +2,7 @@
 
 ## 1. 当前定位
 
-`mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、补丁应用、命令执行、测试反馈和 diff 总结。
+`mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、联网读取公开文档、补丁应用、命令执行、测试反馈和 diff 总结。
 
 当前版本不内置后端服务和前端页面。所有核心能力都在 TypeScript CLI Runner 中完成。
 
@@ -90,6 +90,7 @@ interface Tool<TInput, TResult> {
 - `search_code`
 - `git_status`
 - `git_diff`
+- `fetch_url`
 - `apply_patch`
 
 ## 6. 路径安全
@@ -106,7 +107,19 @@ interface Tool<TInput, TResult> {
 
 这保证 Agent 即便收到不可靠的模型输出，也不能随意读写仓库外文件。
 
-## 7. Patch 设计
+## 7. 联网工具
+
+联网能力先以 `fetch_url` 工具提供，而不是让 Agent 任意访问网络。它的边界是：
+
+- 只支持 `http` 和 `https`。
+- 拒绝 localhost、`.local` 和明显的内网 IP。
+- 限制超时时间和最大下载字节数。
+- 只返回文本、HTML、JSON、XML 等可读内容。
+- HTML 会做简单文本抽取，避免把脚本和样式塞进上下文。
+
+真正的全网搜索建议作为下一阶段单独接搜索 API，例如 Brave、Tavily 或 SerpAPI。
+
+## 8. Patch 设计
 
 patch 由 `PatchManager` 管理：
 
@@ -119,7 +132,7 @@ patch 由 `PatchManager` 管理：
 
 这样可以把“模型生成修改”和“本地实际落盘”之间加一层工程校验。
 
-## 8. 命令执行
+## 9. 命令执行
 
 `CommandRunner` 使用子进程执行命令，返回结构化结果：
 
@@ -144,7 +157,7 @@ patch 由 `PatchManager` 管理：
 - 工作目录限制。
 - 失败结果进入下一轮上下文。
 
-## 9. Session 和 Event
+## 10. Session 和 Event
 
 `.mini-agent/` 是本地记录目录：
 
@@ -163,7 +176,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - 崩溃时仍保留已写入步骤。
 - 以后可以被别的系统读取。
 
-## 10. LLM 接入
+## 11. LLM 接入
 
 当前产品运行路径使用真实 OpenAI-compatible API：
 
@@ -187,7 +200,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 配置读取和 LLM 客户端保持独立，避免 AgentLoop 直接依赖某个厂商 SDK。
 
-## 11. 为什么现在不做后端和前端
+## 12. 为什么现在不做后端和前端
 
 这个项目的核心价值是本地 CLI Agent 的闭环，而不是展示页面。后端和前端适合做成独立项目，例如软件商店后台、任务平台或企业控制台。
 

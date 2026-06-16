@@ -9,6 +9,7 @@ import {
 } from "../utils/errors.js";
 import type { EventType, JsonObject, JsonValue, SessionRecordType } from "../session/SessionTypes.js";
 import { ApplyPatchTool } from "./ApplyPatchTool.js";
+import { FetchUrlTool } from "./FetchUrlTool.js";
 import { GitDiffTool } from "./GitDiffTool.js";
 import { GitStatusTool } from "./GitStatusTool.js";
 import { ListFilesTool } from "./ListFilesTool.js";
@@ -198,6 +199,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register(new ApplyPatchTool());
+  registry.register(new FetchUrlTool());
   registry.register(new GitDiffTool());
   registry.register(new GitStatusTool());
   registry.register(new ListFilesTool());
