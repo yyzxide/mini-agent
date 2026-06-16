@@ -223,7 +223,7 @@ mvn spring-boot:run
 打开：
 
 ```text
-http://localhost:8080/swagger-ui/index.html
+http://localhost:8080/swagger-ui.html
 ```
 
 创建任务后检查：

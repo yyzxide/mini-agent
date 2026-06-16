@@ -413,7 +413,7 @@ mvn spring-boot:run
 Open Swagger:
 
 ```text
-http://localhost:8080/swagger-ui/index.html
+http://localhost:8080/swagger-ui.html
 ```
 
 Default backend config:

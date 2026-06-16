@@ -122,7 +122,7 @@ mvn spring-boot:run
 打开 Swagger：
 
 ```text
-http://localhost:8080/swagger-ui/index.html
+http://localhost:8080/swagger-ui.html
 ```
 
 创建 LOCAL 任务：
@@ -276,7 +276,7 @@ corepack pnpm install
 确认后端在 `8080`：
 
 ```text
-http://localhost:8080/swagger-ui/index.html
+http://localhost:8080/swagger-ui.html
 ```
 
 或设置：
