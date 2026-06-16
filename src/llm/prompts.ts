@@ -17,6 +17,7 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "- Search and read relevant files before generating a patch.",
   "- Do not invent file paths. Use tool results and repository context.",
   "- Patches must be valid unified diff patches.",
+  "- For new files, include diff --git, new file mode, --- /dev/null, +++ b/path, and accurate @@ hunk line counts.",
   "- Keep patches small and focused.",
   "- Prefer existing project test commands before proposing new commands.",
   "- If key information is missing, return ASK_USER.",

@@ -97,8 +97,9 @@ export class PatchManager {
 
   async validatePatch(input: ValidatePatchInput): Promise<PatchCheckResult> {
     try {
-      this.assertPatchAllowed(input.patch);
-      const patchFile = await this.writeTempPatch(input.patch);
+      const patch = normalizeUnifiedDiff(input.patch);
+      this.assertPatchAllowed(patch);
+      const patchFile = await this.writeTempPatch(patch);
       try {
         const result = await execa("git", ["apply", "--check", patchFile], {
           cwd: this.repoPath,
@@ -125,8 +126,9 @@ export class PatchManager {
   }
 
   async previewPatch(input: PreviewPatchInput): Promise<PatchPreviewResult> {
-    this.assertPatchAllowed(input.patch);
-    const preview = parseUnifiedDiff(input.patch);
+    const patch = normalizeUnifiedDiff(input.patch);
+    this.assertPatchAllowed(patch);
+    const preview = parseUnifiedDiff(patch);
     const { text, truncated } = truncateText(preview.summary, this.maxPatchChars);
     return {
       files: preview.files,
@@ -136,10 +138,11 @@ export class PatchManager {
   }
 
   async applyPatch(input: ApplyPatchInput): Promise<PatchApplyResult> {
-    const preview = await this.previewPatch({ patch: input.patch });
+    const patch = normalizeUnifiedDiff(input.patch);
+    const preview = await this.previewPatch({ patch });
     const checkResult = input.checkBeforeApply === false
       ? { success: true }
-      : await this.validatePatch({ patch: input.patch });
+      : await this.validatePatch({ patch });
 
     if (!checkResult.success) {
       return {
@@ -153,7 +156,7 @@ export class PatchManager {
       };
     }
 
-    const patchFile = await this.writeTempPatch(input.patch);
+    const patchFile = await this.writeTempPatch(patch);
     try {
       const result = await execa("git", ["apply", patchFile], {
         cwd: this.repoPath,
@@ -239,11 +242,10 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
       continue;
     }
 
-    if (!current) {
-      continue;
-    }
-
     if (line.startsWith("rename from ")) {
+      if (!current) {
+        continue;
+      }
       const oldPath = normalizePatchPath(line.slice("rename from ".length));
       if (oldPath) {
         current.oldPath = oldPath;
@@ -253,6 +255,9 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
     }
 
     if (line.startsWith("rename to ")) {
+      if (!current) {
+        continue;
+      }
       const newPath = normalizePatchPath(line.slice("rename to ".length));
       if (newPath) {
         current.newPath = newPath;
@@ -263,16 +268,33 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
     }
 
     if (line.startsWith("new file mode ")) {
+      if (!current) {
+        continue;
+      }
       current.changeType = "ADDED";
       continue;
     }
 
     if (line.startsWith("deleted file mode ")) {
+      if (!current) {
+        continue;
+      }
       current.changeType = "DELETED";
       continue;
     }
 
     if (line.startsWith("--- ")) {
+      if (!current) {
+        current = {
+          oldPath: undefined,
+          newPath: undefined,
+          displayPath: undefined,
+          changeType: "MODIFIED",
+          additions: 0,
+          deletions: 0,
+        };
+        files.push(current);
+      }
       const oldPath = parseHeaderPath(line.slice(4));
       if (oldPath === undefined) {
         current.changeType = "ADDED";
@@ -283,6 +305,9 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
     }
 
     if (line.startsWith("+++ ")) {
+      if (!current) {
+        continue;
+      }
       const newPath = parseHeaderPath(line.slice(4));
       if (newPath === undefined) {
         current.changeType = "DELETED";
@@ -293,11 +318,17 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
     }
 
     if (line.startsWith("+") && !line.startsWith("+++")) {
+      if (!current) {
+        continue;
+      }
       current.additions += 1;
       continue;
     }
 
     if (line.startsWith("-") && !line.startsWith("---")) {
+      if (!current) {
+        continue;
+      }
       current.deletions += 1;
     }
   }
@@ -317,6 +348,58 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
     summary: summarizePatchFiles(normalizedFiles),
     truncated: false,
   };
+}
+
+function normalizeUnifiedDiff(patch: string): string {
+  const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  const output = [...lines];
+  const hunkHeaderPattern = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const match = hunkHeaderPattern.exec(line);
+    if (!match) {
+      continue;
+    }
+
+    let oldCount = 0;
+    let newCount = 0;
+
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const hunkLine = lines[cursor] ?? "";
+
+      if (
+        hunkHeaderPattern.test(hunkLine)
+        || hunkLine.startsWith("diff --git ")
+        || hunkLine.startsWith("--- ")
+      ) {
+        break;
+      }
+
+      if (hunkLine.startsWith("\\ No newline at end of file")) {
+        continue;
+      }
+
+      if (hunkLine.startsWith("+") && !hunkLine.startsWith("+++")) {
+        newCount += 1;
+        continue;
+      }
+
+      if (hunkLine.startsWith("-") && !hunkLine.startsWith("---")) {
+        oldCount += 1;
+        continue;
+      }
+
+      if (hunkLine.startsWith(" ")) {
+        oldCount += 1;
+        newCount += 1;
+      }
+    }
+
+    output[index] = `@@ -${match[1]},${oldCount} +${match[2]},${newCount} @@${match[3] ?? ""}`;
+  }
+
+  return output.join("\n");
 }
 
 function inferChangeType(file: MutablePatchFile): PatchChangeType {

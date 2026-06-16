@@ -85,6 +85,18 @@ describe("PatchManager", () => {
     await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe("hello\nworld\n");
   });
 
+  it("normalizes model-style hunk counts before applying a new file patch", async () => {
+    const manager = new PatchManager({ repoPath });
+
+    const result = await manager.applyPatch({ patch: modelStyleTwoSumPatch() });
+
+    expect(result.success).toBe(true);
+    expect(result.changedFiles).toEqual([
+      { path: "two_sum.cpp", changeType: "ADDED", additions: 13, deletions: 0 },
+    ]);
+    await expect(fs.readFile(path.join(repoPath, "two_sum.cpp"), "utf8")).resolves.toContain("int twoSum(int a, int b)");
+  });
+
   it("returns git diff after applying a patch", async () => {
     const manager = new PatchManager({ repoPath });
 
@@ -155,6 +167,28 @@ export function deleteFilePatch(): string {
     "+++ /dev/null",
     "@@ -1 +0,0 @@",
     "-bye",
+    "",
+  ].join("\n");
+}
+
+function modelStyleTwoSumPatch(): string {
+  return [
+    "--- /dev/null",
+    "+++ b/two_sum.cpp",
+    "@@ -0,0 +1,15 @@",
+    "+#include <iostream>",
+    "+",
+    "+int twoSum(int a, int b) {",
+    "+    return a + b;",
+    "+}",
+    "+",
+    "+int main() {",
+    "+    int x, y;",
+    "+    std::cout << \"Enter two numbers: \";",
+    "+    std::cin >> x >> y;",
+    "+    std::cout << \"Sum: \" << twoSum(x, y) << std::endl;",
+    "+    return 0;",
+    "+}",
     "",
   ].join("\n");
 }
