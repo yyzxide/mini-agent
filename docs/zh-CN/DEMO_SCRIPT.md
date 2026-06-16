@@ -109,7 +109,21 @@ mini-agent diff
 - `patch apply` 会先跑 `git apply --check`。
 - 应用后可以直接看 `git diff`。
 
-## 6. Agent 一次性任务演示
+## 6. run 任务演示
+
+先演示直接回答，不修改仓库：
+
+```bash
+mini-agent run "写一个两数之和的 C++ 代码"
+```
+
+讲解点：
+
+- `TaskRouter` 会把独立代码片段识别为直接回答。
+- 这个模式不应用 patch，不创建文件。
+- 所有问答仍然会写入 session/event。
+
+再演示仓库任务：
 
 在当前仓库运行：
 
@@ -166,11 +180,12 @@ find .mini-agent -maxdepth 2 -type f
 
 1. 为什么做：想复刻一个简化版 Codex CLI/Claude Code。
 2. 怎么跑：`mini-agent run "任务"`。
-3. AgentLoop：模型只给决策，执行由本地受控代码完成。
-4. ToolRegistry：统一 schema、权限、错误包装。
-5. 安全边界：路径、patch check、命令拦截、超时。
-6. Session：每一步可追溯。
-7. 取舍：删掉后端和前端，专注 CLI Agent 本体。
+3. TaskRouter：简单问答直接回答，仓库任务才进 AgentLoop。
+4. AgentLoop：模型只给决策，执行由本地受控代码完成。
+5. ToolRegistry：统一 schema、权限、错误包装。
+6. 安全边界：路径、patch check、命令拦截、超时。
+7. Session：每一步可追溯。
+8. 取舍：删掉后端和前端，专注 CLI Agent 本体。
 
 ## 9. 常见问题
 

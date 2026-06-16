@@ -8,6 +8,7 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 
 - Starts an interactive local coding-agent session with `mini-agent`.
 - Runs one-shot tasks with `mini-agent run "..."`.
+- Routes standalone questions/code snippets to direct-answer mode before using the repository-editing agent loop.
 - Calls real OpenAI-compatible chat completions APIs.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Searches code with `rg`.
@@ -117,9 +118,11 @@ mini-agent run "fix the failing test" --max-steps 20
 mini-agent run "inspect repository" --model "your-model"
 mini-agent run "inspect repository" --base-url "https://api.example.com/v1"
 mini-agent run "inspect repository" --event-stream
+mini-agent run "write a C++ two-sum example" --agent-loop
 ```
 
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
+`--agent-loop` forces the repository-editing loop when the router would otherwise answer directly.
 
 ## Typical Local Workflow
 
@@ -128,6 +131,12 @@ Run inside any git repository:
 ```bash
 cd /path/to/your/repo
 mini-agent run "find the README and explain how this project is structured"
+```
+
+For a standalone question or code snippet, `run` answers directly without editing files:
+
+```bash
+mini-agent run "write a C++ two-sum example"
 ```
 
 For a real coding task:
@@ -250,6 +259,7 @@ Included:
 
 - TypeScript CLI
 - real OpenAI-compatible LLM client
+- task router for direct answers vs repository edits
 - agent loop
 - context builder
 - tool registry

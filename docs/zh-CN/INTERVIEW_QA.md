@@ -14,7 +14,7 @@ Coding Agent 最核心的场景发生在开发者本地仓库。CLI 最短、最
 
 ## Q4：AgentLoop 怎么工作？
 
-每轮循环会构建上下文，调用 LLM，得到结构化 `AgentDecision`。如果是 `tool_call` 就执行工具，如果是 `apply_patch` 就检查并应用 patch，如果是 `run_command` 就执行命令，如果失败则把日志放回上下文继续修复，直到 `final` 或达到最大步数。
+`mini-agent run` 会先经过 `TaskRouter`。如果是普通问答或独立代码片段，就直接回答，不进入修改仓库流程。如果是明确的仓库任务，AgentLoop 每轮会构建上下文，调用 LLM，得到结构化 `AgentDecision`。如果是 `tool_call` 就执行工具，如果是 `apply_patch` 就检查并应用 patch，如果是 `run_command` 就执行命令，如果失败则把日志放回上下文继续修复，直到 `final` 或达到最大步数。
 
 ## Q5：模型会不会直接操作文件？
 

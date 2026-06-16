@@ -10,6 +10,7 @@
 
 ```text
 CLI
+ -> TaskRouter
  -> AgentLoop
  -> ContextBuilder
  -> OpenAICompatibleClient
@@ -23,17 +24,18 @@ CLI
 
 1. 初始化 `AgentState`。
 2. 构建仓库上下文。
-3. 调用真实 LLM。
-4. 解析出 `AgentDecision`。
-5. 根据 decision 执行工具、应用 patch、运行命令或结束。
-6. 命令失败时把日志放回上下文。
-7. 达到 final 或最大步数后输出总结和 diff。
+3. 先用 `TaskRouter` 判断是直接回答，还是进入仓库 AgentLoop。
+4. 直接回答任务只调用文本 LLM，不改文件。
+5. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
+6. 根据 decision 执行工具、应用 patch、运行命令或结束。
+7. 命令失败时把日志放回上下文。
+8. 达到 final 或最大步数后输出总结和 diff。
 
 ## 3. 目录职责
 
 ```text
 src/cli              CLI 入口和调试命令
-src/agent            AgentLoop、状态、决策类型
+src/agent            TaskRouter、AgentLoop、状态、决策类型
 src/context          仓库扫描和上下文拼接
 src/tools            统一工具接口和工具实现
 src/patch            patch 预览、check、apply
@@ -48,6 +50,12 @@ tests                自动化测试
 ```
 
 ## 4. AgentDecision
+
+`TaskRouter` 在进入 AgentLoop 之前先做轻量分流：
+
+- 普通问答和独立代码片段走 `DIRECT_ANSWER`，只输出答案，不改仓库。
+- 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
+- `--agent-loop` 可以强制进入仓库修改流程。
 
 Agent 每轮从模型获得一个结构化决策：
 

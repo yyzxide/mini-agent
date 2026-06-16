@@ -134,6 +134,20 @@ mini-agent diff
 
 配置好真实模型后：
 
+直接回答任务：
+
+```bash
+mini-agent run "写一个两数之和的 C++ 代码"
+```
+
+期望：
+
+- 输出 `[answer]`。
+- 不创建源码文件。
+- 不出现 `[patch]`。
+
+仓库任务：
+
 ```bash
 mini-agent run "阅读这个仓库，说明 src/tools 和 src/agent 的职责"
 ```

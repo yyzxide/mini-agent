@@ -245,6 +245,48 @@ describe("mini-agent CLI", () => {
     await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toContain("hello from mini-agent");
   });
 
+  it("answers standalone code requests without editing the repository", async () => {
+    process.chdir(tempRoot);
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "```cpp\nint main() { return 0; }\n```",
+          },
+        },
+      ],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "写一个两数之和的C++代码",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[answer]");
+      expect(output).toContain("```cpp");
+      expect(output).not.toContain("[patch]");
+      await expect(fs.stat(path.join(tempRoot, "two_sum.cpp"))).rejects.toMatchObject({ code: "ENOENT" });
+
+      const call = fetchMock.mock.calls[0];
+      const init = call?.[1] as RequestInit | undefined;
+      const body = JSON.parse(String(init?.body)) as { response_format?: unknown };
+      expect(body.response_format).toBeUndefined();
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("runs with OpenAICompatibleClient by default", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });

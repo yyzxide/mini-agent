@@ -7,6 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { AgentLoop } from "../agent/AgentLoop.js";
 import type { AgentProgressEvent } from "../agent/AgentLoop.js";
+import { routeTask } from "../agent/TaskRouter.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
 import {
@@ -44,6 +45,7 @@ interface AgentCliOptions {
   model?: string;
   baseUrl?: string;
   eventStream?: boolean;
+  agentLoop?: boolean;
 }
 
 interface ConfigInitOptions {
@@ -76,6 +78,7 @@ export function createProgram(): Command {
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
+    .option("--agent-loop", "Force the repository-editing agent loop even for direct-answer tasks")
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (task.length === 0) {
@@ -540,9 +543,14 @@ async function runAgentTask(
 ): Promise<{ success: boolean }> {
   process.stdout.write(`[task] ${userGoal}\n`);
 
+  const route = routeTask(userGoal);
+  if (route.intent === "DIRECT_ANSWER" && options.agentLoop !== true) {
+    return await runDirectAnswerTask(repoPath, userGoal, options);
+  }
+
   const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
-  const llmClient = await createLlmClient(repoPath, options);
+  const llmClient = await createOpenAICompatibleClient(repoPath, options);
   const loop = new AgentLoop({
     repoPath,
     llmClient,
@@ -567,12 +575,99 @@ async function runAgentTask(
 }
 
 async function createLlmClient(repoPath: string, options: AgentCliOptions): Promise<LlmClient> {
+  return await createOpenAICompatibleClient(repoPath, options);
+}
+
+async function createOpenAICompatibleClient(repoPath: string, options: AgentCliOptions): Promise<OpenAICompatibleClient> {
   const resolvedConfig = resolveLlmConfig(await loadAgentConfig(repoPath), {
     baseUrl: options.baseUrl,
     model: options.model,
   });
 
   return new OpenAICompatibleClient(resolvedConfig.openai);
+}
+
+async function runDirectAnswerTask(
+  repoPath: string,
+  userGoal: string,
+  options: AgentCliOptions,
+): Promise<{ success: boolean }> {
+  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
+  let sessionId = options.session;
+
+  if (sessionId) {
+    await sessionStore.ensureSession(sessionId);
+    await eventStore.init();
+  } else {
+    const created = await sessionStore.createSession({ title: userGoal.slice(0, 80) });
+    sessionId = created.sessionId;
+    await eventStore.appendEvent(sessionId, {
+      type: "SESSION_CREATED",
+      payload: {
+        title: created.title,
+        repoPath: created.repoPath,
+        baseCommit: created.baseCommit,
+      },
+    });
+  }
+
+  process.stdout.write(`[session] ${sessionId}\n`);
+
+  await sessionStore.appendRecord(sessionId, {
+    type: "USER_MESSAGE",
+    payload: { content: userGoal },
+  });
+  await eventStore.appendEvent(sessionId, {
+    type: "USER_MESSAGE",
+    payload: { content: userGoal },
+  });
+
+  const client = await createOpenAICompatibleClient(repoPath, options);
+  const result = await client.completeText({ userGoal });
+
+  if (!result.success || !result.text) {
+    const error = result.error ?? "Direct answer failed";
+    process.stdout.write(`[error] ${error}\n`);
+    await sessionStore.appendRecord(sessionId, {
+      type: "ERROR",
+      payload: { message: error },
+    });
+    await eventStore.appendEvent(sessionId, {
+      type: "TASK_FAILED",
+      payload: { error, mode: "DIRECT_ANSWER" },
+    });
+    await sessionStore.updateSessionStatus(sessionId, "FAILED");
+    return { success: false };
+  }
+
+  process.stdout.write(`[answer]\n${result.text}\n`);
+
+  await sessionStore.appendRecord(sessionId, {
+    type: "ASSISTANT_MESSAGE",
+    payload: { content: result.text },
+  });
+  await eventStore.appendEvent(sessionId, {
+    type: "ASSISTANT_MESSAGE",
+    payload: { content: result.text },
+  });
+  await sessionStore.appendRecord(sessionId, {
+    type: "TASK_SUMMARY",
+    payload: {
+      summary: result.text,
+      success: true,
+      mode: "DIRECT_ANSWER",
+    },
+  });
+  await eventStore.appendEvent(sessionId, {
+    type: "TASK_FINISHED",
+    payload: {
+      success: true,
+      mode: "DIRECT_ANSWER",
+    },
+  });
+  await sessionStore.updateSessionStatus(sessionId, "FINISHED");
+
+  return { success: true };
 }
 
 function writeAgentProgress(event: AgentProgressEvent): void {

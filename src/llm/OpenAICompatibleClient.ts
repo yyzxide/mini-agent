@@ -15,6 +15,17 @@ export interface OpenAICompatibleClientOptions {
   decisionParser?: DecisionParser;
 }
 
+export interface LlmTextInput {
+  userGoal: string;
+  context?: string | undefined;
+}
+
+export interface LlmTextResult {
+  success: boolean;
+  text?: string;
+  error?: string;
+}
+
 export class OpenAICompatibleClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
@@ -57,6 +68,73 @@ export class OpenAICompatibleClient implements LlmClient {
     }
 
     return { type: "FAILED", error: retryAttempt.error };
+  }
+
+  async completeText(input: LlmTextInput): Promise<LlmTextResult> {
+    const configurationError = this.validateConfiguration();
+    if (configurationError) {
+      return { success: false, error: configurationError };
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.model,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "You are a practical coding assistant.",
+                "Answer the user's request directly.",
+                "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
+                "For code requests, provide complete code in a fenced code block and add only brief notes when useful.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: input.context
+                ? `${input.userGoal}\n\nContext:\n${input.context}`
+                : input.userGoal,
+            },
+          ],
+          temperature: this.temperature,
+          max_tokens: this.maxTokens,
+        }),
+      });
+
+      if (!response.ok) {
+        const bodyPreview = await response.text().catch(() => "");
+        return {
+          success: false,
+          error: `LLM request failed: ${response.status} ${response.statusText}${bodyPreview ? ` - ${bodyPreview.slice(0, 500)}` : ""}`,
+        };
+      }
+
+      const body = await response.json() as OpenAIChatCompletionResponse;
+      const text = extractResponseContent(body);
+      if (!text) {
+        return { success: false, error: buildEmptyContentError(body) };
+      }
+
+      return { success: true, text };
+    } catch (error) {
+      if (isAbortError(error)) {
+        return { success: false, error: `LLM request timed out after ${this.timeoutMs}ms` };
+      }
+
+      return { success: false, error: `LLM request failed: ${errorToMessage(error)}` };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async requestDecision(input: LlmInput, retryAfterEmptyContent: boolean): Promise<LlmAttemptResult> {
