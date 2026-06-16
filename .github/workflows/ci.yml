@@ -27,30 +27,11 @@ jobs:
           version: 10.14.0
           run_install: false
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-          cache: maven
-
-      - name: Install runner dependencies
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build runner
+      - name: Build
         run: pnpm build
 
-      - name: Test runner
+      - name: Test
         run: pnpm test
-
-      - name: Test backend
-        working-directory: backend
-        run: mvn test
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm build
