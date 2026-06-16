@@ -74,20 +74,79 @@ describe("OpenAICompatibleClient", () => {
     }
   });
 
-  it("returns a clear FAILED decision for empty model content", async () => {
+  it("retries once when model content is empty", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"type\":\"FINAL\",\"summary\":\"Recovered\",\"success\":true}" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
+
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
       apiKey: "secret-key",
       model: "agent-model",
-      fetchFn: async () => new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), { status: 200 }),
+      fetchFn,
     });
 
     const decision = await client.chat(sampleInput());
 
-    expect(decision).toEqual({
-      type: "FAILED",
-      error: "LLM response did not include content",
+    expect(decision).toEqual({ type: "FINAL", summary: "Recovered", success: true });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>;
+      response_format?: unknown;
+    };
+    expect(retryBody.response_format).toBeUndefined();
+    expect(retryBody.messages[1]?.content).toContain("previous model response was empty");
+  });
+
+  it("parses array-shaped message content", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: [
+                {
+                  type: "text",
+                  text: "{\"type\":\"PLAN\",\"message\":\"Array content works\"}",
+                },
+              ],
+            },
+          },
+        ],
+      }), { status: 200 }),
     });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision).toEqual({ type: "PLAN", message: "Array content works" });
+  });
+
+  it("returns diagnostic FAILED decision when model content stays empty", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [{ finish_reason: "length", message: { content: "", reasoning_content: "thinking" } }],
+      }), { status: 200 }),
+    });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision.type).toBe("FAILED");
+    if (decision.type === "FAILED") {
+      expect(decision.error).toContain("LLM response did not include parsable content");
+      expect(decision.error).toContain("finish_reason=length");
+      expect(decision.error).toContain("message_keys=content,reasoning_content");
+    }
   });
 
   it("returns clear configuration errors", async () => {

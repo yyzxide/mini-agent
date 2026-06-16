@@ -42,10 +42,34 @@ export class OpenAICompatibleClient implements LlmClient {
       return { type: "FAILED", error: configurationError };
     }
 
+    const firstAttempt = await this.requestDecision(input, false);
+    if (firstAttempt.decision) {
+      return firstAttempt.decision;
+    }
+
+    if (!firstAttempt.retryable) {
+      return { type: "FAILED", error: firstAttempt.error };
+    }
+
+    const retryAttempt = await this.requestDecision(input, true);
+    if (retryAttempt.decision) {
+      return retryAttempt.decision;
+    }
+
+    return { type: "FAILED", error: retryAttempt.error };
+  }
+
+  private async requestDecision(input: LlmInput, retryAfterEmptyContent: boolean): Promise<LlmAttemptResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
+      const userPrompt = buildUserPrompt({
+        userGoal: input.userGoal,
+        context: input.context,
+        state: input.state,
+        availableTools: input.availableTools,
+      });
       const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -62,45 +86,58 @@ export class OpenAICompatibleClient implements LlmClient {
             },
             {
               role: "user",
-              content: buildUserPrompt({
-                userGoal: input.userGoal,
-                context: input.context,
-                state: input.state,
-                availableTools: input.availableTools,
-              }),
+              content: retryAfterEmptyContent
+                ? `${userPrompt}\n\nThe previous model response was empty. Return exactly one AgentDecision JSON object in the message content. Do not use tool_calls. Do not return an empty message.`
+                : userPrompt,
             },
           ],
           temperature: this.temperature,
           max_tokens: this.maxTokens,
-          response_format: { type: "json_object" },
+          ...(retryAfterEmptyContent ? {} : { response_format: { type: "json_object" } }),
         }),
       });
 
       if (!response.ok) {
         const bodyPreview = await response.text().catch(() => "");
         return {
-          type: "FAILED",
+          retryable: false,
           error: `LLM request failed: ${response.status} ${response.statusText}${bodyPreview ? ` - ${bodyPreview.slice(0, 500)}` : ""}`,
         };
       }
 
       const body = await response.json() as OpenAIChatCompletionResponse;
-      const content = body.choices?.[0]?.message?.content?.trim();
+      const content = extractResponseContent(body);
       if (!content) {
-        return { type: "FAILED", error: "LLM response did not include content" };
+        return {
+          retryable: !retryAfterEmptyContent,
+          error: buildEmptyContentError(body),
+        };
       }
 
       try {
-        return this.decisionParser.parse(content);
+        return {
+          decision: this.decisionParser.parse(content),
+          retryable: false,
+          error: "",
+        };
       } catch (error) {
-        return { type: "FAILED", error: errorToMessage(error) };
+        return {
+          retryable: false,
+          error: errorToMessage(error),
+        };
       }
     } catch (error) {
       if (isAbortError(error)) {
-        return { type: "FAILED", error: `LLM request timed out after ${this.timeoutMs}ms` };
+        return {
+          retryable: false,
+          error: `LLM request timed out after ${this.timeoutMs}ms`,
+        };
       }
 
-      return { type: "FAILED", error: `LLM request failed: ${errorToMessage(error)}` };
+      return {
+        retryable: false,
+        error: `LLM request failed: ${errorToMessage(error)}`,
+      };
     } finally {
       clearTimeout(timeout);
     }
@@ -119,12 +156,86 @@ export class OpenAICompatibleClient implements LlmClient {
   }
 }
 
+interface LlmAttemptResult {
+  decision?: AgentDecision;
+  retryable: boolean;
+  error: string;
+}
+
 interface OpenAIChatCompletionResponse {
+  output_text?: unknown;
   choices?: Array<{
+    finish_reason?: string;
+    text?: unknown;
     message?: {
-      content?: string;
+      content?: unknown;
+      reasoning_content?: unknown;
+      refusal?: unknown;
     };
   }>;
+}
+
+function extractResponseContent(body: OpenAIChatCompletionResponse): string | undefined {
+  const firstChoice = body.choices?.[0];
+  const message = firstChoice?.message;
+  return firstNonEmpty([
+    extractTextContent(message?.content),
+    extractTextContent(firstChoice?.text),
+    extractTextContent(body.output_text),
+    extractJsonLookingText(message?.reasoning_content),
+  ]);
+}
+
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return firstNonEmpty(value.map((item) => extractTextContent(item)));
+  }
+
+  if (isRecord(value)) {
+    return firstNonEmpty([
+      extractTextContent(value.text),
+      extractTextContent(value.content),
+      extractTextContent(value.value),
+    ]);
+  }
+
+  return undefined;
+}
+
+function extractJsonLookingText(value: unknown): string | undefined {
+  const text = extractTextContent(value);
+  if (!text || !text.includes("{") || !text.includes("}")) {
+    return undefined;
+  }
+
+  return text;
+}
+
+function firstNonEmpty(values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value !== undefined && value.trim().length > 0);
+}
+
+function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
+  const firstChoice = body.choices?.[0];
+  const message = firstChoice?.message;
+  const details = [
+    firstChoice?.finish_reason ? `finish_reason=${firstChoice.finish_reason}` : undefined,
+    message ? `message_keys=${Object.keys(message).join(",") || "<none>"}` : "message=<missing>",
+    typeof message?.refusal === "string" && message.refusal.trim().length > 0
+      ? `refusal=${message.refusal.slice(0, 200)}`
+      : undefined,
+  ].filter(Boolean).join("; ");
+
+  return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readNumberEnv(name: string, fallback: number): number {
