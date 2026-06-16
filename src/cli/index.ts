@@ -784,12 +784,25 @@ function isGitStatusData(value: unknown): value is { status: string } {
     && typeof value.status === "string";
 }
 
-function isDirectCliEntry(): boolean {
+async function isDirectCliEntry(): Promise<boolean> {
   const currentFile = fileURLToPath(import.meta.url);
   const invokedFile = process.argv[1] ? path.resolve(process.argv[1]) : "";
-  return currentFile === invokedFile;
+
+  if (!invokedFile) {
+    return false;
+  }
+
+  try {
+    const [currentRealPath, invokedRealPath] = await Promise.all([
+      fs.realpath(currentFile),
+      fs.realpath(invokedFile),
+    ]);
+    return currentRealPath === invokedRealPath;
+  } catch {
+    return currentFile === invokedFile;
+  }
 }
 
-if (isDirectCliEntry()) {
+if (await isDirectCliEntry()) {
   await createProgram().parseAsync(process.argv);
 }
