@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
+import { SessionStore } from "../../src/session/SessionStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -55,5 +56,30 @@ describe("ContextBuilder", () => {
     expect(context).toContain("package.json");
     expect(context).toContain("Recent tool results:");
     expect(context.length).toBeLessThanOrEqual(10_000);
+  });
+
+  it("injects recent session records into the agent context", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const session = await sessionStore.createSession({ title: "memory test" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "第一轮我们讨论了 session 记忆" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "我会在后续轮次引用这段上下文" },
+    });
+
+    const state = new AgentState({
+      sessionId: session.sessionId,
+      repoPath,
+      userGoal: "你还记得刚才聊了什么吗",
+    });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 10_000 }).build(state);
+
+    expect(context).toContain("Conversation memory:");
+    expect(context).toContain("[user] 第一轮我们讨论了 session 记忆");
+    expect(context).toContain("[assistant] 我会在后续轮次引用这段上下文");
   });
 });

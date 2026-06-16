@@ -9,7 +9,8 @@ import {
   errorToMessage,
   PatchPermissionDeniedError,
 } from "../utils/errors.js";
-import type { JsonObject, JsonValue } from "../session/SessionTypes.js";
+import { toJsonValue } from "../utils/json.js";
+import type { JsonObject } from "../session/SessionTypes.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
 
@@ -162,28 +163,4 @@ async function appendEvent(
   } catch (error) {
     return toolFailure(errorToCode(error, "EVENT_WRITE_FAILED"), errorToMessage(error), errorToDetails(error));
   }
-}
-
-function toJsonValue(value: unknown): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (value === undefined) {
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJsonValue(item));
-  }
-
-  if (typeof value === "object") {
-    const output: JsonObject = {};
-    for (const [key, nestedValue] of Object.entries(value)) {
-      output[key] = toJsonValue(nestedValue);
-    }
-    return output;
-  }
-
-  return String(value);
 }

@@ -70,10 +70,22 @@ const QUESTION_KEYWORDS = [
   "如何",
   "解释",
   "说明",
+  "记得",
+  "还记得",
+  "刚才",
+  "上次",
+  "之前",
+  "现在呢",
+  "我们聊",
+  "我们说",
   "what is",
   "why",
   "how to",
   "explain",
+  "remember",
+  "previous",
+  "last time",
+  "what did we discuss",
 ];
 
 export function routeTask(userGoal: string): TaskRoute {

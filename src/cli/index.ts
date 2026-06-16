@@ -18,14 +18,14 @@ import {
 } from "../config/AgentConfig.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
-import type { LlmClient } from "../llm/LlmClient.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { EventStore } from "../session/EventStore.js";
+import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import type { JsonObject, JsonValue } from "../session/SessionTypes.js";
+import type { JsonObject } from "../session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext, ToolResult } from "../tools/Tool.js";
 import {
@@ -36,6 +36,7 @@ import {
   errorToMessage,
 } from "../utils/errors.js";
 import { resolveRepoPath } from "../utils/fs.js";
+import { toJsonObject } from "../utils/json.js";
 
 const VERSION = "0.1.0";
 
@@ -46,6 +47,7 @@ interface AgentCliOptions {
   baseUrl?: string;
   eventStream?: boolean;
   agentLoop?: boolean;
+  keepSessionActive?: boolean;
 }
 
 interface ConfigInitOptions {
@@ -140,9 +142,8 @@ export function createProgram(): Command {
     .command("resume")
     .description("Resume a previous session")
     .argument("<sessionId>", "Session id to resume")
-    .action((sessionId: string) => {
-      process.stdout.write(`[session] Resume placeholder for ${sessionId}.\n`);
-      process.stdout.write("[stage] Session store will be implemented in phase 3.\n");
+    .action(async (sessionId: string) => {
+      await startInteractive(process.cwd(), sessionId);
     });
 
   program
@@ -478,10 +479,16 @@ export function createProgram(): Command {
   return program;
 }
 
-async function startInteractive(repoPath: string): Promise<void> {
+async function startInteractive(repoPath: string, resumeSessionId?: string): Promise<void> {
+  const stores = createStores(repoPath);
+  let currentSessionId = resumeSessionId
+    ? await ensureInteractiveSession(stores.sessionStore, stores.eventStore, resumeSessionId)
+    : await createInteractiveSession(stores.sessionStore, stores.eventStore, "Interactive session");
+
   process.stdout.write("Mini Coding Agent\n");
   process.stdout.write(`Current repo: ${repoPath}\n`);
-  process.stdout.write("Type your coding task, or use /exit, /diff, /status.\n\n");
+  process.stdout.write(`Current session: ${currentSessionId}\n`);
+  process.stdout.write("Type your coding task, or use /exit, /new, /diff, /status, /sessions.\n\n");
 
   const rl = createInterface({
     input: process.stdin,
@@ -493,8 +500,15 @@ async function startInteractive(repoPath: string): Promise<void> {
       const answer = (await rl.question("> ")).trim();
 
       if (answer === "/exit") {
+        await stores.sessionStore.updateSessionStatus(currentSessionId, "FINISHED");
         process.stdout.write("Bye.\n");
         return;
+      }
+
+      if (answer === "/new") {
+        currentSessionId = await createInteractiveSession(stores.sessionStore, stores.eventStore, "Interactive session");
+        process.stdout.write(`[session] ${currentSessionId}\n`);
+        continue;
       }
 
       if (answer === "/diff") {
@@ -527,12 +541,43 @@ async function startInteractive(repoPath: string): Promise<void> {
       }
 
       await runAgentTask(repoPath, answer, {
+        session: currentSessionId,
         nonInteractive: false,
+        keepSessionActive: true,
       }, async (message) => await rl.question(message));
     }
   } finally {
     rl.close();
   }
+}
+
+async function ensureInteractiveSession(
+  sessionStore: SessionStore,
+  eventStore: EventStore,
+  sessionId: string,
+): Promise<string> {
+  await sessionStore.ensureSession(sessionId);
+  await eventStore.init();
+  return sessionId;
+}
+
+async function createInteractiveSession(
+  sessionStore: SessionStore,
+  eventStore: EventStore,
+  title: string,
+): Promise<string> {
+  const created = await sessionStore.createSession({ title });
+  await eventStore.appendEvent(created.sessionId, {
+    type: "SESSION_CREATED",
+    payload: {
+      title: created.title,
+      repoPath: created.repoPath,
+      baseCommit: created.baseCommit,
+      mode: "interactive",
+    },
+  });
+
+  return created.sessionId;
 }
 
 async function runAgentTask(
@@ -571,11 +616,8 @@ async function runAgentTask(
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     autoApprove: true,
     nonInteractive: options.nonInteractive === true,
+    keepSessionActive: options.keepSessionActive === true,
   });
-}
-
-async function createLlmClient(repoPath: string, options: AgentCliOptions): Promise<LlmClient> {
-  return await createOpenAICompatibleClient(repoPath, options);
 }
 
 async function createOpenAICompatibleClient(repoPath: string, options: AgentCliOptions): Promise<OpenAICompatibleClient> {
@@ -613,6 +655,9 @@ async function runDirectAnswerTask(
 
   process.stdout.write(`[session] ${sessionId}\n`);
 
+  const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 18, maxChars: 8_000 })
+    .catch(() => "(none)");
+
   await sessionStore.appendRecord(sessionId, {
     type: "USER_MESSAGE",
     payload: { content: userGoal },
@@ -623,7 +668,7 @@ async function runDirectAnswerTask(
   });
 
   const client = await createOpenAICompatibleClient(repoPath, options);
-  const result = await client.completeText({ userGoal });
+  const result = await client.completeText({ userGoal, context: sessionMemory });
 
   if (!result.success || !result.text) {
     const error = result.error ?? "Direct answer failed";
@@ -636,7 +681,9 @@ async function runDirectAnswerTask(
       type: "TASK_FAILED",
       payload: { error, mode: "DIRECT_ANSWER" },
     });
-    await sessionStore.updateSessionStatus(sessionId, "FAILED");
+    if (options.keepSessionActive !== true) {
+      await sessionStore.updateSessionStatus(sessionId, "FAILED");
+    }
     return { success: false };
   }
 
@@ -665,7 +712,9 @@ async function runDirectAnswerTask(
       mode: "DIRECT_ANSWER",
     },
   });
-  await sessionStore.updateSessionStatus(sessionId, "FINISHED");
+  if (options.keepSessionActive !== true) {
+    await sessionStore.updateSessionStatus(sessionId, "FINISHED");
+  }
 
   return { success: true };
 }
@@ -822,34 +871,6 @@ function commandResultToPayload(result: CommandResult): JsonObject {
     truncated: result.truncated,
     error: result.error,
   });
-}
-
-function toJsonObject(value: Record<string, unknown>): JsonObject {
-  const output: JsonObject = {};
-  for (const [key, nestedValue] of Object.entries(value)) {
-    output[key] = toJsonValue(nestedValue);
-  }
-  return output;
-}
-
-function toJsonValue(value: unknown): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (value === undefined) {
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJsonValue(item));
-  }
-
-  if (typeof value === "object") {
-    return toJsonObject(value as Record<string, unknown>);
-  }
-
-  return String(value);
 }
 
 function isTestCommand(command: string): boolean {

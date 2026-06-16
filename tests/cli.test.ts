@@ -287,6 +287,76 @@ describe("mini-agent CLI", () => {
     }
   });
 
+  it("passes previous session messages into follow-up direct answers", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Memory Session"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      "我们刚才聊了 session 记忆。",
+      "我记得，上一轮我们聊了 session 记忆。",
+    ];
+    const calls: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: responses.shift() ?? "fallback",
+            },
+          },
+        ],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "第一轮：我们聊了 session 记忆",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "现在呢",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("我记得");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const secondBody = JSON.parse(String(calls[1]?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(secondBody.messages[1]?.content).toContain("Context:");
+      expect(secondBody.messages[1]?.content).toContain("[user] 第一轮：我们聊了 session 记忆");
+      expect(secondBody.messages[1]?.content).toContain("[assistant] 我们刚才聊了 session 记忆。");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("runs with OpenAICompatibleClient by default", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });

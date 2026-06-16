@@ -7,7 +7,8 @@ import {
   MiniAgentError,
   ToolInputError,
 } from "../utils/errors.js";
-import type { EventType, JsonObject, JsonValue, SessionRecordType } from "../session/SessionTypes.js";
+import { toJsonValue } from "../utils/json.js";
+import type { EventType, JsonObject, SessionRecordType } from "../session/SessionTypes.js";
 import { ApplyPatchTool } from "./ApplyPatchTool.js";
 import { FetchUrlTool } from "./FetchUrlTool.js";
 import { GitDiffTool } from "./GitDiffTool.js";
@@ -169,30 +170,6 @@ function describeInputSchema(schema: z.ZodType<unknown>): unknown {
       type: schema.constructor.name,
     };
   }
-}
-
-function toJsonValue(value: unknown): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (value === undefined) {
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJsonValue(item));
-  }
-
-  if (typeof value === "object") {
-    const output: JsonObject = {};
-    for (const [key, nestedValue] of Object.entries(value)) {
-      output[key] = toJsonValue(nestedValue);
-    }
-    return output;
-  }
-
-  return String(value);
 }
 
 export function createDefaultToolRegistry(): ToolRegistry {

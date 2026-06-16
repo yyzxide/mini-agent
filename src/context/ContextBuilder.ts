@@ -1,6 +1,8 @@
 import { GitManager } from "../git/GitManager.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
+import { readSessionMemory } from "../session/SessionMemory.js";
+import { SessionStore } from "../session/SessionStore.js";
 import { MessageCompressor } from "./MessageCompressor.js";
 import { RepoScanner } from "./RepoScanner.js";
 
@@ -22,19 +24,24 @@ export class ContextBuilder {
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
 
-    const [isGitRepository, tree, readme, buildFiles, status, diff] = await Promise.all([
+    const sessionStore = new SessionStore({ repoPath: this.repoPath });
+
+    const [isGitRepository, tree, readme, buildFiles, status, diff, sessionMemory] = await Promise.all([
       scanner.isGitRepository().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`),
       git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
+      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 18, maxChars: 8_000 })
+        .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
 
     const snapshot = state.toSnapshot();
     const context = [
       `User task:\n${state.userGoal}`,
       `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
+      `Conversation memory:\n${sessionMemory}`,
       `Available tools:\n${JSON.stringify(availableTools, null, 2)}`,
       `Git repository:\n${String(isGitRepository)}`,
       `Git status:\n${status || "(clean or unavailable)"}`,

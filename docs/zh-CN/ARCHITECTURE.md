@@ -23,7 +23,7 @@ CLI
 核心循环：
 
 1. 初始化 `AgentState`。
-2. 构建仓库上下文。
+2. 构建仓库上下文和当前 session 的短期记忆。
 3. 先用 `TaskRouter` 判断是直接回答，还是进入仓库 AgentLoop。
 4. 直接回答任务只调用文本 LLM，不改文件。
 5. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
@@ -55,6 +55,7 @@ tests                自动化测试
 
 - 普通问答和独立代码片段走 `DIRECT_ANSWER`，只输出答案，不改仓库。
 - 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
+- “刚才聊了什么 / 还记得吗 / 上次呢”这类会话追问走 `DIRECT_ANSWER`，但会带上当前 session 的最近记录。
 - `--agent-loop` 可以强制进入仓库修改流程。
 
 Agent 每轮从模型获得一个结构化决策：
@@ -183,6 +184,12 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - 不依赖数据库。
 - 崩溃时仍保留已写入步骤。
 - 以后可以被别的系统读取。
+
+交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session，`/exit` 会结束当前 session。`mini-agent resume <sessionId>` 会重新打开指定 session，并继续把该 session 的最近记录作为上下文。
+
+`SessionMemory` 会把最近的用户消息、助手消息、任务总结、工具结果、命令结果和错误压缩成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
+
+当前这层记忆是 transcript memory，不是完整 RAG。它解决同一会话连续性；如果要跨仓库、跨天、跨长文档检索，需要后续再加索引、摘要和向量/关键词检索。
 
 ## 11. LLM 接入
 

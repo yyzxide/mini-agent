@@ -93,8 +93,11 @@ export class OpenAICompatibleClient implements LlmClient {
             {
               role: "system",
               content: [
-                "You are a practical coding assistant.",
-                "Answer the user's request directly.",
+                "You are a helpful local assistant inside a coding-agent CLI.",
+                "Answer the user's request directly, including general questions and coding questions.",
+                "Use the provided conversation context when it is relevant.",
+                "If the user asks what was discussed before, summarize only what appears in the conversation context.",
+                "Do not claim that there is no memory when conversation context is present.",
                 "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
                 "For code requests, provide complete code in a fenced code block and add only brief notes when useful.",
               ].join("\n"),

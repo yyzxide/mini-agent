@@ -8,9 +8,9 @@ import { PermissionLevel } from "../permission/PermissionLevel.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { EventStore } from "../session/EventStore.js";
 import { SessionStore } from "../session/SessionStore.js";
-import type { JsonObject, JsonValue } from "../session/SessionTypes.js";
+import type { JsonObject } from "../session/SessionTypes.js";
 import { ToolRegistry } from "../tools/ToolRegistry.js";
-import type { ToolContext, ToolResult } from "../tools/Tool.js";
+import type { ToolContext } from "../tools/Tool.js";
 import {
   CommandBlockedError,
   CommandPermissionDeniedError,
@@ -18,9 +18,10 @@ import {
   errorToDetails,
   errorToMessage,
 } from "../utils/errors.js";
+import { toJsonObject, toJsonValue } from "../utils/json.js";
 import type { AgentDecision } from "./AgentDecision.js";
 import { decisionToMessage } from "./AgentPlanner.js";
-import { AgentState, toJsonValue } from "./AgentState.js";
+import { AgentState } from "./AgentState.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -42,6 +43,7 @@ export interface AgentRunInput {
   maxSteps?: number;
   autoApprove?: boolean;
   nonInteractive?: boolean;
+  keepSessionActive?: boolean;
 }
 
 export interface AgentRunResult {
@@ -143,7 +145,7 @@ export class AgentLoop {
       if (repeatedDecisionCount > MAX_REPEATED_DECISIONS) {
         const error = "Agent repeated the same decision too many times";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error);
+        return await this.fail(state, error, input);
       }
 
       const outcome = await this.handleDecision(state, decision, input);
@@ -155,7 +157,7 @@ export class AgentLoop {
       if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
         const error = "Agent failed too many consecutive steps";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error);
+        return await this.fail(state, error, input);
       }
 
       state.incrementStep();
@@ -163,7 +165,7 @@ export class AgentLoop {
 
     const error = `Agent stopped after reaching max steps (${state.maxSteps})`;
     await this.recordError(sessionId, error);
-    return await this.fail(state, error);
+    return await this.fail(state, error, input);
   }
 
   private async handleDecision(
@@ -189,10 +191,10 @@ export class AgentLoop {
         return await this.executeAskUserDecision(state, decision.message, input);
 
       case "FINAL":
-        return { failed: false, result: await this.finish(state, decision.summary, decision.success) };
+        return { failed: false, result: await this.finish(state, decision.summary, decision.success, input) };
 
       case "FAILED":
-        return { failed: true, result: await this.fail(state, decision.error) };
+        return { failed: true, result: await this.fail(state, decision.error, input) };
     }
   }
 
@@ -246,7 +248,7 @@ export class AgentLoop {
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
       if (result.error?.code === "PATCH_PERMISSION_DENIED") {
-        return { failed: true, result: await this.fail(state, error) };
+        return { failed: true, result: await this.fail(state, error, input) };
       }
       return { failed: true };
     }
@@ -279,7 +281,7 @@ export class AgentLoop {
       const message = error.message;
       state.setLastError(message);
       await this.recordError(state.sessionId, message, error);
-      return { failed: true, result: await this.fail(state, message) };
+      return { failed: true, result: await this.fail(state, message, input) };
     }
 
     const timeoutMs = this.commandRunner.defaultTimeoutMs;
@@ -321,7 +323,7 @@ export class AgentLoop {
       state.status = "WAITING_USER";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
-      return { failed: true, result: await this.fail(state, error) };
+      return { failed: true, result: await this.fail(state, error, input) };
     }
 
     state.status = "WAITING_USER";
@@ -331,7 +333,12 @@ export class AgentLoop {
     return { failed: false };
   }
 
-  private async finish(state: AgentState, summary: string, success: boolean): Promise<AgentRunResult> {
+  private async finish(
+    state: AgentState,
+    summary: string,
+    success: boolean,
+    input: AgentRunInput,
+  ): Promise<AgentRunResult> {
     const finalDiff = await this.readFinalDiff();
     state.markFinished(finalDiff);
     await this.sessionStore.appendRecord(state.sessionId, {
@@ -366,7 +373,9 @@ export class AgentLoop {
         steps: state.step,
       },
     });
-    await this.sessionStore.updateSessionStatus(state.sessionId, success ? "FINISHED" : "FAILED");
+    if (input.keepSessionActive !== true) {
+      await this.sessionStore.updateSessionStatus(state.sessionId, success ? "FINISHED" : "FAILED");
+    }
     await this.emit({ type: "summary", summary, success });
 
     return {
@@ -378,7 +387,7 @@ export class AgentLoop {
     };
   }
 
-  private async fail(state: AgentState, error: string): Promise<AgentRunResult> {
+  private async fail(state: AgentState, error: string, input?: AgentRunInput): Promise<AgentRunResult> {
     state.markFailed(error);
     const finalDiff = await this.readFinalDiff();
     state.finalDiff = finalDiff;
@@ -407,7 +416,9 @@ export class AgentLoop {
         steps: state.step,
       },
     });
-    await this.sessionStore.updateSessionStatus(state.sessionId, "FAILED");
+    if (input?.keepSessionActive !== true) {
+      await this.sessionStore.updateSessionStatus(state.sessionId, "FAILED");
+    }
     await this.emit({ type: "error", message: error });
 
     return {
@@ -571,14 +582,6 @@ function commandResultToPayload(result: CommandResult): JsonObject {
     truncated: result.truncated,
     error: result.error,
   });
-}
-
-function toJsonObject(value: Record<string, unknown>): JsonObject {
-  const output: JsonObject = {};
-  for (const [key, nestedValue] of Object.entries(value)) {
-    output[key] = toJsonValue(nestedValue);
-  }
-  return output;
 }
 
 function isTestCommand(command: string): boolean {

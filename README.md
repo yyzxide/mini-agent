@@ -7,6 +7,7 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 ## What It Does
 
 - Starts an interactive local coding-agent session with `mini-agent`.
+- Keeps one active session in interactive mode, so follow-up prompts can use recent conversation history.
 - Runs one-shot tasks with `mini-agent run "..."`.
 - Routes standalone questions/code snippets to direct-answer mode before using the repository-editing agent loop.
 - Calls real OpenAI-compatible chat completions APIs.
@@ -124,6 +125,16 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
 `--agent-loop` forces the repository-editing loop when the router would otherwise answer directly.
 
+Interactive slash commands:
+
+```text
+/status    Show git status.
+/diff      Show git diff.
+/sessions  List local sessions.
+/new       Start a new conversation session in the same repo.
+/exit      Finish the active interactive session and exit.
+```
+
 ## Typical Local Workflow
 
 Run inside any git repository:
@@ -137,6 +148,20 @@ For a standalone question or code snippet, `run` answers directly without editin
 
 ```bash
 mini-agent run "write a C++ two-sum example"
+```
+
+In interactive mode, follow-up questions reuse the same session until `/new` or `/exit`:
+
+```text
+mini-agent
+> 写一个两数之和的 C++ 例子，不要改文件
+> 你还记得刚才让我写什么了吗
+```
+
+To continue a previous transcript:
+
+```bash
+mini-agent resume <sessionId>
 ```
 
 For a real coding task:
@@ -219,6 +244,8 @@ Session records include:
 - test pass/fail markers
 - final git diff
 
+The current session records are also used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt. This is lightweight transcript memory, not a full vector RAG system.
+
 List sessions:
 
 ```bash
@@ -261,7 +288,7 @@ Included:
 - real OpenAI-compatible LLM client
 - task router for direct answers vs repository edits
 - agent loop
-- context builder
+- context builder with recent session memory
 - tool registry
 - path-safe file tools
 - git status and diff tools

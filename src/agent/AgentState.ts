@@ -1,5 +1,5 @@
 import type { CommandResult } from "../command/CommandRunner.js";
-import type { JsonObject, JsonValue } from "../session/SessionTypes.js";
+import type { JsonObject } from "../session/SessionTypes.js";
 import type { ToolResult } from "../tools/Tool.js";
 import type { AgentDecision } from "./AgentDecision.js";
 
@@ -133,28 +133,4 @@ export class AgentState {
       finalDiff: this.finalDiff,
     };
   }
-}
-
-export function toJsonValue(value: unknown): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (value === undefined) {
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJsonValue(item));
-  }
-
-  if (typeof value === "object") {
-    const output: JsonObject = {};
-    for (const [key, nestedValue] of Object.entries(value)) {
-      output[key] = toJsonValue(nestedValue);
-    }
-    return output;
-  }
-
-  return String(value);
 }

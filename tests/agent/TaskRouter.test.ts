@@ -19,4 +19,13 @@ describe("TaskRouter", () => {
       intent: "AGENT_LOOP",
     });
   });
+
+  it("routes conversation memory questions to direct answer mode", () => {
+    expect(routeTask("你还记得我们刚才聊了什么吗")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("现在呢")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+  });
 });

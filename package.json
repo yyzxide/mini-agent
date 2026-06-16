@@ -18,6 +18,7 @@
     "test": "vitest run",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint:unused": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
     "verify": "npm run build && npm test"
   },
   "keywords": [
