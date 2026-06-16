@@ -6,3 +6,4 @@ dist/
 coverage/
 *.log
 mini-agent.config.json
+/two_sum
