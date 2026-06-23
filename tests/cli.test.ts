@@ -29,7 +29,7 @@ describe("mini-agent CLI", () => {
       .commands.map((command) => command.name())
       .sort();
 
-    expect(commandNames).toEqual(["command", "config", "diff", "git", "patch", "resume", "run", "session", "sessions", "tool"]);
+    expect(commandNames).toEqual(["command", "config", "diff", "git", "patch", "resume", "run", "session", "sessions", "status", "tool"]);
   });
 
   it("uses the expected binary name", () => {
@@ -66,6 +66,31 @@ describe("mini-agent CLI", () => {
       sessionId: created.sessionId,
       title: "Listed Session",
     }));
+  });
+
+  it("prints an intelligent repository status summary", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    await fs.writeFile(path.join(tempRoot, "README.md"), "# Demo\n", "utf8");
+    await fs.writeFile(path.join(tempRoot, "package.json"), JSON.stringify({
+      name: "demo",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        test: "vitest run",
+      },
+    }, null, 2), "utf8");
+    await execFileAsync("git", ["add", "README.md", "package.json"], { cwd: tempRoot });
+    await fs.appendFile(path.join(tempRoot, "README.md"), "\nchanged\n", "utf8");
+
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync(["status"], { from: "user" });
+    });
+
+    expect(output).toContain("Repository state:");
+    expect(output).toContain("changed file");
+    expect(output).toContain("package manager: npm");
+    expect(output).toContain("package scripts: build, test");
+    expect(output).toContain("suggested verification");
   });
 
   it("initializes and shows a redacted real-model config", async () => {

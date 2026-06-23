@@ -67,6 +67,7 @@ mini-agent config show
 mini-agent tool run list_files '{"path":"src","maxDepth":2}'
 mini-agent tool run read_file '{"path":"README.md","maxLines":20}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":5}'
+mini-agent tool run web_search '{"query":"TypeScript latest release","maxResults":3}'
 mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
@@ -138,6 +139,8 @@ mini-agent diff
 
 ```bash
 mini-agent run "写一个两数之和的 C++ 代码"
+mini-agent run "非登记收款人是什么意思"
+mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 ```
 
 期望：

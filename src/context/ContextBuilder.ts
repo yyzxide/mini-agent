@@ -4,6 +4,7 @@ import type { ToolSpec } from "../llm/LlmClient.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { MessageCompressor } from "./MessageCompressor.js";
+import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
 import { RepoScanner } from "./RepoScanner.js";
 
 export interface ContextBuilderOptions {
@@ -23,10 +24,12 @@ export class ContextBuilder {
   async build(state: AgentState, availableTools: ToolSpec[] = []): Promise<string> {
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
+    const repoStateAnalyzer = new RepoStateAnalyzer({ repoPath: this.repoPath });
 
     const sessionStore = new SessionStore({ repoPath: this.repoPath });
 
-    const [isGitRepository, tree, readme, buildFiles, status, diff, sessionMemory] = await Promise.all([
+    const [repoState, isGitRepository, tree, readme, buildFiles, status, diff, sessionMemory] = await Promise.all([
+      repoStateAnalyzer.analyze().then(formatRepoState).catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.isGitRepository().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
@@ -42,6 +45,7 @@ export class ContextBuilder {
       `User task:\n${state.userGoal}`,
       `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
       `Conversation memory:\n${sessionMemory}`,
+      `Repository state summary:\n${repoState}`,
       `Available tools:\n${JSON.stringify(availableTools, null, 2)}`,
       `Git repository:\n${String(isGitRepository)}`,
       `Git status:\n${status || "(clean or unavailable)"}`,

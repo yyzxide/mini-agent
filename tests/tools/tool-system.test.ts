@@ -52,6 +52,12 @@ interface FetchUrlData {
   outputTruncated: boolean;
 }
 
+interface WebSearchData {
+  query: string;
+  provider: "duckduckgo_html";
+  results: Array<{ title: string; url: string; snippet: string }>;
+}
+
 let tempRoot: string;
 let repoPath: string;
 
@@ -243,6 +249,37 @@ describe("read-only repository tools", () => {
     expectSuccess<FetchUrlData>(result);
     expect(result.data.text).toBe("0123");
     expect(result.data.outputTruncated).toBe(true);
+  });
+
+  it("web_search returns parsed public web results", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      "<html><body>",
+      "<div class=\"result\">",
+      "<a class=\"result__a\" href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs\">Example &amp; Docs</a>",
+      "<a class=\"result__snippet\">A useful &lt;b&gt;documentation&lt;/b&gt; result.</a>",
+      "</div>",
+      "</body></html>",
+    ].join(""), {
+      status: 200,
+      statusText: "OK",
+      headers: { "content-type": "text/html" },
+    })));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("web_search", {
+      query: "example docs",
+      maxResults: 3,
+    }, { repoPath });
+
+    expectSuccess<WebSearchData>(result);
+    expect(result.data.provider).toBe("duckduckgo_html");
+    expect(result.data.results).toEqual([
+      {
+        title: "Example & Docs",
+        url: "https://example.com/docs",
+        snippet: "A useful documentation result.",
+      },
+    ]);
   });
 });
 

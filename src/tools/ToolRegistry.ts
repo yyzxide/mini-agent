@@ -16,6 +16,7 @@ import { GitStatusTool } from "./GitStatusTool.js";
 import { ListFilesTool } from "./ListFilesTool.js";
 import { ReadFileTool } from "./ReadFileTool.js";
 import { SearchCodeTool } from "./SearchCodeTool.js";
+import { WebSearchTool } from "./WebSearchTool.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure } from "./Tool.js";
 
@@ -182,6 +183,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register(new ListFilesTool());
   registry.register(new ReadFileTool());
   registry.register(new SearchCodeTool());
+  registry.register(new WebSearchTool());
 
   return registry;
 }

@@ -47,6 +47,8 @@ describe("ContextBuilder", () => {
 
     expect(context).toContain("User task:");
     expect(context).toContain("inspect repository");
+    expect(context).toContain("Repository state summary:");
+    expect(context).toContain("package manager:");
     expect(context).toContain("Git status:");
     expect(context).toContain("Tree summary:");
     expect(context).toContain("file README.md");

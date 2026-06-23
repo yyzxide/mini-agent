@@ -93,6 +93,7 @@ mini-agent tool list
 mini-agent tool run list_files '{"path":"."}'
 mini-agent tool run read_file '{"path":"README.md"}'
 mini-agent tool run search_code '{"query":"AgentLoop","path":"src"}'
+mini-agent tool run web_search '{"query":"TypeScript latest release","maxResults":3}'
 mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
@@ -112,6 +113,7 @@ mini-agent command run "sudo reboot"
 
 ```bash
 mini-agent run "总结这个仓库的 src/agent、src/tools、src/session 分别做什么"
+mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 ```
 
 观察：

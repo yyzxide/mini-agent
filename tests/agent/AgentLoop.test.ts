@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentDecision } from "../../src/agent/AgentDecision.js";
 import { AgentLoop } from "../../src/agent/AgentLoop.js";
 import type { AgentProgressEvent } from "../../src/agent/AgentLoop.js";
@@ -29,6 +29,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   await fs.rm(repoPath, { recursive: true, force: true });
 });
 
@@ -201,6 +203,38 @@ describe("AgentLoop", () => {
     expect(result.success).toBe(true);
     const records = await sessionStore.readRecords(result.sessionId);
     expect(records.some((record) => JSON.stringify(record.payload).includes("Tool input validation failed"))).toBe(true);
+  });
+
+  it("can use web_search for non-code research tasks", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      "<html><body>",
+      "<div class=\"result\">",
+      "<a class=\"result__a\" href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Fresearch\">Research Result</a>",
+      "<a class=\"result__snippet\">A current public web result.</a>",
+      "</div>",
+      "</body></html>",
+    ].join(""), { status: 200 })));
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new SequenceLlmClient([
+        { type: "PLAN", message: "Search the web for the user's research question." },
+        { type: "TOOL_CALL", toolName: "web_search", input: { query: "current research topic", maxResults: 3 } },
+        { type: "FINAL", success: true, summary: "Found a relevant public web result." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "联网搜索一下 current research topic",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(toolNames(records)).toContain("web_search");
+    expect(records.some((record) => JSON.stringify(record.payload).includes("Research Result"))).toBe(true);
   });
 
   it("fails after too many consecutive model/action failures", async () => {

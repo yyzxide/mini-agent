@@ -17,6 +17,7 @@ import {
   resolveLlmConfig,
 } from "../config/AgentConfig.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
+import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
 import { GitManager } from "../git/GitManager.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
 import { PatchManager } from "../patch/PatchManager.js";
@@ -209,6 +210,13 @@ export function createProgram(): Command {
     .action(async () => {
       const diff = await readGitDiff(process.cwd());
       process.stdout.write(diff.length > 0 ? diff : "[diff] No changes.\n");
+    });
+
+  program
+    .command("status")
+    .description("Print an intelligent repository state summary")
+    .action(async () => {
+      process.stdout.write(`${await readRepoState(process.cwd())}\n`);
     });
 
   const gitCommand = program
@@ -518,8 +526,7 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
       }
 
       if (answer === "/status") {
-        const status = await readGitStatus(repoPath);
-        process.stdout.write(status.length > 0 ? status : "[status] Clean working tree.\n");
+        process.stdout.write(`${await readRepoState(repoPath)}\n`);
         continue;
       }
 
@@ -760,13 +767,13 @@ async function readGitDiff(repoPath: string): Promise<string> {
   return `[git] ${result.error?.message ?? "Unable to read git diff"}\n`;
 }
 
-async function readGitStatus(repoPath: string): Promise<string> {
-  const result = await createDefaultToolRegistry().execute("git_status", {}, { repoPath });
-  if (result.success && isGitStatusData(result.data)) {
-    return result.data.status;
+async function readRepoState(repoPath: string): Promise<string> {
+  try {
+    const state = await new RepoStateAnalyzer({ repoPath }).analyze();
+    return formatRepoState(state);
+  } catch (error) {
+    return `[status] ${errorToMessage(error)}`;
   }
-
-  return `[git] ${result.error?.message ?? "Unable to read git status"}\n`;
 }
 
 function parseJsonInput(value: string): ToolResult<unknown> {
@@ -893,12 +900,6 @@ function isGitDiffData(value: unknown): value is { diff: string } {
     && typeof value.diff === "string";
 }
 
-function isGitStatusData(value: unknown): value is { status: string } {
-  return typeof value === "object"
-    && value !== null
-    && "status" in value
-    && typeof value.status === "string";
-}
 
 async function isDirectCliEntry(): Promise<boolean> {
   const currentFile = fileURLToPath(import.meta.url);

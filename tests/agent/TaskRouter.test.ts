@@ -28,4 +28,13 @@ describe("TaskRouter", () => {
       intent: "DIRECT_ANSWER",
     });
   });
+
+  it("routes web research requests to the agent loop", () => {
+    expect(routeTask("联网搜索一下 Valorant 最新赛事资料")).toMatchObject({
+      intent: "AGENT_LOOP",
+    });
+    expect(routeTask("look up the latest Node.js release")).toMatchObject({
+      intent: "AGENT_LOOP",
+    });
+  });
 });

@@ -88,6 +88,28 @@ const QUESTION_KEYWORDS = [
   "what did we discuss",
 ];
 
+const WEB_RESEARCH_KEYWORDS = [
+  "联网",
+  "网上",
+  "搜索一下",
+  "查一下",
+  "查找",
+  "资料",
+  "最新",
+  "新闻",
+  "网址",
+  "网页",
+  "来源",
+  "资料来源",
+  "search the web",
+  "web search",
+  "look up",
+  "browse",
+  "latest",
+  "news",
+  "source",
+];
+
 export function routeTask(userGoal: string): TaskRoute {
   const normalized = normalizeTask(userGoal);
 
@@ -102,6 +124,13 @@ export function routeTask(userGoal: string): TaskRoute {
     return {
       intent: "DIRECT_ANSWER",
       reason: "Task looks like a standalone code snippet request.",
+    };
+  }
+
+  if (containsAny(normalized, WEB_RESEARCH_KEYWORDS)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task appears to require current or external web information.",
     };
   }
 

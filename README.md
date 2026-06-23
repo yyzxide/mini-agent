@@ -11,6 +11,8 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 - Runs one-shot tasks with `mini-agent run "..."`.
 - Routes standalone questions/code snippets to direct-answer mode before using the repository-editing agent loop.
 - Calls real OpenAI-compatible chat completions APIs.
+- Answers general non-code questions in direct-answer mode.
+- Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Searches code with `rg`.
 - Reads files with repository path safety checks.
@@ -104,6 +106,7 @@ mini-agent
 mini-agent run "inspect this repository and summarize the main modules"
 mini-agent resume <sessionId>
 mini-agent sessions
+mini-agent status
 mini-agent diff
 mini-agent tool list
 mini-agent tool run read_file '{"path":"README.md"}'
@@ -128,7 +131,7 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 Interactive slash commands:
 
 ```text
-/status    Show git status.
+/status    Show a repository state summary.
 /diff      Show git diff.
 /sessions  List local sessions.
 /new       Start a new conversation session in the same repo.
@@ -148,6 +151,13 @@ For a standalone question or code snippet, `run` answers directly without editin
 
 ```bash
 mini-agent run "write a C++ two-sum example"
+mini-agent run "非登记收款人是什么意思"
+```
+
+For current external information, the agent can use controlled web tools:
+
+```bash
+mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 ```
 
 In interactive mode, follow-up questions reuse the same session until `/new` or `/exit`:
@@ -174,6 +184,7 @@ At the end, inspect changes:
 
 ```bash
 git status --short
+mini-agent status
 mini-agent diff
 ```
 
@@ -196,6 +207,7 @@ Available tools:
 | `search_code` | `SAFE` | Search with ripgrep. |
 | `git_status` | `SAFE` | Run `git status --short`. |
 | `git_diff` | `SAFE` | Run `git diff` or `git diff --cached`. |
+| `web_search` | `SAFE` | Search public web results. |
 | `fetch_url` | `SAFE` | Fetch bounded text from a public HTTP(S) URL. |
 | `apply_patch` | `REVIEW` | Check and apply a unified diff patch. |
 
@@ -215,6 +227,7 @@ The current MVP uses local guardrails:
 - `read_file` has line limits.
 - `search_code` limits result count.
 - `fetch_url` blocks localhost/private-network targets, limits timeout/download size, and returns only readable text-like content.
+- `web_search` returns bounded public result titles, URLs, and snippets; it does not grant arbitrary browser control.
 - Patch application runs `git apply --check` before `git apply`.
 - Commands have a timeout and output truncation.
 - Dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
@@ -292,6 +305,8 @@ Included:
 - tool registry
 - path-safe file tools
 - git status and diff tools
+- intelligent repository state summaries
+- controlled web search and URL fetch tools
 - patch manager
 - command runner
 - permission manager

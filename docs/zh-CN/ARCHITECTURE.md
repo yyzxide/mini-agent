@@ -2,7 +2,9 @@
 
 ## 1. 当前定位
 
-`mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、联网读取公开文档、补丁应用、命令执行、测试反馈和 diff 总结。
+`mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、联网搜索资料、联网读取公开文档、补丁应用、命令执行、测试反馈和 diff 总结。
+
+它的主业是代码任务，但不应该丢失正常 AI 助手的基础能力。普通非代码问题会走直接回答；需要外部时效信息的问题会进入 AgentLoop，通过受控联网工具搜索和读取资料。
 
 当前版本不内置后端服务和前端页面。所有核心能力都在 TypeScript CLI Runner 中完成。
 
@@ -36,7 +38,7 @@ CLI
 ```text
 src/cli              CLI 入口和调试命令
 src/agent            TaskRouter、AgentLoop、状态、决策类型
-src/context          仓库扫描和上下文拼接
+src/context          仓库扫描、仓库状态分析和上下文拼接
 src/tools            统一工具接口和工具实现
 src/patch            patch 预览、check、apply
 src/command          命令执行、超时、输出截断
@@ -99,6 +101,7 @@ interface Tool<TInput, TResult> {
 - `search_code`
 - `git_status`
 - `git_diff`
+- `web_search`
 - `fetch_url`
 - `apply_patch`
 
@@ -118,7 +121,11 @@ interface Tool<TInput, TResult> {
 
 ## 7. 联网工具
 
-联网能力先以 `fetch_url` 工具提供，而不是让 Agent 任意访问网络。它的边界是：
+联网能力通过 `web_search` 和 `fetch_url` 两层提供，而不是让 Agent 任意访问网络。
+
+`web_search` 用于搜索公开网页结果，返回标题、URL 和摘要。它适合回答“最新资料”“网上查一下”“新闻/来源”等问题。
+
+`fetch_url` 用于读取指定公开 URL。它的边界是：
 
 - 只支持 `http` 和 `https`。
 - 拒绝 localhost、`.local` 和明显的内网 IP。
@@ -126,7 +133,19 @@ interface Tool<TInput, TResult> {
 - 只返回文本、HTML、JSON、XML 等可读内容。
 - HTML 会做简单文本抽取，避免把脚本和样式塞进上下文。
 
-真正的全网搜索建议作为下一阶段单独接搜索 API，例如 Brave、Tavily 或 SerpAPI。
+当前 `web_search` 默认使用 DuckDuckGo HTML 结果页做轻量解析。后续如果需要更稳定的生产效果，可以接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
+
+## 7.5 仓库状态分析
+
+`git status`、`git diff`、`git log` 只属于事实层，不能直接等价于 Agent 对仓库的理解。当前版本增加了 `RepoStateAnalyzer`，用于把多种信号合成更适合模型和用户阅读的状态摘要：
+
+- git 分支、commit、变更文件和 diff 统计。
+- 项目构建文件，例如 `package.json`、`pom.xml`、`go.mod`。
+- 主要语言分布。
+- package scripts。
+- 建议验证命令，例如 `npm test`、`pnpm test`、`mvn test`、`go test ./...`。
+
+交互式 `/status` 和 `mini-agent status` 使用这层摘要；`mini-agent git status` 仍保留为底层 git 调试命令。
 
 ## 8. Patch 设计
 
