@@ -1,6 +1,6 @@
 # 测试计划
 
-当前项目只保留本地 CLI Agent，因此测试目标也收缩为：保证 CLI、工具系统、AgentLoop、LLM 客户端、patch、命令执行和 session 记录稳定。
+当前项目只保留本地 CLI Agent，因此测试目标也收缩为：保证 CLI、任务分流、工具系统、AgentLoop、LLM 客户端、patch、命令执行和 session 记录稳定。
 
 ## 1. 自动化测试范围
 
@@ -48,6 +48,18 @@
 - 追加 JSONL。
 - 读取 session。
 - 写入工具、命令、patch、diff、任务完成事件。
+- `/history`、`/events`、`/resume`、`/compact` 等交互式 session 操作。
+
+### 1.4.1 Runtime Log / Change Log
+
+覆盖：
+
+- 运行日志写入 `.mini-agent/logs/YYYY-MM-DD.jsonl`。
+- 日志读取和按数量截断。
+- API key、authorization、token、password 等敏感字段脱敏。
+- 任务变更日志写入 `.mini-agent/change-log.jsonl`。
+- 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。
+- `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
 ### 1.5 LLM
 
@@ -62,7 +74,28 @@
 
 测试中可以 stub `fetch`，避免依赖真实网络。
 
-### 1.6 AgentLoop
+### 1.6 TaskRouter 和回答模式
+
+覆盖：
+
+- 普通聊天和解释类问题进入 `DIRECT_ANSWER`。
+- 独立代码片段请求进入 `DIRECT_ANSWER`。
+- 需要最新外部资料的问题进入 `WEB_ANSWER`。
+- 仓库阅读、修改、测试、修复任务进入 `AGENT_LOOP`。
+- 英文关键词按词边界匹配，避免 `latest` 被误判成 `test`。
+
+### 1.7 WebQuestionPlanner
+
+覆盖：
+
+- 根据 session memory 把追问改写成独立搜索问题。
+- 普通时效问题生成多条搜索 query。
+- 实时比分、赛事结果等问题追加官方站和比分源 query。
+- 版本发布类问题追加官方 release notes、changelog、GitHub releases。
+- 模型规划返回非法 JSON 时回退到本地启发式策略。
+- 最终回答上下文包含 `answerScope`、`sourceHints` 和 `answerInstructions`。
+
+### 1.8 AgentLoop
 
 覆盖：
 
@@ -84,6 +117,9 @@ mini-agent tool --help
 mini-agent command --help
 mini-agent patch --help
 mini-agent config --help
+mini-agent doctor
+mini-agent logs
+mini-agent changes
 ```
 
 ### 2.2 工具调试
@@ -118,9 +154,10 @@ mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 
 观察：
 
-- 是否调用工具。
-- 是否输出最终 summary。
+- 仓库任务是否调用代码工具并输出最终 `[summary]`。
+- 联网任务是否调用 `web_search` / `fetch_url` 并输出 `[answer]`。
 - 是否写 session/event。
+- 是否写 runtime log/change log，可用 `mini-agent logs` 和 `mini-agent changes` 查看。
 
 ### 2.5 修改类任务
 
@@ -136,6 +173,31 @@ git diff
 - patch 是否能应用。
 - diff 是否符合预期。
 - session 是否记录 patch 事件。
+- change-log 是否记录本次任务摘要、变更文件和 diff stat。
+
+### 2.6 交互式 session 命令
+
+```text
+mini-agent
+> /help
+> /session
+> /history 10
+> /events 10
+> /logs 10
+> /changes 10
+> /compact
+> /new
+> /sessions
+> /resume <sessionId>
+> /exit
+```
+
+观察：
+
+- `/new` 后 session id 改变。
+- `/resume` 后当前 session 切到指定 id。
+- `/history` 能看到当前 session 的用户消息、助手消息、工具结果、任务总结。
+- `/compact` 会写入 `MEMORY_COMPACTION` 记录。
 
 ## 3. 提交前命令
 

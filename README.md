@@ -10,6 +10,7 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 - Keeps one active session in interactive mode, so follow-up prompts can use recent conversation history.
 - Runs one-shot tasks with `mini-agent run "..."`.
 - Routes standalone questions/code snippets to direct-answer mode before using the repository-editing agent loop.
+- Routes current external-information questions to web-answer mode instead of treating them as code tasks.
 - Calls real OpenAI-compatible chat completions APIs.
 - Answers general non-code questions in direct-answer mode.
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
@@ -128,14 +129,35 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
 `--agent-loop` forces the repository-editing loop when the router would otherwise answer directly.
 
+## Answer Modes
+
+`mini-agent` separates user input into three modes:
+
+- `DIRECT_ANSWER`: normal chat, explanations, and standalone code snippets. Output uses `[answer]`.
+- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, fetches important public pages with `fetch_url`, then asks the model for a fuller sourced answer. Output uses `[answer]`.
+- `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
+
+In interactive mode, web-answer follow-up questions reuse the active session context. The CLI first asks the model for a small web research plan: standalone question, search queries, answer scope, source hints, and answer instructions. If that planner fails, a local fallback planner still carries recent context and adds source-focused queries for live sports scores, release notes, news, and similar time-sensitive topics.
+
+For example, after asking about World Cup scores, a follow-up like "Japan's recent results" is searched as a World Cup-scoped question instead of a broad national-team query.
+
 Interactive slash commands:
 
 ```text
-/status    Show a repository state summary.
-/diff      Show git diff.
-/sessions  List local sessions.
-/new       Start a new conversation session in the same repo.
-/exit      Finish the active interactive session and exit.
+/help         Show slash command help.
+/new          Start a new conversation session in the same repo.
+/resume <id>  Switch to a previous session without restarting the CLI.
+/session      Show current session metadata.
+/sessions     List local sessions.
+/history [n]  Show recent session records.
+/events [n]   Show recent event records.
+/logs [n]     Show recent runtime logs.
+/changes [n]  Show recent task change-log entries.
+/compact      Write a compact local memory record for the active session.
+/status       Show a repository state summary.
+/diff         Show git diff.
+/clear        Clear the terminal.
+/exit         Finish the active interactive session and exit.
 ```
 
 ## Typical Local Workflow
@@ -159,6 +181,10 @@ For current external information, the agent can use controlled web tools:
 ```bash
 mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 ```
+
+This path prints `[tool] web_search`, may print `[tool] fetch_url`, and then prints a normal `[answer]` instead of a terse repository-task `[summary]`.
+
+The web tools are bounded public-page tools, not a dedicated live-score API. Dynamic pages, anti-bot pages, or JavaScript-rendered scoreboards may fail to provide exact real-time data; in that case the answer should say what could not be verified instead of guessing.
 
 In interactive mode, follow-up questions reuse the same session until `/new` or `/exit`:
 
@@ -241,10 +267,13 @@ Each repository gets a local `.mini-agent/` directory:
 ```text
 .mini-agent/
   config.json
+  change-log.jsonl
   sessions/
     <sessionId>.jsonl
   events/
     <sessionId>.jsonl
+  logs/
+    YYYY-MM-DD.jsonl
 ```
 
 Session records include:
@@ -259,6 +288,11 @@ Session records include:
 
 The current session records are also used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt. This is lightweight transcript memory, not a full vector RAG system.
 
+Runtime logs and task change logs serve different purposes:
+
+- `logs/YYYY-MM-DD.jsonl` records operational events such as task start/end, tool debugging, command execution, and CLI errors.
+- `change-log.jsonl` records task-level review entries: session id, task text, answer mode, success/failure, summary, changed files, diff stat, and test outcomes.
+
 List sessions:
 
 ```bash
@@ -270,6 +304,9 @@ Inspect one session:
 ```bash
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
+mini-agent logs
+mini-agent changes
+mini-agent doctor
 ```
 
 ## Development
@@ -291,6 +328,9 @@ mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 mini-agent command run "echo hello"
+mini-agent doctor
+mini-agent logs
+mini-agent changes
 ```
 
 ## Current MVP Scope
@@ -311,6 +351,7 @@ Included:
 - command runner
 - permission manager
 - local JSONL sessions and events
+- runtime logs and task change logs
 - automated Vitest coverage
 
 Not included:

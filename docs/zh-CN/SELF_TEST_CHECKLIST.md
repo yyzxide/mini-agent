@@ -39,12 +39,14 @@ npm run verify
 npm link
 mini-agent --help
 mini-agent tool list
+mini-agent doctor
 ```
 
 期望：
 
 - `mini-agent --help` 输出命令列表。
 - `tool list` 输出工具 JSON。
+- `doctor` 输出 Node、git、rg、配置和本地记录状态。
 
 如果 `mini-agent: command not found`，说明没有 link 或 PATH 没包含 Node 全局 bin。
 
@@ -140,7 +142,6 @@ mini-agent diff
 ```bash
 mini-agent run "写一个两数之和的 C++ 代码"
 mini-agent run "非登记收款人是什么意思"
-mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 ```
 
 期望：
@@ -148,6 +149,35 @@ mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 - 输出 `[answer]`。
 - 不创建源码文件。
 - 不出现 `[patch]`。
+
+联网回答任务：
+
+```bash
+mini-agent run "联网搜索一下 TypeScript 最新版本信息"
+mini-agent run "洛克王国最新版本是什么，最新的宠物有哪些"
+mini-agent run "edg在哪一年中夺冠了"
+```
+
+期望：
+
+- 输出 `[tool] web_search`。
+- 如搜索结果可抓取，输出 `[tool] fetch_url`。
+- 最终输出 `[answer]`，而不是仓库任务的 `[summary]`。
+- 不创建源码文件。
+- 对 EDG 这类多项目俱乐部，未指定游戏时不要只默认《英雄联盟》，应按项目列出主要冠军或提示用户补充范围。
+
+交互模式下的联网追问：
+
+```text
+mini-agent
+> 世界杯最新比分
+> 日本队最近几场的成绩
+```
+
+期望：
+
+- 第二问仍然输出 `[answer]`。
+- 第二问的回答范围应继承“世界杯”，不要混入友谊赛、世预赛或其它赛事，除非用户明确要求所有比赛。
 
 仓库任务：
 
@@ -167,12 +197,38 @@ mini-agent run "阅读这个仓库，说明 src/tools 和 src/agent 的职责"
 mini-agent sessions
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
+mini-agent logs
+mini-agent changes
 ```
 
 期望：
 
 - 能列出历史 session。
 - 能查看消息、工具、命令、patch 和最终 diff。
+- 能查看运行日志和任务变更日志。
+
+## 10.1 交互式命令
+
+```text
+mini-agent
+> /help
+> /session
+> /history 10
+> /events 10
+> /logs 10
+> /changes 10
+> /compact
+> /new
+> /sessions
+> /exit
+```
+
+期望：
+
+- `/help` 显示完整 slash 命令。
+- `/history` 和 `/events` 能查看当前 session 的记录。
+- `/compact` 会写入压缩记忆记录。
+- `/logs` 和 `/changes` 能查看最近运行记录。
 
 ## 11. Git 状态
 
@@ -200,6 +256,8 @@ mini-agent tool run read_file '{"path":"README.md"}'
 mini-agent command run "echo hello"
 mini-agent run "总结这个项目的核心模块"
 mini-agent sessions
+mini-agent logs
+mini-agent changes
 mini-agent diff
 ```
 

@@ -18,6 +18,7 @@ export interface OpenAICompatibleClientOptions {
 export interface LlmTextInput {
   userGoal: string;
   context?: string | undefined;
+  mode?: "direct" | "web" | "web_rewrite" | undefined;
 }
 
 export interface LlmTextResult {
@@ -92,15 +93,7 @@ export class OpenAICompatibleClient implements LlmClient {
           messages: [
             {
               role: "system",
-              content: [
-                "You are a helpful local assistant inside a coding-agent CLI.",
-                "Answer the user's request directly, including general questions and coding questions.",
-                "Use the provided conversation context when it is relevant.",
-                "If the user asks what was discussed before, summarize only what appears in the conversation context.",
-                "Do not claim that there is no memory when conversation context is present.",
-                "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
-                "For code requests, provide complete code in a fenced code block and add only brief notes when useful.",
-              ].join("\n"),
+              content: buildTextCompletionSystemPrompt(input.mode ?? "direct"),
             },
             {
               role: "user",
@@ -313,6 +306,55 @@ function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
   ].filter(Boolean).join("; ");
 
   return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
+}
+
+function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite"): string {
+  const commonRules = [
+    "You are a helpful local assistant inside a coding-agent CLI.",
+    "Answer in the same language as the user unless the user asks otherwise.",
+    "Use the provided conversation context when it is relevant.",
+    "If the user asks what was discussed before, summarize only what appears in the conversation context.",
+    "Do not claim that there is no memory when conversation context is present.",
+    "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
+    "Prefer a complete, useful answer over a terse one-line summary.",
+    "Use short paragraphs or bullets when they improve clarity.",
+    "For code requests, provide complete code in a fenced code block and add only brief notes when useful.",
+  ];
+
+  if (mode === "web") {
+    return [
+      ...commonRules,
+      "The context may include web_search and fetch_url results gathered by the CLI.",
+      "Base current-fact answers on the provided web context.",
+      "Use conversation context to resolve follow-up questions and keep the same topic/scope unless the user clearly changes it.",
+      "For sports questions, keep competitions separate. Do not mix World Cup matches with friendlies, qualifiers, or league matches unless the user asks for all competitions.",
+      "For ambiguous entities or acronyms, do not assume the domain. If sources show multiple valid interpretations, list them by category and state what clarification would narrow the answer.",
+      "For live scores or very recent results, say clearly when the provided sources do not verify the exact current score.",
+      "Mention the main source titles or URLs when you rely on web context.",
+      "If sources disagree or are insufficient, say that clearly and explain the uncertainty.",
+      "Do not invent facts that are not supported by the web context.",
+    ].join("\n");
+  }
+
+  if (mode === "web_rewrite") {
+    return [
+      "You are a web question planner for a local assistant.",
+      "Your job is to rewrite the user's current question into a standalone web research plan.",
+      "Use the conversation memory to resolve follow-up questions, pronouns, omitted topics, and scope.",
+      "Do not answer the user's question.",
+      "Return JSON only, with no markdown and no prose.",
+      "The JSON shape must be:",
+      "{\"standaloneQuestion\":\"string\",\"searchQueries\":[\"string\"],\"answerScope\":\"string\",\"sourceHints\":[\"string\"],\"answerInstructions\":[\"string\"],\"needsLiveData\":boolean,\"confidence\":\"high|medium|low\"}",
+      "Create 1 to 4 search queries.",
+      "If the user asks for current, latest, live, prices, scores, results, news, or recent facts, set needsLiveData to true.",
+      "For follow-up questions, preserve the previous topic/scope unless the user clearly changed topic.",
+      "For sports questions, keep competitions separate in answerInstructions.",
+      "If an entity/acronym can belong to multiple domains and the user did not specify the domain, do not silently choose one. Plan broad searches and add instructions to list major verified interpretations or ask for clarification.",
+      "For esports organizations, keep different games/titles and tournaments separate.",
+    ].join("\n");
+  }
+
+  return commonRules.join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

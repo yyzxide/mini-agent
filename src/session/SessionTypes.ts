@@ -9,11 +9,14 @@ export type SessionRecordType =
   | "COMMAND_RESULT"
   | "FILE_CHANGE"
   | "DIFF_SUMMARY"
+  | "MEMORY_COMPACTION"
   | "TASK_SUMMARY"
   | "ERROR";
 
 export type EventType =
   | "SESSION_CREATED"
+  | "SESSION_RESUMED"
+  | "SESSION_COMPACTED"
   | "USER_MESSAGE"
   | "ASSISTANT_MESSAGE"
   | "TOOL_CALL_STARTED"

@@ -1,4 +1,4 @@
-export type TaskIntent = "DIRECT_ANSWER" | "AGENT_LOOP";
+export type TaskIntent = "DIRECT_ANSWER" | "WEB_ANSWER" | "AGENT_LOOP";
 
 export interface TaskRoute {
   intent: TaskIntent;
@@ -46,6 +46,41 @@ const REPOSITORY_KEYWORDS = [
   "test",
 ];
 
+const REPOSITORY_ACTION_KEYWORDS = [
+  "仓库",
+  "项目",
+  "文件",
+  "目录",
+  "当前",
+  "这里",
+  "这个 repo",
+  "这个代码",
+  "修改",
+  "新增",
+  "创建",
+  "删除",
+  "保存",
+  "写入",
+  "补充",
+  "修复",
+  "重构",
+  "测试",
+  "readme",
+  "src/",
+  "repo",
+  "repository",
+  "project",
+  "file",
+  "directory",
+  "modify",
+  "add",
+  "create",
+  "delete",
+  "fix",
+  "refactor",
+  "test",
+];
+
 const DIRECT_CODE_KEYWORDS = [
   "代码片段",
   "示例代码",
@@ -64,10 +99,24 @@ const DIRECT_CODE_KEYWORDS = [
 ];
 
 const QUESTION_KEYWORDS = [
+  "你是谁",
+  "知道",
+  "知道吗",
+  "是谁",
   "是什么",
   "为什么",
   "怎么",
   "如何",
+  "哪里",
+  "哪个",
+  "哪支",
+  "哪位",
+  "哪一年",
+  "哪年",
+  "多少",
+  "吗",
+  "？",
+  "?",
   "解释",
   "说明",
   "记得",
@@ -79,8 +128,14 @@ const QUESTION_KEYWORDS = [
   "我们聊",
   "我们说",
   "what is",
+  "who are you",
+  "who is",
   "why",
   "how to",
+  "where",
+  "when",
+  "which",
+  "how many",
   "explain",
   "remember",
   "previous",
@@ -96,22 +151,53 @@ const WEB_RESEARCH_KEYWORDS = [
   "查找",
   "资料",
   "最新",
+  "最近",
   "新闻",
   "网址",
   "网页",
   "来源",
   "资料来源",
+  "比分",
+  "赛果",
+  "赛程",
+  "成绩",
+  "战绩",
+  "排名",
+  "冠军",
+  "夺冠",
+  "夺得",
+  "获得冠军",
+  "夺冠了",
+  "世界杯",
+  "大师赛",
+  "比赛结果",
   "search the web",
   "web search",
   "look up",
   "browse",
   "latest",
+  "recent",
   "news",
   "source",
+  "score",
+  "scores",
+  "result",
+  "results",
+  "standings",
+  "champion",
+  "world cup",
 ];
 
 export function routeTask(userGoal: string): TaskRoute {
   const normalized = normalizeTask(userGoal);
+  const needsWeb = containsAny(normalized, WEB_RESEARCH_KEYWORDS);
+
+  if (needsWeb && !containsAny(normalized, REPOSITORY_ACTION_KEYWORDS)) {
+    return {
+      intent: "WEB_ANSWER",
+      reason: "Task appears to require current or external web information.",
+    };
+  }
 
   if (containsAny(normalized, REPOSITORY_KEYWORDS)) {
     return {
@@ -127,9 +213,9 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
-  if (containsAny(normalized, WEB_RESEARCH_KEYWORDS)) {
+  if (needsWeb) {
     return {
-      intent: "AGENT_LOOP",
+      intent: "WEB_ANSWER",
       reason: "Task appears to require current or external web information.",
     };
   }
@@ -152,5 +238,14 @@ function normalizeTask(value: string): string {
 }
 
 function containsAny(value: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => value.includes(keyword));
+  return keywords.some((keyword) => containsKeyword(value, keyword));
+}
+
+function containsKeyword(value: string, keyword: string): boolean {
+  if (/^[a-z][a-z0-9\s-]*$/i.test(keyword)) {
+    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+    return new RegExp(`(^|[^a-z0-9])${escapedKeyword}($|[^a-z0-9])`, "i").test(value);
+  }
+
+  return value.includes(keyword);
 }

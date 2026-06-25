@@ -29,12 +29,30 @@ describe("TaskRouter", () => {
     });
   });
 
-  it("routes web research requests to the agent loop", () => {
+  it("routes web research requests to web answer mode", () => {
     expect(routeTask("联网搜索一下 Valorant 最新赛事资料")).toMatchObject({
-      intent: "AGENT_LOOP",
+      intent: "WEB_ANSWER",
     });
     expect(routeTask("look up the latest Node.js release")).toMatchObject({
-      intent: "AGENT_LOOP",
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("世界杯最新比分")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("日本队最近几场的成绩")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("edg在哪一年中夺冠了")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+  });
+
+  it("routes broad chatty questions to direct answer mode", () => {
+    expect(routeTask("你好啊，你是谁")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("你知道洛克王国吗")).toMatchObject({
+      intent: "DIRECT_ANSWER",
     });
   });
 });

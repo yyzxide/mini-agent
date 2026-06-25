@@ -42,6 +42,7 @@ function isUsefulMemoryRecord(record: SessionRecord): boolean {
     "ERROR",
     "TOOL_RESULT",
     "COMMAND_RESULT",
+    "MEMORY_COMPACTION",
   ].includes(record.type);
 }
 
@@ -59,6 +60,8 @@ function formatMemoryRecord(record: SessionRecord): string {
       return `[tool] ${payloadString(record.payload, "toolName", "name")} ${compactJson(record.payload)}`;
     case "COMMAND_RESULT":
       return `[command] ${payloadString(record.payload, "command")} ${compactJson(record.payload)}`;
+    case "MEMORY_COMPACTION":
+      return `[memory] ${payloadString(record.payload, "summary")}`;
     default:
       return "";
   }

@@ -4,7 +4,7 @@
 
 `mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、联网搜索资料、联网读取公开文档、补丁应用、命令执行、测试反馈和 diff 总结。
 
-它的主业是代码任务，但不应该丢失正常 AI 助手的基础能力。普通非代码问题会走直接回答；需要外部时效信息的问题会进入 AgentLoop，通过受控联网工具搜索和读取资料。
+它的主业是代码任务，但不应该丢失正常 AI 助手的基础能力。普通非代码问题会走直接回答；需要外部时效信息的问题会进入联网回答模式，通过受控联网工具搜索和读取资料；真正需要读写仓库、执行命令和修复问题的任务才进入 AgentLoop。
 
 当前版本不内置后端服务和前端页面。所有核心能力都在 TypeScript CLI Runner 中完成。
 
@@ -13,25 +13,24 @@
 ```text
 CLI
  -> TaskRouter
- -> AgentLoop
- -> ContextBuilder
- -> OpenAICompatibleClient
- -> AgentDecision
- -> ToolRegistry / PatchManager / CommandRunner
+ -> DIRECT_ANSWER / WEB_ANSWER / AGENT_LOOP
+ -> OpenAICompatibleClient / ToolRegistry / ContextBuilder
+ -> AgentDecision / PatchManager / CommandRunner
  -> SessionStore / EventStore
- -> final summary + git diff
+ -> answer 或 final summary + git diff
 ```
 
 核心循环：
 
 1. 初始化 `AgentState`。
 2. 构建仓库上下文和当前 session 的短期记忆。
-3. 先用 `TaskRouter` 判断是直接回答，还是进入仓库 AgentLoop。
+3. 先用 `TaskRouter` 判断是直接回答、联网回答，还是进入仓库 AgentLoop。
 4. 直接回答任务只调用文本 LLM，不改文件。
-5. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
-6. 根据 decision 执行工具、应用 patch、运行命令或结束。
-7. 命令失败时把日志放回上下文。
-8. 达到 final 或最大步数后输出总结和 diff。
+5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`，最后把资料交给文本 LLM 生成完整回答。
+6. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
+7. 根据 decision 执行工具、应用 patch、运行命令或结束。
+8. 命令失败时把日志放回上下文。
+9. 达到 final 或最大步数后输出总结和 diff。
 
 ## 3. 目录职责
 
@@ -46,8 +45,9 @@ src/git              git status/diff/commit 辅助能力
 src/permission       权限级别和危险命令拦截
 src/session          JSONL session/event 存储
 src/llm              LLM 接口和 OpenAI-compatible 客户端
+src/web              联网问题规划、追问改写和搜索源策略
 src/config           本地配置文件读取和脱敏
-src/utils            路径安全、错误处理、日志
+src/utils            路径安全、错误处理、运行日志
 tests                自动化测试
 ```
 
@@ -56,9 +56,27 @@ tests                自动化测试
 `TaskRouter` 在进入 AgentLoop 之前先做轻量分流：
 
 - 普通问答和独立代码片段走 `DIRECT_ANSWER`，只输出答案，不改仓库。
+- 需要最新资料、新闻、版本、赛事结果等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
 - 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
 - “刚才聊了什么 / 还记得吗 / 上次呢”这类会话追问走 `DIRECT_ANSWER`，但会带上当前 session 的最近记录。
 - `--agent-loop` 可以强制进入仓库修改流程。
+
+`WEB_ANSWER` 会先调用 `WebQuestionPlanner` 生成搜索计划：
+
+- `standaloneQuestion`：把追问改写成可以独立搜索的问题。
+- `searchQueries`：生成 1 到 4 条搜索 query。
+- `answerScope`：明确回答范围。
+- `sourceHints`：提示优先找官方、实时、发布说明、比分页等来源。
+- `answerInstructions`：约束回答不要混淆赛事、版本、政策或其它领域边界。
+- `needsLiveData`：标记是否属于实时或强时效问题。
+
+规划优先由 LLM 根据 session memory 完成；如果规划失败，会回退到本地启发式策略。例如上一轮问“世界杯最新比分”，下一轮问“日本队最近几场的成绩”，搜索 query 会携带“世界杯”范围，避免泛化成日本国家队所有友谊赛、预选赛或其它赛事成绩。
+
+对于 EDG、T1、Apple 这类可能跨游戏、跨产品或跨领域的实体，如果用户没有指定领域，规划器不能默认选择一个方向。它会生成更宽的 query，并要求最终回答按领域列出主要可能，或提示用户补充范围。例如“EDG 哪一年夺冠了”应区分《英雄联盟》S11 2021 年和《无畏契约》Valorant Champions 2024 年，而不是只回答其中一个。
+
+对于实时比分、版本发布、政策新闻等强时效问题，fallback 策略会自动追加 source-focused query。例如赛事比分会优先尝试官方赛事站、比分页和赛程结果页；版本问题会追加官方 release notes、changelog 和 GitHub releases。
+
+当前联网工具是受控公网搜索和页面抓取，不是实时比分或商业搜索 API。遇到动态比分页、反爬页面或 JS 渲染页面时，工具可能只能拿到摘要或拿不到结构化数据。此时回答必须说明“无法核验实时比分”，不能编造结果。
 
 Agent 每轮从模型获得一个结构化决策：
 
@@ -192,8 +210,10 @@ patch 由 `PatchManager` 管理：
 ```text
 .mini-agent/
   config.json
+  change-log.jsonl
   sessions/<sessionId>.jsonl
   events/<sessionId>.jsonl
+  logs/YYYY-MM-DD.jsonl
 ```
 
 Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，是因为：
@@ -204,11 +224,45 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - 崩溃时仍保留已写入步骤。
 - 以后可以被别的系统读取。
 
+新增的运行日志和任务变更日志解决两个不同问题：
+
+- `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用和 CLI 异常。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
+- `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。它适合做 review、demo 复盘和面试材料整理。
+
 交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session，`/exit` 会结束当前 session。`mini-agent resume <sessionId>` 会重新打开指定 session，并继续把该 session 的最近记录作为上下文。
 
-`SessionMemory` 会把最近的用户消息、助手消息、任务总结、工具结果、命令结果和错误压缩成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
+交互式 CLI 也支持 `/resume <sessionId>` 在当前进程中切换历史 session，支持 `/history` 查看当前 session 记录，支持 `/events` 查看事件时间线，支持 `/logs` 和 `/changes` 查看运行日志和任务变更日志。
+
+`SessionMemory` 会把最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
+
+`/compact` 当前是第一版本地压缩：它把最近 session 记录压成一条 `MEMORY_COMPACTION` 写回 session，避免长会话完全依赖原始消息堆积。它还不是向量数据库或长程 RAG，后续可以升级为“LLM 摘要 + 关键词索引 + 文件级检索”的混合记忆。
 
 当前这层记忆是 transcript memory，不是完整 RAG。它解决同一会话连续性；如果要跨仓库、跨天、跨长文档检索，需要后续再加索引、摘要和向量/关键词检索。
+
+## 10.5 CLI 诊断和常用 slash 命令
+
+顶层诊断命令：
+
+- `mini-agent doctor`：检查 Node、git、rg、pnpm、模型配置、仓库状态、session/log/change-log 状态。
+- `mini-agent logs`：查看最近运行日志。
+- `mini-agent changes`：查看最近任务变更日志。
+
+交互式 slash 命令：
+
+- `/help`：查看命令。
+- `/new`：开启新会话。
+- `/resume <sessionId>`：切换历史会话。
+- `/session`：查看当前 session 元信息。
+- `/sessions`：列出 session。
+- `/history [n]`：查看当前 session 最近记录。
+- `/events [n]`：查看当前 session 最近事件。
+- `/logs [n]`：查看最近运行日志。
+- `/changes [n]`：查看最近任务变更日志。
+- `/compact`：写入一条本地压缩记忆。
+- `/status`：查看仓库状态摘要。
+- `/diff`：查看当前 diff。
+- `/clear`：清屏。
+- `/exit`：结束当前 session 并退出。
 
 ## 11. LLM 接入
 

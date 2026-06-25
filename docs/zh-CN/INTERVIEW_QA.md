@@ -34,7 +34,7 @@ LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和
 
 ## Q9：联网能力怎么控制？
 
-联网不是让模型随便访问网络，而是通过 `fetch_url` 工具读取公网 HTTP(S) 文档。工具会限制超时、下载大小和输出长度，拒绝 localhost、`.local` 和明显的内网 IP，并且只返回文本类内容。全网搜索会作为下一阶段接入独立搜索 API。
+联网不是让模型随便访问网络，而是通过 `web_search` 和 `fetch_url` 两个受控工具完成。`web_search` 返回公开网页标题、URL 和摘要；`fetch_url` 读取公网 HTTP(S) 文档。工具会限制超时、下载大小和输出长度，拒绝 localhost、`.local` 和明显的内网 IP，并且只返回文本类内容。实时比分、动态页面或反爬页面仍可能拿不到完整数据，Agent 必须说明无法核验，不能编造。
 
 ## Q10：patch 为什么不用直接写文件？
 
@@ -48,26 +48,38 @@ patch 更适合审计和回滚。应用前可以预览，可以 `git apply --che
 
 JSONL 适合本地 Agent：追加简单、人工可读、崩溃后已有记录不丢、无需数据库，也方便未来被其他系统消费。
 
-## Q13：现在是真模型还是 mock？
+## Q13：为什么还要 runtime log 和 change log？
+
+session/event 更偏 Agent 业务记录；runtime log 用来排查系统运行问题，比如工具失败、命令失败、配置错误；change log 用来复盘每次任务做了什么，包括任务文本、模式、成功失败、摘要、变更文件、diff stat 和测试结果。三者分开，排障和 review 都更清晰。
+
+## Q14：上下文记忆怎么管理？
+
+当前是短期 transcript memory。每个交互会话复用同一个 session，`SessionMemory` 会读取最近的用户消息、助手消息、任务总结、工具结果、命令结果和错误，注入直接回答、联网回答和 AgentLoop。`/compact` 会写入一条本地压缩记忆。它还不是完整 RAG，后续可以加摘要索引、关键词检索和向量检索。
+
+## Q15：和 Codex CLI / Claude Code 的思路有什么相似点？
+
+相似点是 CLI 优先、受控工具、session 恢复、slash command、上下文压缩和本地审计。区别是本项目是教学和作品级 MVP，核心在 TypeScript 实现的 AgentLoop、ToolRegistry、PermissionManager、PatchManager、CommandRunner 和 JSONL 记录体系，不追求直接复刻完整产品。
+
+## Q16：现在是真模型还是 mock？
 
 产品运行路径是真实 OpenAI-compatible API。测试里仍然会 stub fetch 或用 scripted LLM，这是为了自动化测试稳定，不是产品功能。
 
-## Q14：配置 API key 为什么放文件里？
+## Q17：配置 API key 为什么放文件里？
 
 本地开发时配置文件更直观。`mini-agent.config.json` 被 gitignore 忽略，`config show` 默认脱敏。也支持环境变量，适合 CI 或临时覆盖。
 
-## Q15：这个项目难点在哪里？
+## Q18：这个项目难点在哪里？
 
 难点不在调用一次 API，而在把模型输出变成可控执行：结构化决策、工具 schema、路径安全、patch check、命令安全、测试反馈、session 审计和错误恢复。
 
-## Q16：如果测试失败，Agent 怎么继续？
+## Q19：如果测试失败，Agent 怎么继续？
 
 `CommandRunner` 会返回结构化失败结果，包括 stdout、stderr、exitCode。AgentLoop 把这些信息放回上下文，模型下一轮可以继续搜索、读取文件或生成修复 patch。
 
-## Q17：有什么不足？
+## Q20：有什么不足？
 
 当前不是生产级沙箱；上下文压缩还比较简单；复杂仓库的任务规划依赖模型能力；没有远程 PR 创建和多人控制面。
 
-## Q18：后续怎么扩展？
+## Q21：后续怎么扩展？
 
 优先方向是增强 Prompt、改进决策解析、加入 dry-run、增强 session replay、识别项目测试命令。如果未来需要平台化，可以单独做后端/前端，不把它们绑死在 CLI 仓库里。
