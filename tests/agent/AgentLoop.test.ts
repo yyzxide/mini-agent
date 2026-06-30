@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentDecision } from "../../src/agent/AgentDecision.js";
@@ -122,7 +123,12 @@ describe("AgentLoop", () => {
       eventStore,
       llmClient: new SequenceLlmClient([
         { type: "PLAN", message: "Run a failing test command." },
-        { type: "RUN_COMMAND", command: "false # npm test", description: "simulate test failure" },
+        {
+          type: "RUN_COMMAND",
+          executable: process.execPath,
+          args: ["-e", "process.exit(1)", "npm test"],
+          description: "simulate test failure",
+        },
         { type: "FINAL", success: true, summary: "Finished after recording command failure." },
       ]),
     });
@@ -333,7 +339,8 @@ function scriptedDemoDecisions(): AgentDecision[] {
     },
     {
       type: "RUN_COMMAND",
-      command: "echo test passed",
+      executable: process.execPath,
+      args: ["-e", "console.log('test passed')"],
       description: "Run a lightweight verification command",
     },
     {

@@ -45,6 +45,23 @@ describe("PermissionManager", () => {
     expect(decision.mode).toBe("AUTO");
   });
 
+  it("requires explicit approval for high-risk shell commands", async () => {
+    const manager = new PermissionManager();
+
+    const decision = await manager.check({
+      level: PermissionLevel.DANGEROUS,
+      action: "run_shell_command",
+      command: "echo hello",
+      nonInteractive: true,
+      autoApprove: true,
+      requiresExplicitApproval: true,
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.mode).toBe("USER_REJECTED");
+    expect(decision.reason).toContain("explicit approval");
+  });
+
   it("blocks sudo commands", async () => {
     const manager = new PermissionManager();
 

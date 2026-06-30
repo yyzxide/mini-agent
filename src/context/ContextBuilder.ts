@@ -3,22 +3,41 @@ import type { AgentState } from "../agent/AgentState.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import { MessageCompressor } from "./MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
 import { RepoScanner } from "./RepoScanner.js";
+import { truncateText } from "../utils/fs.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
   maxChars?: number;
+  budgets?: Partial<ContextSectionBudgets>;
+}
+
+export interface ContextSectionBudgets {
+  task: number;
+  memory: number;
+  repoState: number;
+  tools: number;
+  git: number;
+  repositoryStructure: number;
+  projectDocs: number;
+  recentResults: number;
+  diagnostics: number;
+  diff: number;
 }
 
 export class ContextBuilder {
   private readonly repoPath: string;
-  private readonly compressor: MessageCompressor;
+  private readonly maxChars: number;
+  private readonly budgets: ContextSectionBudgets;
 
   constructor(options: ContextBuilderOptions) {
     this.repoPath = options.repoPath;
-    this.compressor = new MessageCompressor({ maxChars: options.maxChars ?? 30_000 });
+    this.maxChars = options.maxChars ?? 30_000;
+    this.budgets = {
+      ...createDefaultBudgets(this.maxChars),
+      ...options.budgets,
+    };
   }
 
   async build(state: AgentState, availableTools: ToolSpec[] = []): Promise<string> {
@@ -41,29 +60,117 @@ export class ContextBuilder {
     ]);
 
     const snapshot = state.toSnapshot();
-    const context = [
-      `User task:\n${state.userGoal}`,
-      `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
-      `Conversation memory:\n${sessionMemory}`,
-      `Repository state summary:\n${repoState}`,
-      `Available tools:\n${JSON.stringify(availableTools, null, 2)}`,
-      `Git repository:\n${String(isGitRepository)}`,
-      `Git status:\n${status || "(clean or unavailable)"}`,
-      `Tree summary:\n${tree || "(empty)"}`,
-      `README summary:\n${readme}`,
-      `Build files:\n${buildFiles}`,
-      `Recent decisions:\n${JSON.stringify(snapshot.decisions.slice(-6), null, 2)}`,
-      `Recent tool results:\n${JSON.stringify(snapshot.toolResults.slice(-5), null, 2)}`,
-      `Recent command results:\n${JSON.stringify(snapshot.commandResults.slice(-3), null, 2)}`,
-      `Recent patch results:\n${JSON.stringify(snapshot.patchResults.slice(-3), null, 2)}`,
-      `Patch failure summary:\n${summarizePatchFailures(state)}`,
-      `Test failure summary:\n${summarizeTestFailures(state)}`,
-      `Last error:\n${snapshot.lastError ?? "(none)"}`,
-      `Current diff:\n${diff || "(none)"}`,
-    ].join("\n\n---\n\n");
+    const sections: ContextSection[] = [
+      {
+        title: "Task and step",
+        budget: this.budgets.task,
+        content: [
+          `User task:\n${state.userGoal}`,
+          `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
+        ].join("\n\n"),
+      },
+      { title: "Conversation memory", budget: this.budgets.memory, content: sessionMemory },
+      { title: "Repository state summary", budget: this.budgets.repoState, content: repoState },
+      { title: "Available tools", budget: this.budgets.tools, content: JSON.stringify(availableTools, null, 2) },
+      {
+        title: "Git state",
+        budget: this.budgets.git,
+        content: [
+          `Git repository:\n${String(isGitRepository)}`,
+          `Git status:\n${status || "(clean or unavailable)"}`,
+        ].join("\n\n"),
+      },
+      { title: "Tree summary", budget: this.budgets.repositoryStructure, content: tree || "(empty)" },
+      {
+        title: "Project docs and build files",
+        budget: this.budgets.projectDocs,
+        content: [
+          `README summary:\n${readme}`,
+          `Build files:\n${buildFiles}`,
+        ].join("\n\n"),
+      },
+      {
+        title: "Recent decisions and results",
+        budget: this.budgets.recentResults,
+        content: [
+          `Recent decisions:\n${JSON.stringify(snapshot.decisions.slice(-6), null, 2)}`,
+          `Recent tool results:\n${JSON.stringify(snapshot.toolResults.slice(-5), null, 2)}`,
+          `Recent command results:\n${JSON.stringify(snapshot.commandResults.slice(-3), null, 2)}`,
+          `Recent patch results:\n${JSON.stringify(snapshot.patchResults.slice(-3), null, 2)}`,
+        ].join("\n\n"),
+      },
+      {
+        title: "Diagnostics",
+        budget: this.budgets.diagnostics,
+        content: [
+          `Patch failure summary:\n${summarizePatchFailures(state)}`,
+          `Test failure summary:\n${summarizeTestFailures(state)}`,
+          `Last error:\n${snapshot.lastError ?? "(none)"}`,
+        ].join("\n\n"),
+      },
+      { title: "Current diff", budget: this.budgets.diff, content: diff || "(none)" },
+    ];
 
-    return this.compressor.compress(context);
+    return formatBudgetedSections(sections, this.maxChars);
   }
+}
+
+interface ContextSection {
+  title: string;
+  budget: number;
+  content: string;
+}
+
+function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
+  return {
+    task: Math.floor(maxChars * 0.08),
+    memory: Math.floor(maxChars * 0.12),
+    repoState: Math.floor(maxChars * 0.10),
+    tools: Math.floor(maxChars * 0.10),
+    git: Math.floor(maxChars * 0.07),
+    repositoryStructure: Math.floor(maxChars * 0.14),
+    projectDocs: Math.floor(maxChars * 0.12),
+    recentResults: Math.floor(maxChars * 0.10),
+    diagnostics: Math.floor(maxChars * 0.07),
+    diff: Math.floor(maxChars * 0.10),
+  };
+}
+
+function formatBudgetedSections(sections: ContextSection[], maxChars: number): string {
+  const parts: string[] = [];
+  let remaining = Math.max(0, maxChars);
+
+  for (const section of sections) {
+    const separator = parts.length === 0 ? "" : "\n\n---\n\n";
+    const header = `${section.title}:\n`;
+    const overhead = separator.length + header.length;
+    if (remaining <= overhead) {
+      break;
+    }
+
+    const contentBudget = Math.max(0, Math.min(section.budget, remaining - overhead));
+    const formatted = formatBudgetedSectionContent(section.content, contentBudget);
+    parts.push(`${separator}${header}${formatted}`);
+    remaining -= overhead + formatted.length;
+  }
+
+  return parts.join("");
+}
+
+function formatBudgetedSectionContent(content: string, maxChars: number): string {
+  const normalized = content.length > 0 ? content : "(empty)";
+  const truncated = truncateText(normalized, maxChars);
+  if (!truncated.truncated) {
+    return truncated.text;
+  }
+
+  const marker = "\n[section truncated]";
+  if (maxChars <= marker.length) {
+    return truncated.text;
+  }
+
+  const textBudget = Math.max(0, maxChars - marker.length);
+  return `${normalized.slice(0, textBudget)}${marker}`;
 }
 
 function errorToText(error: unknown): string {

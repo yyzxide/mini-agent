@@ -9,7 +9,7 @@ export function decisionToMessage(decision: AgentDecision): string {
     case "APPLY_PATCH":
       return decision.description ?? "Applying patch";
     case "RUN_COMMAND":
-      return decision.description ?? `Running command: ${decision.command}`;
+      return decision.description ?? `Running command: ${decision.shell ? decision.command : decision.executable}`;
     case "ASK_USER":
       return decision.message;
     case "FINAL":

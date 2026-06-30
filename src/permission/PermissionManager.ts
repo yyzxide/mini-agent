@@ -10,6 +10,7 @@ export interface PermissionCheckInput {
   targetPath?: string;
   nonInteractive?: boolean;
   autoApprove?: boolean;
+  requiresExplicitApproval?: boolean;
 }
 
 export interface PermissionDecision {
@@ -64,7 +65,7 @@ export class PermissionManager {
       return { allowed: true, mode: "AUTO", reason: "SAFE action is allowed automatically" };
     }
 
-    if (input.autoApprove) {
+    if (input.autoApprove && !input.requiresExplicitApproval) {
       return { allowed: true, mode: "AUTO", reason: "Auto-approved by caller" };
     }
 
@@ -72,7 +73,9 @@ export class PermissionManager {
       return {
         allowed: false,
         mode: "USER_REJECTED",
-        reason: `${input.level} action requires approval; non-interactive mode cannot prompt`,
+        reason: input.requiresExplicitApproval
+          ? `${input.level} action requires explicit approval; non-interactive mode cannot prompt`
+          : `${input.level} action requires approval; non-interactive mode cannot prompt`,
       };
     }
 
@@ -117,7 +120,9 @@ export function findBlockedCommand(command: string): string | undefined {
 function buildPromptMessage(input: PermissionCheckInput): string {
   if (input.command) {
     return [
-      "Agent wants to run command:",
+      input.requiresExplicitApproval
+        ? "Agent wants to run a high-risk shell command:"
+        : "Agent wants to run command:",
       "",
       input.command,
       "",

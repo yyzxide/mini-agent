@@ -128,8 +128,15 @@ function assertRequiredDecisionFields(value: unknown): void {
       }
       return;
     case "RUN_COMMAND":
-      if (typeof value.command !== "string" || value.command.trim().length === 0) {
-        throw new InvalidAgentDecisionError("RUN_COMMAND decision is missing command");
+      if (value.shell === true) {
+        if (typeof value.command !== "string" || value.command.trim().length === 0) {
+          throw new InvalidAgentDecisionError("RUN_COMMAND shell decision is missing command");
+        }
+        return;
+      }
+
+      if (typeof value.executable !== "string" || value.executable.trim().length === 0) {
+        throw new InvalidAgentDecisionError("RUN_COMMAND decision is missing executable");
       }
       return;
     default:

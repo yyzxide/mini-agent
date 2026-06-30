@@ -1,3 +1,4 @@
+import dns from "node:dns/promises";
 import net from "node:net";
 import { z } from "zod";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
@@ -9,6 +10,7 @@ const MAX_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 200_000;
 const HARD_MAX_BYTES = 1_000_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
+const MAX_REDIRECTS = 5;
 
 const fetchUrlInputSchema = z.object({
   url: z.string().trim().url(),
@@ -62,15 +64,8 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
     const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
 
     try {
-      const response = await fetch(parsedUrl, {
-        method: "GET",
-        redirect: "follow",
-        signal: controller.signal,
-        headers: {
-          "accept": "text/html,application/xhtml+xml,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
-          "user-agent": "mini-coding-agent/0.1",
-        },
-      });
+      const fetched = await fetchWithValidatedRedirects(parsedUrl, controller.signal);
+      const response = fetched.response;
 
       const contentType = response.headers.get("content-type") ?? "";
       if (!isReadableContentType(contentType)) {
@@ -92,7 +87,7 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
       return toolSuccess(
         {
           url: parsedUrl.toString(),
-          finalUrl: response.url || parsedUrl.toString(),
+          finalUrl: fetched.finalUrl.toString(),
           status: response.status,
           statusText: response.statusText,
           contentType,
@@ -115,6 +110,27 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
         });
       }
 
+      if (error instanceof BlockedNetworkTargetError) {
+        return toolFailure("BLOCKED_NETWORK_TARGET", "Refusing to fetch localhost or private network targets", {
+          target: error.target,
+          reason: error.message,
+        });
+      }
+
+      if (error instanceof TooManyRedirectsError) {
+        return toolFailure("TOO_MANY_REDIRECTS", error.message, {
+          url: parsedUrl.toString(),
+          maxRedirects: MAX_REDIRECTS,
+        });
+      }
+
+      if (error instanceof UnsupportedRedirectError) {
+        return toolFailure("UNSUPPORTED_REDIRECT", error.message, {
+          url: parsedUrl.toString(),
+          location: error.location,
+        });
+      }
+
       return toolFailure("FETCH_URL_FAILED", error instanceof Error ? error.message : "URL fetch failed", {
         url: parsedUrl.toString(),
       });
@@ -122,6 +138,78 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
       clearTimeout(timeout);
     }
   }
+}
+
+async function fetchWithValidatedRedirects(startUrl: URL, signal: AbortSignal): Promise<{
+  response: Response;
+  finalUrl: URL;
+}> {
+  let currentUrl = startUrl;
+
+  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
+    await assertPublicHttpUrl(currentUrl);
+
+    const response = await fetch(currentUrl, {
+      method: "GET",
+      redirect: "manual",
+      signal,
+      headers: {
+        "accept": "text/html,application/xhtml+xml,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
+        "user-agent": "mini-coding-agent/0.1",
+      },
+    });
+
+    if (!isRedirectStatus(response.status)) {
+      return { response, finalUrl: currentUrl };
+    }
+
+    const location = response.headers.get("location");
+    if (!location) {
+      return { response, finalUrl: currentUrl };
+    }
+
+    const nextUrl = new URL(location, currentUrl);
+    if (nextUrl.protocol !== "http:" && nextUrl.protocol !== "https:") {
+      throw new UnsupportedRedirectError(`Redirect target uses unsupported protocol: ${nextUrl.protocol}`, location);
+    }
+
+    currentUrl = nextUrl;
+  }
+
+  throw new TooManyRedirectsError(`URL redirected more than ${MAX_REDIRECTS} times`);
+}
+
+async function assertPublicHttpUrl(url: URL): Promise<void> {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new UnsupportedRedirectError(`Unsupported protocol: ${url.protocol}`, url.toString());
+  }
+
+  if (isBlockedNetworkTarget(url.hostname)) {
+    throw new BlockedNetworkTargetError(`Blocked hostname: ${url.hostname}`, url.hostname);
+  }
+
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (net.isIP(hostname) !== 0) {
+    return;
+  }
+
+  const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0) {
+    throw new Error(`DNS lookup returned no addresses for ${url.hostname}`);
+  }
+
+  for (const address of addresses) {
+    if (isBlockedNetworkTarget(address.address)) {
+      throw new BlockedNetworkTargetError(
+        `DNS lookup for ${url.hostname} resolved to blocked address ${address.address}`,
+        `${url.hostname} -> ${address.address}`,
+      );
+    }
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 async function readBoundedResponseBody(response: Response, maxBytes: number): Promise<{
@@ -242,14 +330,16 @@ function isPrivateIpv4(address: string): boolean {
 
 function isPrivateIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
+  const ipv4MappedAddress = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4MappedAddress?.[1]) {
+    return isPrivateIpv4(ipv4MappedAddress[1]);
+  }
+
   return normalized === "::"
     || normalized === "::1"
     || normalized.startsWith("fc")
     || normalized.startsWith("fd")
-    || normalized.startsWith("fe80:")
-    || normalized.startsWith("::ffff:127.")
-    || normalized.startsWith("::ffff:10.")
-    || normalized.startsWith("::ffff:192.168.");
+    || normalized.startsWith("fe80:");
 }
 
 function htmlToText(html: string): string {
@@ -282,4 +372,31 @@ function decodeHtmlEntities(text: string): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+class BlockedNetworkTargetError extends Error {
+  readonly target: string;
+
+  constructor(message: string, target: string) {
+    super(message);
+    this.name = "BlockedNetworkTargetError";
+    this.target = target;
+  }
+}
+
+class TooManyRedirectsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TooManyRedirectsError";
+  }
+}
+
+class UnsupportedRedirectError extends Error {
+  readonly location: string;
+
+  constructor(message: string, location: string) {
+    super(message);
+    this.name = "UnsupportedRedirectError";
+    this.location = location;
+  }
 }

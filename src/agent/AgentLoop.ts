@@ -1,5 +1,5 @@
 import { CommandRunner } from "../command/CommandRunner.js";
-import type { CommandResult } from "../command/CommandRunner.js";
+import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
 import type { LlmClient, ToolSpec } from "../llm/LlmClient.js";
@@ -185,7 +185,7 @@ export class AgentLoop {
         return await this.executePatchDecision(state, decision, input);
 
       case "RUN_COMMAND":
-        return await this.executeCommandDecision(state, decision.command, decision.description, input);
+        return await this.executeCommandDecision(state, decision, input);
 
       case "ASK_USER":
         return await this.executeAskUserDecision(state, decision.message, input);
@@ -259,17 +259,20 @@ export class AgentLoop {
 
   private async executeCommandDecision(
     state: AgentState,
-    command: string,
-    description: string | undefined,
+    decision: Extract<AgentDecision, { type: "RUN_COMMAND" }>,
     input: AgentRunInput,
   ): Promise<StepOutcome> {
+    const commandInput = commandInputFromDecision(decision);
+    const command = renderCommandInput(commandInput);
+    const isShellCommand = commandInput.shell === true;
     await this.emit({ type: "command", command });
 
     const permission = await this.permissionManager.check({
       level: PermissionLevel.DANGEROUS,
-      action: "run_command",
-      description: description ?? "Run command requested by the agent.",
+      action: isShellCommand ? "run_shell_command" : "run_command",
+      description: decision.description ?? "Run command requested by the agent.",
       command,
+      requiresExplicitApproval: isShellCommand,
       ...(input.autoApprove === undefined ? {} : { autoApprove: input.autoApprove }),
       ...(input.nonInteractive === undefined ? {} : { nonInteractive: input.nonInteractive }),
     });
@@ -284,8 +287,8 @@ export class AgentLoop {
       return { failed: true, result: await this.fail(state, message, input) };
     }
 
-    const timeoutMs = this.commandRunner.defaultTimeoutMs;
-    const cwd = await this.commandRunner.resolveCwd(".");
+    const timeoutMs = commandInput.timeoutMs ?? this.commandRunner.defaultTimeoutMs;
+    const cwd = await this.commandRunner.resolveCwd(commandInput.cwd);
     await this.eventStore.appendEvent(state.sessionId, {
       type: "COMMAND_STARTED",
       payload: {
@@ -295,7 +298,7 @@ export class AgentLoop {
       },
     });
 
-    const result = await this.commandRunner.run({ command, cwd, timeoutMs });
+    const result = await this.commandRunner.run({ ...commandInput, cwd, timeoutMs });
     state.addCommandResult(result);
     await this.recordCommandResult(state.sessionId, result);
 
@@ -596,6 +599,41 @@ function isTestCommand(command: string): boolean {
     "gradle test",
     "echo test passed",
   ].some((keyword) => normalized.includes(keyword));
+}
+
+function commandInputFromDecision(decision: Extract<AgentDecision, { type: "RUN_COMMAND" }>): CommandInput {
+  if (decision.shell) {
+    return {
+      command: decision.command ?? "",
+      shell: true,
+      ...(decision.cwd ? { cwd: decision.cwd } : {}),
+      ...(decision.timeoutMs === undefined ? {} : { timeoutMs: decision.timeoutMs }),
+    };
+  }
+
+  return {
+    executable: decision.executable ?? "",
+    args: decision.args ?? [],
+    shell: false,
+    ...(decision.cwd ? { cwd: decision.cwd } : {}),
+    ...(decision.timeoutMs === undefined ? {} : { timeoutMs: decision.timeoutMs }),
+  };
+}
+
+function renderCommandInput(input: CommandInput): string {
+  if (input.shell) {
+    return input.command ?? "";
+  }
+
+  return [input.executable ?? "", ...(input.args ?? [])].map(quoteCommandPart).join(" ").trim();
+}
+
+function quoteCommandPart(value: string): string {
+  if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
+    return value;
+  }
+
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function isGitDiffData(value: unknown): value is { diff: string } {

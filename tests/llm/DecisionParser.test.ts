@@ -26,6 +26,21 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("parses structured RUN_COMMAND decisions", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "RUN_COMMAND",
+      executable: "npm",
+      args: ["test"],
+      description: "Run tests",
+    }))).toEqual({
+      type: "RUN_COMMAND",
+      executable: "npm",
+      args: ["test"],
+      shell: false,
+      description: "Run tests",
+    });
+  });
+
   it("rejects unknown decision types", () => {
     expect(() => parser.parse('{"type":"NOPE"}')).toThrow(/Unknown AgentDecision type/);
   });
@@ -38,7 +53,11 @@ describe("DecisionParser", () => {
     expect(() => parser.parse('{"type":"APPLY_PATCH","description":"change file"}')).toThrow(/missing patch/);
   });
 
-  it("rejects RUN_COMMAND decisions without command", () => {
-    expect(() => parser.parse('{"type":"RUN_COMMAND","description":"test"}')).toThrow(/missing command/);
+  it("rejects RUN_COMMAND decisions without executable", () => {
+    expect(() => parser.parse('{"type":"RUN_COMMAND","description":"test"}')).toThrow(/missing executable/);
+  });
+
+  it("rejects shell RUN_COMMAND decisions without command", () => {
+    expect(() => parser.parse('{"type":"RUN_COMMAND","shell":true,"description":"test"}')).toThrow(/missing command/);
   });
 });

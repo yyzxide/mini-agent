@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -312,7 +313,8 @@ describe("mini-agent CLI", () => {
     expect(output).toContain("[tool] search_code");
     expect(output).toContain("[tool] read_file");
     expect(output).toContain("[patch]");
-    expect(output).toContain("[command] echo test passed");
+    expect(output).toContain("[command]");
+    expect(output).toContain("test passed");
     expect(output).toContain("[summary]");
     expect(fetchMock).toHaveBeenCalled();
     await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toContain("hello from mini-agent");
@@ -408,6 +410,7 @@ describe("mini-agent CLI", () => {
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const answerBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
@@ -494,6 +497,7 @@ describe("mini-agent CLI", () => {
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const duckQueries: string[] = [];
     const answerContexts: string[] = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -603,6 +607,7 @@ describe("mini-agent CLI", () => {
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const duckQueries: string[] = [];
     const answerContexts: string[] = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -890,7 +895,12 @@ function scriptedDemoDecisionResponses(): string[] {
         "",
       ].join("\n"),
     }),
-    "{\"type\":\"RUN_COMMAND\",\"command\":\"echo test passed\",\"description\":\"Run a lightweight verification command\"}",
+    JSON.stringify({
+      type: "RUN_COMMAND",
+      executable: process.execPath,
+      args: ["-e", "console.log('test passed')"],
+      description: "Run a lightweight verification command",
+    }),
     "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
     "{\"type\":\"FINAL\",\"summary\":\"Updated demo.txt and verified the change\",\"success\":true}",
   ];

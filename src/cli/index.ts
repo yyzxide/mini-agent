@@ -363,7 +363,7 @@ export function createProgram(): Command {
         const permissionManager = new PermissionManager();
         const permission = await permissionManager.check({
           level: PermissionLevel.DANGEROUS,
-          action: "run_command",
+          action: "run_shell_command",
           description: "Run a shell command from the local repository.",
           command,
           autoApprove: true,
@@ -402,6 +402,7 @@ export function createProgram(): Command {
 
         const result = await runner.run({
           command,
+          shell: true,
           cwd,
           timeoutMs,
         });

@@ -36,9 +36,41 @@ export const ApplyPatchDecisionSchema = z.object({
 
 export const RunCommandDecisionSchema = z.object({
   type: z.literal("RUN_COMMAND"),
-  command: z.string().min(1),
+  executable: z.string().min(1).optional(),
+  args: z.array(z.string()).default([]),
+  command: z.string().min(1).optional(),
+  shell: z.boolean().default(false),
+  cwd: z.string().min(1).optional(),
+  timeoutMs: z.number().int().positive().optional(),
   description: z.string().min(1),
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.shell) {
+    if (!value.command) {
+      context.addIssue({
+        code: "custom",
+        message: "RUN_COMMAND shell decisions require command",
+        path: ["command"],
+      });
+    }
+    return;
+  }
+
+  if (!value.executable) {
+    context.addIssue({
+      code: "custom",
+      message: "RUN_COMMAND decisions require executable when shell is false",
+      path: ["executable"],
+    });
+  }
+
+  if (value.command) {
+    context.addIssue({
+      code: "custom",
+      message: "RUN_COMMAND command is only allowed when shell is true",
+      path: ["command"],
+    });
+  }
+});
 
 export const AskUserDecisionSchema = z.object({
   type: z.literal("ASK_USER"),

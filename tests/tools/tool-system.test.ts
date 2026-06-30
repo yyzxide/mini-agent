@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -196,6 +197,7 @@ describe("read-only repository tools", () => {
   });
 
   it("fetch_url returns bounded text content from a public URL", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const fetchMock = vi.fn(async () => new Response(
       "<html><head><style>.hidden{}</style></head><body><h1>Docs</h1><script>bad()</script><p>Hello &amp; welcome.</p></body></html>",
       {
@@ -214,6 +216,7 @@ describe("read-only repository tools", () => {
 
     expectSuccess<FetchUrlData>(result);
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
     expect(result.data.status).toBe(200);
     expect(result.data.contentType).toContain("text/html");
     expect(result.data.text).toContain("Docs");
@@ -234,7 +237,68 @@ describe("read-only repository tools", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("fetch_url refuses hostnames that resolve to private addresses", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", { url: "https://example.com/private" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("BLOCKED_NETWORK_TARGET");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fetch_url validates redirect targets before following them", async () => {
+    const lookupMock = vi.spyOn(dns, "lookup");
+    lookupMock.mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }]);
+    const fetchMock = vi.fn(async () => new Response("", {
+      status: 302,
+      headers: { location: "http://127.0.0.1/admin" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("BLOCKED_NETWORK_TARGET");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("fetch_url follows public redirects manually", async () => {
+    const lookupMock = vi.spyOn(dns, "lookup");
+    lookupMock
+      .mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }])
+      .mockResolvedValueOnce([{ address: "93.184.216.35", family: 4 }]);
+    const fetchMock = vi.fn(async (url: URL) => {
+      if (url.toString() === "https://example.com/start") {
+        return new Response("", {
+          status: 302,
+          headers: { location: "https://docs.example.com/final" },
+        });
+      }
+
+      return new Response("final docs", {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/plain" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, { repoPath });
+
+    expectSuccess<FetchUrlData>(result);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.data.finalUrl).toBe("https://docs.example.com/final");
+    expect(result.data.text).toBe("final docs");
+  });
+
   it("fetch_url truncates long output by context limit", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("0123456789", {
       status: 200,
       headers: { "content-type": "text/plain" },

@@ -19,7 +19,10 @@ export interface CommandRunnerOptions {
 }
 
 export interface CommandInput {
-  command: string;
+  executable?: string;
+  args?: string[];
+  command?: string;
+  shell?: boolean;
   timeoutMs?: number;
   cwd?: string;
   env?: Record<string, string>;
@@ -78,10 +81,7 @@ export class CommandRunner {
   }
 
   async run(input: CommandInput): Promise<CommandResult> {
-    const command = input.command.trim();
-    if (command.length === 0) {
-      throw new EmptyCommandError();
-    }
+    const preparedCommand = prepareCommand(input);
 
     const cwd = await this.resolveCwd(input.cwd);
     const timeoutMs = input.timeoutMs ?? this.defaultTimeoutMs;
@@ -93,14 +93,15 @@ export class CommandRunner {
         timeout: timeoutMs,
         reject: false,
         encoding: "utf8",
+        stdout: "pipe",
+        stderr: "pipe",
         forceKillAfterDelay: 500,
         ...(process.platform === "win32" ? {} : { detached: true }),
         ...(input.env ? { env: input.env } : {}),
       };
 
-      const shellCommand = buildShellCommand(command);
       let timedOut = false;
-      const subprocess = execa(shellCommand.file, shellCommand.args, options);
+      const subprocess = execa(preparedCommand.file, preparedCommand.args, options);
       const timeout = setTimeout(() => {
         timedOut = true;
         killSubprocessTree(subprocess.pid);
@@ -118,7 +119,7 @@ export class CommandRunner {
       );
 
       return {
-        command,
+        command: preparedCommand.display,
         cwd,
         exitCode: result.exitCode ?? null,
         stdout: output.stdout,
@@ -133,7 +134,7 @@ export class CommandRunner {
       const output = truncateCommandOutput(details.stdout, details.stderr, this.maxOutputChars);
 
       return {
-        command,
+        command: preparedCommand.display,
         cwd,
         exitCode: details.exitCode,
         stdout: output.stdout,
@@ -146,6 +147,44 @@ export class CommandRunner {
       };
     }
   }
+}
+
+interface PreparedCommand {
+  file: string;
+  args: string[];
+  display: string;
+}
+
+function prepareCommand(input: CommandInput): PreparedCommand {
+  if (input.shell === true) {
+    const command = input.command?.trim() ?? "";
+    if (command.length === 0) {
+      throw new EmptyCommandError();
+    }
+
+    return {
+      ...buildShellCommand(command),
+      display: command,
+    };
+  }
+
+  const executable = input.executable?.trim() ?? "";
+  if (executable.length === 0 || executable.includes("\0")) {
+    throw new EmptyCommandError();
+  }
+
+  const args = input.args ?? [];
+  for (const arg of args) {
+    if (arg.includes("\0")) {
+      throw new EmptyCommandError();
+    }
+  }
+
+  return {
+    file: executable,
+    args,
+    display: renderCommand(executable, args),
+  };
 }
 
 function truncateCommandOutput(
@@ -207,6 +246,18 @@ function buildShellCommand(command: string): { file: string; args: string[] } {
     file: "sh",
     args: ["-c", command],
   };
+}
+
+function renderCommand(executable: string, args: string[]): string {
+  return [executable, ...args].map(quoteCommandPart).join(" ");
+}
+
+function quoteCommandPart(value: string): string {
+  if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
+    return value;
+  }
+
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function killSubprocessTree(pid: number | undefined): void {
