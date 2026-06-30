@@ -124,7 +124,7 @@ export class OpenAICompatibleClient implements LlmClient {
       }
 
       const body = await response.json() as OpenAIChatCompletionResponse;
-      const text = extractResponseContent(body);
+      const text = extractTextCompletionContent(body);
       if (!text) {
         return { success: false, error: buildEmptyContentError(body) };
       }
@@ -189,7 +189,7 @@ export class OpenAICompatibleClient implements LlmClient {
       }
 
       const body = await response.json() as OpenAIChatCompletionResponse;
-      const content = extractResponseContent(body);
+      const content = extractDecisionContent(body);
       if (!content) {
         return {
           retryable: !retryAfterEmptyContent,
@@ -258,7 +258,19 @@ interface OpenAIChatCompletionResponse {
   }>;
 }
 
-function extractResponseContent(body: OpenAIChatCompletionResponse): string | undefined {
+function extractTextCompletionContent(body: OpenAIChatCompletionResponse): string | undefined {
+  const firstChoice = body.choices?.[0];
+  const message = firstChoice?.message;
+  return firstNonEmpty([
+    extractTextContent(message?.content),
+    extractTextContent(firstChoice?.text),
+    extractTextContent(body.output_text),
+    extractTextContent(message?.reasoning_content),
+    extractTextContent(message?.refusal),
+  ]);
+}
+
+function extractDecisionContent(body: OpenAIChatCompletionResponse): string | undefined {
   const firstChoice = body.choices?.[0];
   const message = firstChoice?.message;
   return firstNonEmpty([

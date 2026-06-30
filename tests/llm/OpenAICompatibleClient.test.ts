@@ -92,6 +92,37 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toContain("[user] 之前聊过时间");
   });
 
+  it("accepts reasoning_content as text completion fallback", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "",
+              reasoning_content: "我们上次讨论了伦敦大师赛冠军是哪支队伍。",
+            },
+          },
+        ],
+      }), { status: 200 }),
+    });
+
+    const result = await client.completeText({
+      userGoal: "我们上次讨论了什么",
+      context: "[user] 伦敦大师赛冠军是哪支队伍",
+      mode: "direct",
+    });
+
+    expect(result).toEqual({
+      success: true,
+      text: "我们上次讨论了伦敦大师赛冠军是哪支队伍。",
+    });
+  });
+
   it("returns a clear FAILED decision for HTTP errors", async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",

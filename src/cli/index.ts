@@ -611,6 +611,7 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
           repoPath,
           stores,
           currentSessionId,
+          prompt: async (message) => await rl.question(message),
         });
 
         currentSessionId = slashResult.sessionId;
@@ -636,6 +637,7 @@ async function handleInteractiveSlashCommand(input: {
   repoPath: string;
   stores: { sessionStore: SessionStore; eventStore: EventStore };
   currentSessionId: string;
+  prompt?: (message: string) => Promise<string>;
 }): Promise<{ sessionId: string; exit: boolean }> {
   const [name = "", ...args] = input.command.trim().split(/\s+/);
   const logger = createRuntimeLogger(input.repoPath);
@@ -659,10 +661,18 @@ async function handleInteractiveSlashCommand(input: {
     }
 
     case "/resume": {
-      const selector = args[0];
+      let selector = args[0];
       if (!selector) {
         await printInteractiveResumeList(input.stores.sessionStore);
-        return { sessionId: input.currentSessionId, exit: false };
+        if (!input.prompt) {
+          return { sessionId: input.currentSessionId, exit: false };
+        }
+
+        selector = (await input.prompt("resume> ")).trim();
+        if (!selector) {
+          process.stdout.write("[resume] Canceled.\n");
+          return { sessionId: input.currentSessionId, exit: false };
+        }
       }
 
       const sessionId = await resolveInteractiveResumeSelector(input.stores.sessionStore, selector);
@@ -738,7 +748,7 @@ function printInteractiveHelp(): void {
     "Slash commands:",
     "  /help              Show this help.",
     "  /new               Start a new conversation session.",
-    "  /resume [n|id]     List recent sessions, or switch by number/id.",
+    "  /resume [n|id]     Pick from recent sessions, or switch by number/id.",
     "  /session           Show current session metadata.",
     "  /sessions          List local sessions.",
     "  /history [n]       Show recent session records.",
@@ -772,7 +782,7 @@ async function printInteractiveResumeList(sessionStore: SessionStore): Promise<v
     process.stdout.write(`${formatResumeSessionLine(index + 1, row.session, row.lastUserMessage)}\n`);
   }
 
-  process.stdout.write("[resume] Use /resume 1 or /resume <sessionId>. Use /sessions for the full list.\n");
+  process.stdout.write("[resume] Enter a number/id to resume, or press Enter to cancel. Use /sessions for the full list.\n");
 }
 
 async function printInteractiveSessions(sessionStore: SessionStore): Promise<void> {
