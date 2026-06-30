@@ -27,6 +27,7 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "- Prefer existing project test commands before proposing new commands.",
   "- For RUN_COMMAND, use executable + args. Do not put shell syntax, pipes, redirects, or chained commands in args.",
   "- Only use RUN_COMMAND with shell:true and command when shell features are unavoidable; shell commands require explicit user approval.",
+  "- Shell-like executables such as sh, bash, cmd, powershell, and inline-code flags such as node -e or python -c are treated as high-risk commands.",
   "- If key information is missing, return ASK_USER.",
   "- If a command or test failed, inspect the error and continue with a fix when possible.",
   "- If changes are complete and a diff exists, return FINAL.",

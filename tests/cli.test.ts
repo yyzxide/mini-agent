@@ -899,8 +899,8 @@ function scriptedDemoDecisionResponses(): string[] {
     }),
     JSON.stringify({
       type: "RUN_COMMAND",
-      executable: process.execPath,
-      args: ["-e", "console.log('test passed')"],
+      executable: "echo",
+      args: ["test passed"],
       description: "Run a lightweight verification command",
     }),
     "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",

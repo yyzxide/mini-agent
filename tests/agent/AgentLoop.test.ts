@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import process from "node:process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentDecision } from "../../src/agent/AgentDecision.js";
@@ -125,8 +124,8 @@ describe("AgentLoop", () => {
         { type: "PLAN", message: "Run a failing test command." },
         {
           type: "RUN_COMMAND",
-          executable: process.execPath,
-          args: ["-e", "process.exit(1)", "npm test"],
+          executable: "false",
+          args: ["npm", "test"],
           description: "simulate test failure",
         },
         { type: "FINAL", success: true, summary: "Finished after recording command failure." },
@@ -167,6 +166,28 @@ describe("AgentLoop", () => {
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toContain("PATCH_APPLY_FAILED");
     expect(eventTypes(events)).toContain("TASK_FAILED");
+  });
+
+  it("requires explicit approval for shell-like structured commands", async () => {
+    const loop = createLoop({
+      llmClient: new SequenceLlmClient([
+        {
+          type: "RUN_COMMAND",
+          executable: "sh",
+          args: ["-c", "echo bypass"],
+          description: "try structured shell bypass",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "try shell bypass",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("explicit approval");
   });
 
   it("records an error when the model requests an unknown tool", async () => {
@@ -339,8 +360,8 @@ function scriptedDemoDecisions(): AgentDecision[] {
     },
     {
       type: "RUN_COMMAND",
-      executable: process.execPath,
-      args: ["-e", "console.log('test passed')"],
+      executable: "echo",
+      args: ["test passed"],
       description: "Run a lightweight verification command",
     },
     {

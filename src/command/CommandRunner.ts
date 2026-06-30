@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { execa } from "execa";
 import type { Options } from "execa";
 import {
@@ -40,6 +41,44 @@ export interface CommandResult {
   truncated: boolean;
   error?: string;
 }
+
+const SHELL_EXECUTABLES = new Set([
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "cmd",
+  "cmd.exe",
+  "powershell",
+  "powershell.exe",
+  "pwsh",
+]);
+
+const INLINE_CODE_EXECUTABLES = new Set([
+  "node",
+  "node.exe",
+  "python",
+  "python.exe",
+  "python3",
+  "python3.exe",
+  "ruby",
+  "ruby.exe",
+  "perl",
+  "perl.exe",
+]);
+
+const INLINE_CODE_FLAGS_BY_EXECUTABLE = new Map<string, Set<string>>([
+  ["node", new Set(["-e", "--eval", "-p", "--print"])],
+  ["node.exe", new Set(["-e", "--eval", "-p", "--print"])],
+  ["python", new Set(["-c"])],
+  ["python.exe", new Set(["-c"])],
+  ["python3", new Set(["-c"])],
+  ["python3.exe", new Set(["-c"])],
+  ["ruby", new Set(["-e"])],
+  ["ruby.exe", new Set(["-e"])],
+  ["perl", new Set(["-e"])],
+  ["perl.exe", new Set(["-e"])],
+]);
 
 export class CommandRunner {
   readonly repoPath: string;
@@ -147,6 +186,58 @@ export class CommandRunner {
       };
     }
   }
+}
+
+export function isHighRiskCommandInput(input: CommandInput): boolean {
+  if (input.shell === true) {
+    return true;
+  }
+
+  const executableName = executableBasename(input.executable ?? "");
+  if (SHELL_EXECUTABLES.has(executableName)) {
+    return true;
+  }
+
+  if (!INLINE_CODE_EXECUTABLES.has(executableName)) {
+    return false;
+  }
+
+  return (input.args ?? []).some((arg) => isInlineCodeFlag(executableName, arg));
+}
+
+function executableBasename(executable: string): string {
+  const normalized = executable.trim();
+  const posixName = path.posix.basename(normalized);
+  const win32Name = path.win32.basename(normalized);
+  return (win32Name.length < posixName.length ? win32Name : posixName).toLowerCase();
+}
+
+function isInlineCodeFlag(executableName: string, arg: string): boolean {
+  const normalizedArg = arg.toLowerCase();
+  const flags = INLINE_CODE_FLAGS_BY_EXECUTABLE.get(executableName);
+  if (!flags) {
+    return false;
+  }
+
+  if (flags.has(normalizedArg)) {
+    return true;
+  }
+
+  for (const flag of flags) {
+    if (flag.startsWith("--") && normalizedArg.startsWith(`${flag}=`)) {
+      return true;
+    }
+  }
+
+  if (executableName === "node" || executableName === "node.exe") {
+    return /^-[^-].*[ep]/.test(normalizedArg);
+  }
+
+  if (executableName === "perl" || executableName === "perl.exe") {
+    return /^-[^-].*e/.test(normalizedArg);
+  }
+
+  return false;
 }
 
 interface PreparedCommand {

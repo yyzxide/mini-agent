@@ -66,6 +66,7 @@ export class ContextBuilder {
       {
         title: "Task and step",
         budget: this.budgets.task,
+        required: true,
         content: [
           `User task:\n${state.userGoal}`,
           `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
@@ -105,13 +106,14 @@ export class ContextBuilder {
       {
         title: "Diagnostics",
         budget: this.budgets.diagnostics,
+        required: true,
         content: [
+          `Last error:\n${snapshot.lastError ?? "(none)"}`,
           `Patch failure summary:\n${summarizePatchFailures(state)}`,
           `Test failure summary:\n${summarizeTestFailures(state)}`,
-          `Last error:\n${snapshot.lastError ?? "(none)"}`,
         ].join("\n\n"),
       },
-      { title: "Current diff", budget: this.budgets.diff, content: diff || "(none)" },
+      { title: "Current diff", budget: this.budgets.diff, required: true, content: diff || "(none)" },
     ];
 
     return formatBudgetedSections(sections, this.maxChars);
@@ -122,19 +124,20 @@ interface ContextSection {
   title: string;
   budget: number;
   content: string;
+  required?: boolean;
 }
 
 function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
   return {
     task: Math.floor(maxChars * 0.08),
-    memory: Math.floor(maxChars * 0.12),
-    repoState: Math.floor(maxChars * 0.09),
-    tools: Math.floor(maxChars * 0.09),
-    runtime: Math.floor(maxChars * 0.06),
-    git: Math.floor(maxChars * 0.06),
-    repositoryStructure: Math.floor(maxChars * 0.13),
-    projectDocs: Math.floor(maxChars * 0.10),
-    recentResults: Math.floor(maxChars * 0.10),
+    memory: Math.floor(maxChars * 0.10),
+    repoState: Math.floor(maxChars * 0.08),
+    tools: Math.floor(maxChars * 0.08),
+    runtime: Math.floor(maxChars * 0.05),
+    git: Math.floor(maxChars * 0.05),
+    repositoryStructure: Math.floor(maxChars * 0.11),
+    projectDocs: Math.floor(maxChars * 0.08),
+    recentResults: Math.floor(maxChars * 0.08),
     diagnostics: Math.floor(maxChars * 0.07),
     diff: Math.floor(maxChars * 0.10),
   };
@@ -144,21 +147,32 @@ function formatBudgetedSections(sections: ContextSection[], maxChars: number): s
   const parts: string[] = [];
   let remaining = Math.max(0, maxChars);
 
-  for (const section of sections) {
+  for (const [index, section] of sections.entries()) {
     const separator = parts.length === 0 ? "" : "\n\n---\n\n";
     const header = `${section.title}:\n`;
     const overhead = separator.length + header.length;
-    if (remaining <= overhead) {
-      break;
+    const reservedForRequired = estimateSectionsLength(sections.slice(index + 1).filter((item) => item.required));
+    const available = section.required ? remaining : remaining - reservedForRequired;
+    if (available <= overhead) {
+      if (section.required && remaining <= overhead) {
+        break;
+      }
+      continue;
     }
 
-    const contentBudget = Math.max(0, Math.min(section.budget, remaining - overhead));
+    const contentBudget = Math.max(0, Math.min(section.budget, available - overhead));
     const formatted = formatBudgetedSectionContent(section.content, contentBudget);
     parts.push(`${separator}${header}${formatted}`);
     remaining -= overhead + formatted.length;
   }
 
   return parts.join("");
+}
+
+function estimateSectionsLength(sections: ContextSection[]): number {
+  return sections.reduce((total, section) => {
+    return total + "\n\n---\n\n".length + `${section.title}:\n`.length + section.budget;
+  }, 0);
 }
 
 function formatBudgetedSectionContent(content: string, maxChars: number): string {

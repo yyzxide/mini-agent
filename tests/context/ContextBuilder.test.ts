@@ -86,4 +86,22 @@ describe("ContextBuilder", () => {
     expect(context).toContain("[user] 第一轮我们讨论了 session 记忆");
     expect(context).toContain("[assistant] 我会在后续轮次引用这段上下文");
   });
+
+  it("keeps task diagnostics and diff under tight context budgets", async () => {
+    const state = new AgentState({
+      sessionId: "tight-budget-session",
+      repoPath,
+      userGoal: "fix the README regression",
+    });
+    state.setLastError("last test failure");
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 900 }).build(state);
+
+    expect(context).toContain("Task and step:");
+    expect(context).toContain("User task:");
+    expect(context).toContain("Diagnostics:");
+    expect(context).toContain("Last error:");
+    expect(context).toContain("Current diff:");
+    expect(context.length).toBeLessThanOrEqual(900);
+  });
 });

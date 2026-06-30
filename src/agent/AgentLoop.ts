@@ -1,4 +1,4 @@
-import { CommandRunner } from "../command/CommandRunner.js";
+import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
 import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
@@ -264,15 +264,15 @@ export class AgentLoop {
   ): Promise<StepOutcome> {
     const commandInput = commandInputFromDecision(decision);
     const command = renderCommandInput(commandInput);
-    const isShellCommand = commandInput.shell === true;
+    const isHighRiskCommand = isHighRiskCommandInput(commandInput);
     await this.emit({ type: "command", command });
 
     const permission = await this.permissionManager.check({
       level: PermissionLevel.DANGEROUS,
-      action: isShellCommand ? "run_shell_command" : "run_command",
+      action: isHighRiskCommand ? "run_high_risk_command" : "run_command",
       description: decision.description ?? "Run command requested by the agent.",
       command,
-      requiresExplicitApproval: isShellCommand,
+      requiresExplicitApproval: isHighRiskCommand,
       ...(input.autoApprove === undefined ? {} : { autoApprove: input.autoApprove }),
       ...(input.nonInteractive === undefined ? {} : { nonInteractive: input.nonInteractive }),
     });

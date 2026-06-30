@@ -118,6 +118,15 @@ describe("ToolRegistry", () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe("INVALID_TOOL_INPUT");
   });
+
+  it("marks fetch_url as a review-level tool", () => {
+    const registry = createDefaultToolRegistry();
+
+    expect(registry.list()).toContainEqual(expect.objectContaining({
+      name: "fetch_url",
+      permissionLevel: "REVIEW",
+    }));
+  });
 });
 
 describe("read-only repository tools", () => {
@@ -212,7 +221,7 @@ describe("read-only repository tools", () => {
     const result = await registry.execute("fetch_url", {
       url: "https://example.com/docs",
       maxBytes: 500,
-    }, { repoPath });
+    }, fetchUrlContext());
 
     expectSuccess<FetchUrlData>(result);
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -243,7 +252,7 @@ describe("read-only repository tools", () => {
     vi.stubGlobal("fetch", fetchMock);
     const registry = createDefaultToolRegistry();
 
-    const result = await registry.execute("fetch_url", { url: "https://example.com/private" }, { repoPath });
+    const result = await registry.execute("fetch_url", { url: "https://example.com/private" }, fetchUrlContext());
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe("BLOCKED_NETWORK_TARGET");
@@ -260,7 +269,7 @@ describe("read-only repository tools", () => {
     vi.stubGlobal("fetch", fetchMock);
     const registry = createDefaultToolRegistry();
 
-    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, { repoPath });
+    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, fetchUrlContext());
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe("BLOCKED_NETWORK_TARGET");
@@ -289,7 +298,7 @@ describe("read-only repository tools", () => {
     vi.stubGlobal("fetch", fetchMock);
     const registry = createDefaultToolRegistry();
 
-    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, { repoPath });
+    const result = await registry.execute("fetch_url", { url: "https://example.com/start" }, fetchUrlContext());
 
     expectSuccess<FetchUrlData>(result);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -308,11 +317,27 @@ describe("read-only repository tools", () => {
     const result = await registry.execute("fetch_url", {
       url: "https://example.com/plain",
       maxBytes: 100,
-    }, { repoPath, maxOutputChars: 4 });
+    }, { ...fetchUrlContext(), maxOutputChars: 4 });
 
     expectSuccess<FetchUrlData>(result);
     expect(result.data.text).toBe("0123");
     expect(result.data.outputTruncated).toBe(true);
+  });
+
+  it("fetch_url requires review permission", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", { url: "https://example.com/plain" }, {
+      repoPath,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("FETCH_URL_PERMISSION_DENIED");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("web_search returns parsed public web results", async () => {
@@ -363,4 +388,12 @@ async function hasRipgrep(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function fetchUrlContext(): { repoPath: string; autoApprove: true; nonInteractive: true } {
+  return {
+    repoPath,
+    autoApprove: true,
+    nonInteractive: true,
+  };
 }

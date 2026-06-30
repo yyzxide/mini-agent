@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CommandRunner } from "../../src/command/CommandRunner.js";
+import { CommandRunner, isHighRiskCommandInput } from "../../src/command/CommandRunner.js";
 
 let repoPath: string;
 
@@ -83,5 +83,28 @@ describe("CommandRunner", () => {
 
     expect(result.success).toBe(true);
     expect(result.stdout).toBe("shell");
+  });
+
+  it("identifies shell-like structured commands as high risk", () => {
+    expect(isHighRiskCommandInput({ executable: "sh", args: ["-c", "echo hello"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "/bin/bash", args: ["-c", "echo hello"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "C:\\Windows\\System32\\cmd.exe", args: ["/c", "echo hello"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "powershell.exe", args: ["-Command", "Write-Host hello"] })).toBe(true);
+  });
+
+  it("identifies inline-code interpreter flags as high risk", () => {
+    expect(isHighRiskCommandInput({ executable: "node", args: ["-e", "console.log('hello')"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "node", args: ["--eval=console.log('hello')"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "node", args: ["-p", "process.env"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "node", args: ["-pe", "process.env"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "python3", args: ["-c", "print('hello')"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "ruby", args: ["-e", "puts 'hello'"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "perl", args: ["-e", "print 'hello'"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "perl", args: ["-E", "say 'hello'"] })).toBe(true);
+  });
+
+  it("does not mark ordinary structured commands as high risk", () => {
+    expect(isHighRiskCommandInput({ executable: "git", args: ["status", "--short"] })).toBe(false);
+    expect(isHighRiskCommandInput({ executable: "pnpm", args: ["test"] })).toBe(false);
   });
 });

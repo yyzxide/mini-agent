@@ -2,6 +2,7 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import { z } from "zod";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
+import { PermissionManager } from "../permission/PermissionManager.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
 
@@ -37,7 +38,7 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
   readonly name = "fetch_url";
   readonly description = "Fetch a public HTTP(S) URL and return bounded text content.";
   readonly inputSchema = fetchUrlInputSchema;
-  readonly permissionLevel = PermissionLevel.SAFE;
+  readonly permissionLevel = PermissionLevel.REVIEW;
 
   async execute(input: FetchUrlInput, context: ToolContext): Promise<ToolResult<FetchUrlData>> {
     let parsedUrl: URL;
@@ -57,6 +58,22 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
     if (isBlockedNetworkTarget(parsedUrl.hostname)) {
       return toolFailure("BLOCKED_NETWORK_TARGET", "Refusing to fetch localhost or private network targets", {
         hostname: parsedUrl.hostname,
+      });
+    }
+
+    const permissionManager = context.permissionManager ?? new PermissionManager();
+    const permission = await permissionManager.check({
+      level: PermissionLevel.REVIEW,
+      action: "fetch_url",
+      description: `Fetch public URL: ${parsedUrl.toString()}`,
+      ...(context.nonInteractive === undefined ? {} : { nonInteractive: context.nonInteractive }),
+      ...(context.autoApprove === undefined ? {} : { autoApprove: context.autoApprove }),
+    });
+
+    if (!permission.allowed) {
+      return toolFailure("FETCH_URL_PERMISSION_DENIED", permission.reason ?? "URL fetch permission denied", {
+        permission,
+        url: parsedUrl.toString(),
       });
     }
 

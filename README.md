@@ -18,7 +18,8 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 - Searches code with `rg`.
 - Reads files with repository path safety checks.
 - Applies unified diff patches after `git apply --check`.
-- Runs shell commands with timeout and dangerous-command blocking.
+- Executes structured commands with shell disabled by default.
+- Requires additional approval and dangerous-command checks for explicit shell or shell-like commands.
 - Records messages, tool calls, command results, patch events, file changes, and final diffs in `.mini-agent/`.
 - Exposes debug commands for tools, commands, patches, git, sessions, and config.
 
