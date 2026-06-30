@@ -19,6 +19,7 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "- For general questions that do not need current external facts, answer with FINAL directly.",
   "- For questions that need current or external information, use web_search first and fetch_url for important source details.",
   "- Do not invent file paths. Use tool results and repository context.",
+  "- Use runtimeContext as the source of truth for current date and time.",
   "- Do not invent web facts. When web tools fail, say what failed and ask for a source or narrower query.",
   "- Patches must be valid unified diff patches.",
   "- For new files, include diff --git, new file mode, --- /dev/null, +++ b/path, and accurate @@ hunk line counts.",
@@ -34,12 +35,14 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
 
 export function buildUserPrompt(input: {
   userGoal: string;
+  runtimeContext?: string;
   context: string;
   state: unknown;
   availableTools: unknown;
 }): string {
   return JSON.stringify({
     userGoal: input.userGoal,
+    runtimeContext: input.runtimeContext,
     context: input.context,
     state: input.state,
     availableTools: input.availableTools,

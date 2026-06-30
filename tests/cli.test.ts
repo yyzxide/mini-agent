@@ -350,6 +350,8 @@ describe("mini-agent CLI", () => {
 
       expect(output).toContain("[answer]");
       expect(output).toContain("```cpp");
+      expect(output).not.toContain("[task]");
+      expect(output).not.toContain("写一个两数之和的C++代码");
       expect(output).not.toContain("[patch]");
       await expect(fs.stat(path.join(tempRoot, "two_sum.cpp"))).rejects.toMatchObject({ code: "ENOENT" });
 

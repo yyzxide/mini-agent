@@ -20,6 +20,7 @@ import {
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { MessageCompressor } from "../context/MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
+import { formatRuntimeContext } from "../context/RuntimeContext.js";
 import { GitManager } from "../git/GitManager.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
 import { PatchManager } from "../patch/PatchManager.js";
@@ -30,7 +31,7 @@ import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
 import type { TaskChangeLogEntry, TaskChangeMode, TaskChangeTestResult } from "../session/TaskChangeLogStore.js";
-import type { EventRecord, JsonObject, SessionRecord } from "../session/SessionTypes.js";
+import type { EventRecord, JsonObject, SessionMeta, SessionRecord } from "../session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext, ToolResult } from "../tools/Tool.js";
 import {
@@ -48,6 +49,7 @@ import type { WebQuestionPlan } from "../web/WebQuestionPlanner.js";
 import { planWebQuestion } from "../web/WebQuestionPlanner.js";
 
 const VERSION = "0.1.0";
+const INTERACTIVE_RESUME_LIST_LIMIT = 10;
 
 interface AgentCliOptions {
   session?: string;
@@ -657,9 +659,15 @@ async function handleInteractiveSlashCommand(input: {
     }
 
     case "/resume": {
-      const sessionId = args[0];
+      const selector = args[0];
+      if (!selector) {
+        await printInteractiveResumeList(input.stores.sessionStore);
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+
+      const sessionId = await resolveInteractiveResumeSelector(input.stores.sessionStore, selector);
       if (!sessionId) {
-        process.stdout.write("[usage] /resume <sessionId>\n");
+        process.stdout.write(`[resume] No recent session matches "${selector}". Use /resume to list recent sessions.\n`);
         return { sessionId: input.currentSessionId, exit: false };
       }
 
@@ -730,7 +738,7 @@ function printInteractiveHelp(): void {
     "Slash commands:",
     "  /help              Show this help.",
     "  /new               Start a new conversation session.",
-    "  /resume <id>       Switch to a previous session.",
+    "  /resume [n|id]     List recent sessions, or switch by number/id.",
     "  /session           Show current session metadata.",
     "  /sessions          List local sessions.",
     "  /history [n]       Show recent session records.",
@@ -746,6 +754,27 @@ function printInteractiveHelp(): void {
   ].join("\n"));
 }
 
+async function printInteractiveResumeList(sessionStore: SessionStore): Promise<void> {
+  const sessions = await sessionStore.listSessions();
+  if (sessions.length === 0) {
+    process.stdout.write("[resume] No sessions yet.\n");
+    return;
+  }
+
+  const recentSessions = sessions.slice(0, INTERACTIVE_RESUME_LIST_LIMIT);
+  const sessionRows = await Promise.all(recentSessions.map(async (session) => ({
+    session,
+    lastUserMessage: await readLastUserMessage(sessionStore, session.sessionId),
+  })));
+
+  process.stdout.write(`[resume] Recent sessions (${recentSessions.length} of ${sessions.length}):\n`);
+  for (const [index, row] of sessionRows.entries()) {
+    process.stdout.write(`${formatResumeSessionLine(index + 1, row.session, row.lastUserMessage)}\n`);
+  }
+
+  process.stdout.write("[resume] Use /resume 1 or /resume <sessionId>. Use /sessions for the full list.\n");
+}
+
 async function printInteractiveSessions(sessionStore: SessionStore): Promise<void> {
   const sessions = await sessionStore.listSessions();
   if (sessions.length === 0) {
@@ -756,6 +785,40 @@ async function printInteractiveSessions(sessionStore: SessionStore): Promise<voi
   for (const session of sessions) {
     process.stdout.write(`[session] ${session.sessionId} ${session.status} ${session.updatedAt} ${session.title}\n`);
   }
+}
+
+async function resolveInteractiveResumeSelector(
+  sessionStore: SessionStore,
+  selector: string,
+): Promise<string | undefined> {
+  if (!/^\d+$/.test(selector)) {
+    return selector;
+  }
+
+  const index = Number.parseInt(selector, 10);
+  if (!Number.isInteger(index) || index < 1 || index > INTERACTIVE_RESUME_LIST_LIMIT) {
+    return undefined;
+  }
+
+  const sessions = await sessionStore.listSessions();
+  return sessions[index - 1]?.sessionId;
+}
+
+async function readLastUserMessage(sessionStore: SessionStore, sessionId: string): Promise<string | undefined> {
+  const records = await sessionStore.readRecords(sessionId).catch(() => []);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record?.type !== "USER_MESSAGE") {
+      continue;
+    }
+
+    const content = readPayloadString(record.payload, "content");
+    if (content) {
+      return content;
+    }
+  }
+
+  return undefined;
 }
 
 async function printInteractiveHistory(
@@ -873,8 +936,6 @@ async function runAgentTask(
   options: AgentCliOptions & { nonInteractive?: boolean },
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
-  process.stdout.write(`[task] ${userGoal}\n`);
-
   const route = routeTask(userGoal);
   const mode: TaskChangeMode = options.agentLoop === true ? "AGENT_LOOP" : route.intent;
   const logger = createRuntimeLogger(repoPath);
@@ -1304,7 +1365,8 @@ function buildWebAnswerContext(input: {
   sources: WebAnswerSource[];
 }): string {
   const lines = [
-    `Current date: ${new Date().toISOString().slice(0, 10)}`,
+    "Runtime context:",
+    formatRuntimeContext(),
     "",
     "Conversation context:",
     input.sessionMemory,
@@ -1838,6 +1900,16 @@ function formatSessionRecord(record: SessionRecord): string {
   return `[history] ${record.timestamp} ${record.type} ${preview}`;
 }
 
+function formatResumeSessionLine(index: number, session: SessionMeta, lastUserMessage?: string): string {
+  const number = `${String(index).padStart(2, " ")}.`;
+  const status = session.status.padEnd(8, " ");
+  const updatedAt = formatLocalMinute(session.updatedAt);
+  const label = lastUserMessage ? "last" : "title";
+  const preview = limitSingleLine(lastUserMessage ?? session.title, 72);
+
+  return `${number} ${status} ${updatedAt} ${label}: ${preview}\n    id: ${session.sessionId}`;
+}
+
 function formatEventRecord(record: EventRecord): string {
   const preview = compactPayload(record.payload, 220);
   return `[event] ${record.timestamp} ${record.type} ${preview}`;
@@ -1867,6 +1939,39 @@ function compactPayload(value: unknown, maxChars: number): string {
   }
 
   return text.length > maxChars ? `${text.slice(0, maxChars)}...[truncated]` : text;
+}
+
+function readPayloadString(payload: JsonObject, key: string): string | undefined {
+  const value = payload[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function formatLocalMinute(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) {
+    return isoTimestamp;
+  }
+
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function limitSingleLine(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
 

@@ -1,4 +1,5 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
+import { formatRuntimeContext } from "../context/RuntimeContext.js";
 import { errorToMessage } from "../utils/errors.js";
 import { DecisionParser } from "./DecisionParser.js";
 import type { LlmClient, LlmInput } from "./LlmClient.js";
@@ -81,6 +82,15 @@ export class OpenAICompatibleClient implements LlmClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
+      const runtimeContext = formatRuntimeContext();
+      const userContent = [
+        input.userGoal,
+        "",
+        "Runtime context:",
+        runtimeContext,
+        ...(input.context ? ["", "Context:", input.context] : []),
+      ].join("\n");
+
       const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -97,9 +107,7 @@ export class OpenAICompatibleClient implements LlmClient {
             },
             {
               role: "user",
-              content: input.context
-                ? `${input.userGoal}\n\nContext:\n${input.context}`
-                : input.userGoal,
+              content: userContent,
             },
           ],
           temperature: this.temperature,
@@ -140,6 +148,7 @@ export class OpenAICompatibleClient implements LlmClient {
     try {
       const userPrompt = buildUserPrompt({
         userGoal: input.userGoal,
+        runtimeContext: formatRuntimeContext(),
         context: input.context,
         state: input.state,
         availableTools: input.availableTools,
@@ -313,6 +322,7 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite")
     "You are a helpful local assistant inside a coding-agent CLI.",
     "Answer in the same language as the user unless the user asks otherwise.",
     "Use the provided conversation context when it is relevant.",
+    "Use the provided runtime context as authoritative for current date and time questions.",
     "If the user asks what was discussed before, summarize only what appears in the conversation context.",
     "Do not claim that there is no memory when conversation context is present.",
     "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",

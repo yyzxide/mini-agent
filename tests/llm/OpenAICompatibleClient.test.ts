@@ -55,6 +55,41 @@ describe("OpenAICompatibleClient", () => {
     expect(body.response_format).toEqual({ type: "json_object" });
     expect(body.messages[0]?.role).toBe("system");
     expect(body.messages[1]?.content).toContain("availableTools");
+    expect(body.messages[1]?.content).toContain("runtimeContext");
+    expect(body.messages[1]?.content).toContain("Current local date:");
+  });
+
+  it("injects runtime context into direct text completions", async () => {
+    const calls: RequestInit[] = [];
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "今天的日期见运行时上下文。" } }],
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn,
+    });
+
+    const result = await client.completeText({
+      userGoal: "今天几号？",
+      context: "[user] 之前聊过时间",
+      mode: "direct",
+    });
+
+    expect(result.success).toBe(true);
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages[0]?.content).toContain("runtime context");
+    expect(body.messages[1]?.content).toContain("Runtime context:");
+    expect(body.messages[1]?.content).toContain("Current local date:");
+    expect(body.messages[1]?.content).toContain("Context:");
+    expect(body.messages[1]?.content).toContain("[user] 之前聊过时间");
   });
 
   it("returns a clear FAILED decision for HTTP errors", async () => {

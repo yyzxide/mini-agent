@@ -6,6 +6,7 @@ import { SessionStore } from "../session/SessionStore.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
 import { RepoScanner } from "./RepoScanner.js";
 import { truncateText } from "../utils/fs.js";
+import { formatRuntimeContext } from "./RuntimeContext.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
@@ -18,6 +19,7 @@ export interface ContextSectionBudgets {
   memory: number;
   repoState: number;
   tools: number;
+  runtime: number;
   git: number;
   repositoryStructure: number;
   projectDocs: number;
@@ -70,6 +72,7 @@ export class ContextBuilder {
         ].join("\n\n"),
       },
       { title: "Conversation memory", budget: this.budgets.memory, content: sessionMemory },
+      { title: "Runtime context", budget: this.budgets.runtime, content: formatRuntimeContext() },
       { title: "Repository state summary", budget: this.budgets.repoState, content: repoState },
       { title: "Available tools", budget: this.budgets.tools, content: JSON.stringify(availableTools, null, 2) },
       {
@@ -125,11 +128,12 @@ function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
   return {
     task: Math.floor(maxChars * 0.08),
     memory: Math.floor(maxChars * 0.12),
-    repoState: Math.floor(maxChars * 0.10),
-    tools: Math.floor(maxChars * 0.10),
-    git: Math.floor(maxChars * 0.07),
-    repositoryStructure: Math.floor(maxChars * 0.14),
-    projectDocs: Math.floor(maxChars * 0.12),
+    repoState: Math.floor(maxChars * 0.09),
+    tools: Math.floor(maxChars * 0.09),
+    runtime: Math.floor(maxChars * 0.06),
+    git: Math.floor(maxChars * 0.06),
+    repositoryStructure: Math.floor(maxChars * 0.13),
+    projectDocs: Math.floor(maxChars * 0.10),
     recentResults: Math.floor(maxChars * 0.10),
     diagnostics: Math.floor(maxChars * 0.07),
     diff: Math.floor(maxChars * 0.10),

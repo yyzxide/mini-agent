@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { formatRuntimeContext } from "../context/RuntimeContext.js";
 import type { LlmTextResult } from "../llm/OpenAICompatibleClient.js";
 
 export interface WebQuestionPlan {
@@ -134,7 +135,8 @@ function normalizePlannerResult(
 
 function buildPlannerContext(sessionMemory: string, fallback: WebQuestionPlan): string {
   return [
-    `Current date: ${new Date().toISOString().slice(0, 10)}`,
+    "Runtime context:",
+    formatRuntimeContext(),
     "",
     "Conversation memory:",
     sessionMemory,
