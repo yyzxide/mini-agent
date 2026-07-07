@@ -4,6 +4,18 @@
 
 The project is intentionally focused on the local CLI loop. There is no bundled backend service or web console in the current version.
 
+## Documentation
+
+Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including:
+
+- architecture notes
+- project status and scorecard
+- resume/interview packaging notes
+- demo script
+- interview guide and interview Q&A
+- test plan and self-check checklist
+- AI study guide for this project
+
 ## What It Does
 
 - Starts an interactive local coding-agent session with `mini-agent`.
@@ -106,8 +118,10 @@ mini-agent config show
 ```bash
 mini-agent
 mini-agent run "inspect this repository and summarize the main modules"
+mini-agent review src/tools/WebSearchTool.ts
 mini-agent resume <sessionId>
 mini-agent sessions
+mini-agent session summary <sessionId>
 mini-agent status
 mini-agent diff
 mini-agent tool list
@@ -135,31 +149,45 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 `mini-agent` separates user input into three modes:
 
 - `DIRECT_ANSWER`: normal chat, explanations, and standalone code snippets. Output uses `[answer]`.
-- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, fetches important public pages with `fetch_url`, then asks the model for a fuller sourced answer. Output uses `[answer]`.
+- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Output uses `[answer]`.
+- `CODE_REVIEW`: file-focused bug inspection and code review. The CLI reads the target file, automatically loads a few related files referenced by local imports/includes, asks the model for structured findings, locally filters out findings whose quoted code does not match the primary file, then runs a second-pass verification step that can downgrade or drop overreaching findings. Output uses `[review]`.
 - `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
+
+For repository analysis requests such as "analyze this repository" or "总结当前项目", the CLI now forces an evidence-gathering pass before summarizing: it lists files, reads README/build files, loads representative source files, and only then asks the model for a grounded project analysis. This avoids shallow summaries based only on a tree snapshot.
 
 In interactive mode, web-answer follow-up questions reuse the active session context. The CLI first asks the model for a small web research plan: standalone question, search queries, answer scope, source hints, and answer instructions. If that planner fails, a local fallback planner still carries recent context and adds source-focused queries for live sports scores, release notes, news, and similar time-sensitive topics.
 
 For example, after asking about World Cup scores, a follow-up like "Japan's recent results" is searched as a World Cup-scoped question instead of a broad national-team query.
+
+Very short follow-up prompts such as `葡萄牙呢`, `那这个呢`, or `and Portugal?` also reuse the active session. When the previous question makes the omitted predicate clear, the CLI rewrites the follow-up into a fuller question before routing and answering.
 
 Interactive slash commands:
 
 ```text
 /help         Show slash command help.
 /new          Start a new conversation session in the same repo.
+/review <p>   Run a focused code review for one repository file.
 /resume <id>  Switch to a previous session without restarting the CLI.
 /session      Show current session metadata.
-/sessions     List local sessions.
+/summary      Show a compact summary of the current session.
+/sessions     List local sessions with recent message/summary hints.
 /history [n]  Show recent session records.
 /events [n]   Show recent event records.
 /logs [n]     Show recent runtime logs.
 /changes [n]  Show recent task change-log entries.
 /compact      Write a compact local memory record for the active session.
-/status       Show a repository state summary.
+/status       Show current agent/session status and tracked LLM usage.
+/repo         Show a repository state summary.
 /diff         Show git diff.
 /clear        Clear the terminal.
 /exit         Finish the active interactive session and exit.
 ```
+
+Inside interactive mode, pressing `Tab` now completes slash commands such as `/sta` -> `/status`. If a prefix matches multiple commands, repeated `Tab` shows the available candidates.
+
+Interactive `/status` is session-oriented. It shows the current session id, last mode, last user message, latest summary, configured model, and locally tracked token usage when the provider returns usage metrics. The remaining context window is reported as unavailable because most OpenAI-compatible APIs do not expose it directly.
+
+Use `/repo` for the repository summary. Outside interactive mode, `mini-agent status` and `mini-agent repo` both print the repository state summary, while `mini-agent session status <sessionId>` prints the JSON version of session status.
 
 ## Typical Local Workflow
 
@@ -234,8 +262,8 @@ Available tools:
 | `search_code` | `SAFE` | Search with ripgrep. |
 | `git_status` | `SAFE` | Run `git status --short`. |
 | `git_diff` | `SAFE` | Run `git diff` or `git diff --cached`. |
-| `web_search` | `SAFE` | Search public web results. |
-| `fetch_url` | `SAFE` | Fetch bounded text from a public HTTP(S) URL. |
+| `web_search` | `SAFE` | Search public web results with lightweight provider fallback. |
+| `fetch_url` | `REVIEW` | Fetch bounded text from a public HTTP(S) URL after permission review. |
 | `apply_patch` | `REVIEW` | Check and apply a unified diff patch. |
 
 Command execution is handled by the command subsystem rather than the tool registry:
@@ -253,11 +281,11 @@ The current MVP uses local guardrails:
 - Binary files are rejected by `read_file`.
 - `read_file` has line limits.
 - `search_code` limits result count.
-- `fetch_url` blocks localhost/private-network targets, limits timeout/download size, and returns only readable text-like content.
-- `web_search` returns bounded public result titles, URLs, and snippets; it does not grant arbitrary browser control.
+- `fetch_url` requires review permission, blocks localhost/private-network targets, validates DNS and each redirect hop, limits timeout/download size, and returns only readable text-like content.
+- `web_search` returns bounded public result titles, URLs, and snippets; it currently tries DuckDuckGo HTML first and falls back to DuckDuckGo Lite when needed. The CLI then ranks sources by domain trust hints, query overlap, and page type before deciding what to fetch, but it still does not grant arbitrary browser control.
 - Patch application runs `git apply --check` before `git apply`.
-- Commands have a timeout and output truncation.
-- Dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
+- Commands execute as structured `executable + args` processes with shell disabled by default, plus timeout and output truncation.
+- Explicit shell or shell-like commands require additional approval; dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
 
 This is a local developer tool, not a production sandbox.
 
@@ -291,8 +319,8 @@ The current session records are also used as short-term memory. Before each LLM 
 
 Runtime logs and task change logs serve different purposes:
 
-- `logs/YYYY-MM-DD.jsonl` records operational events such as task start/end, tool debugging, command execution, and CLI errors.
-- `change-log.jsonl` records task-level review entries: session id, task text, answer mode, success/failure, summary, changed files, diff stat, and test outcomes.
+- `logs/YYYY-MM-DD.jsonl` records operational events such as task start/end, tool debugging, command execution, CLI errors, and code-review stages like target resolution, primary/supplemental file loading, grounding, and verification.
+- `change-log.jsonl` records task-level review entries: session id, task text, answer mode, success/failure, summary, changed files, diff stat, test outcomes, and task metadata such as review file, supplemental file count/list, findings count, rejected count, and verdict when the task is a code review.
 
 List sessions:
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildFallbackWebQuestionPlan, planWebQuestion } from "../../src/web/WebQuestionPlanner.js";
+import {
+  buildFallbackWebQuestionPlan,
+  expandShortFollowUpQuestion,
+  planWebQuestion,
+  resolveFollowUpQuestion,
+} from "../../src/web/WebQuestionPlanner.js";
 
 describe("WebQuestionPlanner", () => {
   it("carries previous scope for follow-up questions", () => {
@@ -12,6 +17,18 @@ describe("WebQuestionPlanner", () => {
     expect(plan.standaloneQuestion).toContain("日本队最近几场的成绩");
     expect(plan.searchQueries.some((query) => query.includes("世界杯") && query.includes("日本队"))).toBe(true);
     expect(plan.answerInstructions.join("\n")).toContain("keep competitions separate");
+  });
+
+  it("expands short follow-up questions by inheriting the previous predicate", () => {
+    expect(expandShortFollowUpQuestion("葡萄牙呢", "西班牙是强队吗")).toBe("葡萄牙是强队吗");
+    expect(expandShortFollowUpQuestion("阿根廷呢", "葡萄牙世界杯最新的比赛得分")).toBe("阿根廷世界杯最新的比赛得分");
+  });
+
+  it("resolves short follow-up questions from session memory", () => {
+    expect(resolveFollowUpQuestion(
+      "葡萄牙呢",
+      "[user] 西班牙是强队吗\n[assistant] 是的，西班牙是传统强队。",
+    )).toBe("葡萄牙是强队吗");
   });
 
   it("adds source-focused queries for live sports data", () => {

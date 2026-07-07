@@ -23,6 +23,7 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "- Do not invent web facts. When web tools fail, say what failed and ask for a source or narrower query.",
   "- Patches must be valid unified diff patches.",
   "- For new files, include diff --git, new file mode, --- /dev/null, +++ b/path, and accurate @@ hunk line counts.",
+  "- End patch text with a trailing newline.",
   "- Keep patches small and focused.",
   "- Prefer existing project test commands before proposing new commands.",
   "- For RUN_COMMAND, use executable + args. Do not put shell syntax, pipes, redirects, or chained commands in args.",

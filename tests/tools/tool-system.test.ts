@@ -55,7 +55,7 @@ interface FetchUrlData {
 
 interface WebSearchData {
   query: string;
-  provider: "duckduckgo_html";
+  provider: "duckduckgo_html" | "duckduckgo_lite" | "auto";
   results: Array<{ title: string; url: string; snippet: string }>;
 }
 
@@ -367,6 +367,46 @@ describe("read-only repository tools", () => {
         title: "Example & Docs",
         url: "https://example.com/docs",
         snippet: "A useful documentation result.",
+      },
+    ]);
+  });
+
+  it("web_search falls back to duckduckgo lite when html results are empty", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
+      const urlText = String(url);
+      if (urlText.includes("duckduckgo.com/html")) {
+        return new Response("<html><body><p>no parsed results</p></body></html>", {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-type": "text/html" },
+        });
+      }
+
+      return new Response([
+        "<html><body><table>",
+        "<tr><td><a href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Flight\">Light &#x26; Docs</a></td></tr>",
+        "<tr><td class=\"result-snippet\">Useful &#x64;ocumentation from lite.</td></tr>",
+        "</table></body></html>",
+      ].join(""), {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/html" },
+      });
+    }));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("web_search", {
+      query: "lite docs",
+      maxResults: 3,
+    }, { repoPath });
+
+    expectSuccess<WebSearchData>(result);
+    expect(result.data.provider).toBe("duckduckgo_lite");
+    expect(result.data.results).toEqual([
+      {
+        title: "Light & Docs",
+        url: "https://example.com/light",
+        snippet: "Useful documentation from lite.",
       },
     ]);
   });

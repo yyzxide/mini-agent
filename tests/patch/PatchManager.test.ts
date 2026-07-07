@@ -97,6 +97,18 @@ describe("PatchManager", () => {
     await expect(fs.readFile(path.join(repoPath, "two_sum.cpp"), "utf8")).resolves.toContain("int twoSum(int a, int b)");
   });
 
+  it("repairs model patches that omit the trailing newline at end of diff", async () => {
+    const manager = new PatchManager({ repoPath });
+
+    const result = await manager.applyPatch({ patch: modelStyle2048PatchWithoutTrailingNewline() });
+
+    expect(result.success).toBe(true);
+    expect(result.changedFiles).toEqual([
+      { path: "game_2048.html", changeType: "ADDED", additions: 7, deletions: 0 },
+    ]);
+    await expect(fs.readFile(path.join(repoPath, "game_2048.html"), "utf8")).resolves.toContain("<title>2048</title>");
+  });
+
   it("returns git diff after applying a patch", async () => {
     const manager = new PatchManager({ repoPath });
 
@@ -190,6 +202,23 @@ function modelStyleTwoSumPatch(): string {
     "+    return 0;",
     "+}",
     "",
+  ].join("\n");
+}
+
+function modelStyle2048PatchWithoutTrailingNewline(): string {
+  return [
+    "diff --git a/game_2048.html b/game_2048.html",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/game_2048.html",
+    "@@ -0,0 +1,20 @@",
+    "+<!DOCTYPE html>",
+    "+<html>",
+    "+<head>",
+    "+  <title>2048</title>",
+    "+</head>",
+    "+<body>play</body>",
+    "+</html>",
   ].join("\n");
 }
 

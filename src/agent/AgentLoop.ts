@@ -22,6 +22,7 @@ import { toJsonObject, toJsonValue } from "../utils/json.js";
 import type { AgentDecision } from "./AgentDecision.js";
 import { decisionToMessage } from "./AgentPlanner.js";
 import { AgentState } from "./AgentState.js";
+import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -468,12 +469,14 @@ export class AgentLoop {
 
   private async readDecision(state: AgentState, userGoal: string, context: string): Promise<AgentDecision> {
     try {
-      return await this.llmClient.chat({
+      const decision = await this.llmClient.chat({
         userGoal,
         context,
         state: state.toSnapshot(),
         availableTools: this.availableTools,
       });
+      await this.recordLlmUsage(state.sessionId, drainLlmCallMetrics(this.llmClient), "agent_decision");
+      return decision;
     } catch (error) {
       const message = `LLM decision failed: ${errorToMessage(error)}`;
       state.setLastError(message);
@@ -559,6 +562,25 @@ export class AgentLoop {
     });
   }
 
+  private async recordLlmUsage(sessionId: string, metrics: LlmCallMetrics[], mode: string): Promise<void> {
+    for (const metric of metrics) {
+      await this.sessionStore.appendRecord(sessionId, {
+        type: "LLM_USAGE",
+        payload: toJsonObject({
+          mode,
+          ...(metric.model ? { model: metric.model } : {}),
+          ...(metric.finishReason ? { finishReason: metric.finishReason } : {}),
+          usageAvailable: metric.usage !== undefined,
+          promptTokens: metric.usage?.promptTokens ?? null,
+          completionTokens: metric.usage?.completionTokens ?? null,
+          totalTokens: metric.usage?.totalTokens ?? null,
+          cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
+          reasoningTokens: metric.usage?.reasoningTokens ?? null,
+        }),
+      });
+    }
+  }
+
   private async readFinalDiff(): Promise<string> {
     const result = await this.patchManager.getDiff().catch(async () => {
       const git = new GitManager({ repoPath: this.repoPath });
@@ -570,6 +592,14 @@ export class AgentLoop {
   private async emit(event: AgentProgressEvent): Promise<void> {
     await this.onProgress?.(event);
   }
+}
+
+function drainLlmCallMetrics(client: LlmClient): LlmCallMetrics[] {
+  if (typeof (client as { drainCallMetrics?: unknown }).drainCallMetrics === "function") {
+    return ((client as unknown as { drainCallMetrics: () => LlmCallMetrics[] }).drainCallMetrics());
+  }
+
+  return [];
 }
 
 function commandResultToPayload(result: CommandResult): JsonObject {

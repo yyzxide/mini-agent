@@ -9,7 +9,7 @@ import {
 import { toJsonValue } from "../utils/json.js";
 import type { JsonValue } from "./SessionTypes.js";
 
-export type TaskChangeMode = "DIRECT_ANSWER" | "WEB_ANSWER" | "AGENT_LOOP";
+export type TaskChangeMode = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP";
 
 export interface TaskChangeLogEntry {
   id: string;

@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createProgram } from "../src/cli/index.js";
+import { completeInteractiveInput, createProgram } from "../src/cli/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,7 +39,9 @@ describe("mini-agent CLI", () => {
       "git",
       "logs",
       "patch",
+      "repo",
       "resume",
+      "review",
       "run",
       "session",
       "sessions",
@@ -50,6 +52,31 @@ describe("mini-agent CLI", () => {
 
   it("uses the expected binary name", () => {
     expect(createProgram().name()).toBe("mini-agent");
+  });
+
+  it("completes interactive slash commands from partial input", () => {
+    const [matches, fragment] = completeInteractiveInput("/sta");
+    expect(fragment).toBe("/sta");
+    expect(matches).toEqual(["/status"]);
+  });
+
+  it("lists matching interactive slash commands for ambiguous prefixes", () => {
+    const [matches, fragment] = completeInteractiveInput("/re");
+    expect(fragment).toBe("/re");
+    expect(matches).toEqual(["/review", "/resume", "/repo"]);
+  });
+
+  it("returns all slash commands when only slash is typed", () => {
+    const [matches, fragment] = completeInteractiveInput("/");
+    expect(fragment).toBe("/");
+    expect(matches).toContain("/help");
+    expect(matches).toContain("/status");
+    expect(matches).toContain("/repo");
+  });
+
+  it("does not complete non-command or argument input", () => {
+    expect(completeInteractiveInput("hello")).toEqual([[], "hello"]);
+    expect(completeInteractiveInput("/review src/cli/index.ts")).toEqual([[], "/review src/cli/index.ts"]);
   });
 
   it("creates a session from the CLI", async () => {
@@ -82,6 +109,248 @@ describe("mini-agent CLI", () => {
       sessionId: created.sessionId,
       title: "Listed Session",
     }));
+  });
+
+  it("includes last user message and latest summary in session listings", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Overview Session"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "这是会话摘要里的回答。",
+          },
+        },
+      ],
+    }), { status: 200 })));
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你是谁",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const listOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["sessions"], { from: "user" });
+      });
+      const sessions = JSON.parse(listOutput) as Array<{
+        sessionId: string;
+        lastUserMessage?: string;
+        latestSummary?: string;
+      }>;
+
+      expect(sessions).toContainEqual(expect.objectContaining({
+        sessionId: session.sessionId,
+        lastUserMessage: "你是谁",
+        latestSummary: "这是会话摘要里的回答。",
+      }));
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("summarizes a session through the session summary command", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Summary Session"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "我是 mini-agent。",
+          },
+        },
+      ],
+    }), { status: 200 })));
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你是谁",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync(["session", "summary", session.sessionId], { from: "user" });
+      });
+      const summary = JSON.parse(output) as {
+        sessionId: string;
+        summary: string;
+        persisted: boolean;
+      };
+
+      expect(summary.sessionId).toBe(session.sessionId);
+      expect(summary.persisted).toBe(false);
+      expect(summary.summary).toContain("[user] 你是谁");
+      expect(summary.summary).toContain("[assistant] 我是 mini-agent。");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("persists session summary when requested", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Persisted Summary"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "这是可写入摘要的回答。",
+          },
+        },
+      ],
+    }), { status: 200 })));
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你是谁",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync(["session", "summary", session.sessionId, "--write"], { from: "user" });
+      });
+      const summary = JSON.parse(output) as {
+        persisted: boolean;
+        latestSummary?: string;
+        eventCount: number;
+      };
+
+      expect(summary.persisted).toBe(true);
+      expect(summary.latestSummary).toContain("[user] 你是谁");
+      expect(summary.eventCount).toBeGreaterThanOrEqual(5);
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("reports session status with recorded LLM usage", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Usage Session"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      model: "test-model",
+      usage: {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+        prompt_tokens_details: {
+          cached_tokens: 2,
+        },
+        completion_tokens_details: {
+          reasoning_tokens: 3,
+        },
+      },
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content: "你好，我是 mini-agent。",
+          },
+        },
+      ],
+    }), { status: 200 })));
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你是谁",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync(["session", "status", session.sessionId], { from: "user" });
+      });
+      const status = JSON.parse(output) as {
+        sessionId: string;
+        lastMode?: string;
+        lastUserMessage?: string;
+        latestSummary?: string;
+        llm: {
+          configuredModel: string | null;
+          calls: number;
+          promptTokens: number | null;
+          completionTokens: number | null;
+          totalTokens: number | null;
+          cachedPromptTokens: number | null;
+          reasoningTokens: number | null;
+          remainingContextTokens: number | null;
+          usageAvailable: boolean;
+        };
+      };
+
+      expect(status.sessionId).toBe(session.sessionId);
+      expect(status.lastMode).toBe("DIRECT_ANSWER");
+      expect(status.lastUserMessage).toBe("你是谁");
+      expect(status.latestSummary).toBe("你好，我是 mini-agent。");
+      expect(status.llm.configuredModel).toBe("test-model");
+      expect(status.llm.calls).toBe(1);
+      expect(status.llm.promptTokens).toBe(11);
+      expect(status.llm.completionTokens).toBe(7);
+      expect(status.llm.totalTokens).toBe(18);
+      expect(status.llm.cachedPromptTokens).toBe(2);
+      expect(status.llm.reasoningTokens).toBe(3);
+      expect(status.llm.remainingContextTokens).toBeNull();
+      expect(status.llm.usageAvailable).toBe(true);
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
   });
 
   it("prints an intelligent repository status summary", async () => {
@@ -364,6 +633,361 @@ describe("mini-agent CLI", () => {
     }
   });
 
+  it("reads repository evidence before summarizing the current project", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    await fs.mkdir(path.join(tempRoot, "src", "cli"), { recursive: true });
+    await fs.mkdir(path.join(tempRoot, "src", "agent"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, "README.md"), [
+      "# mini-coding-agent",
+      "",
+      "A local AI coding agent CLI.",
+      "",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(tempRoot, "package.json"), JSON.stringify({
+      name: "mini-coding-agent",
+      scripts: {
+        build: "tsc -p tsconfig.json",
+        test: "vitest run",
+      },
+    }, null, 2), "utf8");
+    await fs.writeFile(path.join(tempRoot, "src", "cli", "index.ts"), [
+      "export function createProgram() {",
+      "  return \"cli\";",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(tempRoot, "src", "agent", "AgentLoop.ts"), [
+      "export class AgentLoop {",
+      "  run() {",
+      "    return \"ok\";",
+      "  }",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+    await execFileAsync("git", ["add", "."], { cwd: tempRoot });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const requestBodies: Array<{
+      messages?: Array<{ role?: string; content?: string }>;
+    }> = [];
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
+        requestBodies.push(JSON.parse(String(init?.body)) as {
+          messages?: Array<{ role?: string; content?: string }>;
+        });
+        return new Response(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "这是一个 TypeScript 项目。",
+              },
+            },
+          ],
+        }), { status: 200 });
+      })
+      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
+        requestBodies.push(JSON.parse(String(init?.body)) as {
+          messages?: Array<{ role?: string; content?: string }>;
+        });
+        return new Response(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: [
+                  "项目定位：这是一个本地 AI Coding Agent CLI，README.md 和 package.json 都表明它围绕命令行工具组织。",
+                  "关键模块：`src/cli/index.ts` 负责 CLI 入口，`src/agent/AgentLoop.ts` 承担循环执行逻辑。",
+                  "运行方式：`package.json` 暴露了 build 和 test 脚本，说明它通过 TypeScript 编译并用 Vitest 测试。",
+                  "当前状态：当前 git 工作区没有额外未提交改动，git diff 为空。",
+                ].join("\n"),
+              },
+            },
+          ],
+        }), { status: 200 });
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "分析当前文件夹的项目",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[tool] list_files");
+      expect(output).toContain("[tool] read_file");
+      expect(output).toContain("[tool] git_status");
+      expect(output).toContain("[tool] git_diff");
+      expect(output).toContain("[summary]");
+      expect(output).toContain("`src/cli/index.ts`");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const firstPrompt = requestBodies[0]?.messages?.find((message) => message.role === "user")?.content ?? "";
+      expect(firstPrompt).toContain("Repository analysis instructions:");
+      expect(firstPrompt).toContain("File: README.md");
+      expect(firstPrompt).toContain("File: package.json");
+      expect(firstPrompt).toContain("File: src/cli/index.ts");
+      expect(firstPrompt).toContain("File: src/agent/AgentLoop.ts");
+
+      const secondPrompt = requestBodies[1]?.messages?.find((message) => message.role === "user")?.content ?? "";
+      expect(secondPrompt).toContain("Previous repository analysis answer was too shallow");
+      expect(secondPrompt).toContain("Mention at least 3 supporting file paths");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("renders grounded code review findings and filters unsupported ones", async () => {
+    process.chdir(tempRoot);
+    await fs.mkdir(path.join(tempRoot, "src", "tools"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, "src", "tools", "WebSearchTool.ts"), [
+      "function decodeHtmlEntities(text: string): string {",
+      "  return text.replace(/&#(\\\\d+);/g, () => \"\");",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "Found one issue in the decoder.",
+                overallVerdict: "issues_found",
+                findings: [
+                  {
+                    severity: "medium",
+                    certainty: "confirmed",
+                    file: "src/tools/WebSearchTool.ts",
+                    line: 2,
+                    title: "Decimal entities only",
+                    codeQuote: "return text.replace(/&#(\\\\d+);/g, () => \"\");",
+                    reasoning: "Only decimal numeric entities are decoded.",
+                  },
+                  {
+                    severity: "high",
+                    certainty: "confirmed",
+                    file: "src/tools/WebSearchTool.ts",
+                    line: 2,
+                    title: "Hallucinated issue",
+                    codeQuote: "doesNotExist();",
+                    reasoning: "This quote should be filtered.",
+                  },
+                ],
+                followUp: [],
+              }),
+            },
+          },
+        ],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "Keep only the grounded decoder finding.",
+                findings: [
+                  {
+                    index: 0,
+                    keep: true,
+                    certainty: "possible",
+                    reasoning: "The code shows a decoder limitation, but the practical impact depends on whether hex entities appear in real input.",
+                  },
+                ],
+                followUp: ["Check real DuckDuckGo HTML samples before calling this a confirmed bug."],
+              }),
+            },
+          },
+        ],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "帮我检查 src/tools/WebSearchTool.ts 有没有 bug",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[tool] read_file");
+      expect(output).toContain("[review]");
+      expect(output).toContain("Decimal entities only");
+      expect(output).toContain("[possible/medium]");
+      expect(output).toContain("Filtered 1 unsupported finding");
+      expect(output).not.toContain("Hallucinated issue");
+      expect(output).not.toContain("[summary]");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const logsOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["logs", "--limit", "10"], { from: "user" });
+      });
+      const logs = JSON.parse(logsOutput) as Array<{ component: string; message: string; details?: Record<string, unknown> }>;
+      expect(logs.some((record) => record.component === "review" && record.message === "Review verification applied")).toBe(true);
+
+      const changesOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["changes", "--limit", "5"], { from: "user" });
+      });
+      const changes = JSON.parse(changesOutput) as Array<{ mode: string; metadata?: Record<string, unknown> }>;
+      expect(changes[0]?.mode).toBe("CODE_REVIEW");
+      expect(changes[0]?.metadata).toMatchObject({
+        reviewFile: "src/tools/WebSearchTool.ts",
+        findings: 1,
+        rejectedFindings: 1,
+        verificationApplied: true,
+      });
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("includes supplemental related files in the code review prompt and metadata", async () => {
+    process.chdir(tempRoot);
+    await fs.mkdir(path.join(tempRoot, "src", "tools"), { recursive: true });
+    await fs.mkdir(path.join(tempRoot, "src", "utils"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, "src", "tools", "WebSearchTool.ts"), [
+      "import { decodeHexEntity } from \"../utils/html.js\";",
+      "",
+      "export function decodeHtmlEntities(text: string): string {",
+      "  return decodeHexEntity(text);",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(tempRoot, "src", "utils", "html.ts"), [
+      "export function decodeHexEntity(text: string): string {",
+      "  return text.replace(/&#x([0-9a-f]+);/gi, \"$1\");",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "No grounded bug found in the primary file.",
+                overallVerdict: "no_confirmed_issues",
+                findings: [],
+                followUp: ["If decoding behavior matters, inspect the helper implementation path that was imported."],
+              }),
+            },
+          },
+        ],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "帮我检查 src/tools/WebSearchTool.ts 有没有 bug",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[tool] read_file");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const firstCall = fetchMock.mock.calls[0];
+      const init = firstCall?.[1] as RequestInit | undefined;
+      const body = JSON.parse(String(init?.body)) as {
+        messages?: Array<{ role?: string; content?: string }>;
+      };
+      const userMessage = body.messages?.find((message) => message.role === "user")?.content ?? "";
+      expect(userMessage).toContain("Supplemental related files:");
+      expect(userMessage).toContain("File: src/utils/html.ts");
+      expect(userMessage).toContain("return decodeHexEntity(text);");
+
+      const logsOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["logs", "--limit", "10"], { from: "user" });
+      });
+      const logs = JSON.parse(logsOutput) as Array<{ component: string; message: string; details?: Record<string, unknown> }>;
+      expect(logs.some((record) => record.component === "review"
+        && record.message === "Review supplemental files loaded"
+        && hasStringArrayEntry(record.details?.supplementalFiles, "src/utils/html.ts"))).toBe(true);
+
+      const changesOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["changes", "--limit", "5"], { from: "user" });
+      });
+      const changes = JSON.parse(changesOutput) as Array<{ metadata?: Record<string, unknown> }>;
+      expect(changes[0]?.metadata).toMatchObject({
+        reviewFile: "src/tools/WebSearchTool.ts",
+        supplementalFileCount: 1,
+      });
+      expect(changes[0]?.metadata?.supplementalFiles).toEqual(["src/utils/html.ts"]);
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("runs file-focused review through the dedicated review command", async () => {
+    process.chdir(tempRoot);
+    await fs.mkdir(path.join(tempRoot, "src", "demo"), { recursive: true });
+    await fs.writeFile(path.join(tempRoot, "src", "demo", "sample.ts"), [
+      "export function sample(value: string) {",
+      "  return value.trim();",
+      "}",
+      "",
+    ].join("\n"), "utf8");
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              summary: "No grounded bug found in the primary file.",
+              overallVerdict: "no_confirmed_issues",
+              findings: [],
+              followUp: [],
+            }),
+          },
+        },
+      ],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "review",
+          "src/demo/sample.ts",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[session]");
+      expect(output).toContain("[review]");
+      expect(output).toContain("src/demo/sample.ts");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("records task runs in the task change log", async () => {
     process.chdir(tempRoot);
 
@@ -484,6 +1108,181 @@ describe("mini-agent CLI", () => {
       expect(output).not.toContain("[summary]");
       expect(answerBodies[0]?.messages[0]?.content).toContain("web_search and fetch_url");
       expect(answerBodies[0]?.messages[1]?.content).toContain("2026年6月19日更新");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("continues fetching later ranked sources when earlier web pages fail", async () => {
+    process.chdir(tempRoot);
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const answerBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+
+      if (urlText.includes("duckduckgo.com/html")) {
+        return new Response([
+          "<html><body>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/1\">Result One</a><div class=\"result__snippet\">First source</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/2\">Result Two</a><div class=\"result__snippet\">Second source</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/3\">Result Three</a><div class=\"result__snippet\">Third source</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/4\">Result Four</a><div class=\"result__snippet\">Fourth source works</div></div>",
+          "</body></html>",
+        ].join(""), {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://example.com/1" || urlText === "https://example.com/2" || urlText === "https://example.com/3") {
+        return new Response("binary", {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-type": "image/png" },
+        });
+      }
+
+      if (urlText === "https://example.com/4") {
+        return new Response("<html><body><main>Fourth source confirmed the latest note.</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+      if (body.messages[0]?.content.includes("web question planner")) {
+        return new Response(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  standaloneQuestion: "示例产品最新说明是什么",
+                  searchQueries: ["示例产品 最新 说明 官方"],
+                  answerScope: "回答示例产品的最新说明。",
+                  sourceHints: ["official source"],
+                  answerInstructions: ["只使用已经抓取到的资料。"],
+                  needsLiveData: true,
+                  confidence: "high",
+                }),
+              },
+            },
+          ],
+        }), { status: 200 });
+      }
+
+      answerBodies.push(body);
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "根据第四个来源，最新说明已经确认。",
+            },
+          },
+        ],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "示例产品最新说明是什么",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[answer]");
+      expect(fetchMock.mock.calls.some((call) => String(call[0]) === "https://example.com/4")).toBe(true);
+      expect(answerBodies[0]?.messages[1]?.content).toContain("fetched sources: 1");
+      expect(answerBodies[0]?.messages[1]?.content).toContain("Fourth source confirmed");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("prefers official release-style sources before forum-like pages", async () => {
+    process.chdir(tempRoot);
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const pageFetches: string[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+
+      if (urlText.includes("duckduckgo.com/html")) {
+        return new Response([
+          "<html><body>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://forum.example.com/thread-1\">TypeScript forum guess</a><div class=\"result__snippet\">Community discussion about the latest release.</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html\">TypeScript 5.9 release notes</a><div class=\"result__snippet\">Official TypeScript release notes.</div></div>",
+          "</body></html>",
+        ].join(""), {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://forum.example.com/thread-1" || urlText === "https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html") {
+        pageFetches.push(urlText);
+        return new Response("<html><body><main>release details</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+      if (body.messages[0]?.content.includes("web question planner")) {
+        return new Response(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  standaloneQuestion: "TypeScript latest release notes",
+                  searchQueries: ["TypeScript latest release notes official"],
+                  answerScope: "回答 TypeScript 最新 release notes。",
+                  sourceHints: ["official source", "release notes"],
+                  answerInstructions: ["优先使用官方 release notes。"],
+                  needsLiveData: true,
+                  confidence: "high",
+                }),
+              },
+            },
+          ],
+        }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "TypeScript 最新版本以官方 release notes 为准。",
+            },
+          },
+        ],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "TypeScript 最新版本是什么",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(pageFetches[0]).toBe("https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -763,6 +1562,202 @@ describe("mini-agent CLI", () => {
     }
   });
 
+  it("inherits direct-answer mode for short follow-up questions and resolves omitted predicates", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Short Follow-up"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const calls: RequestInit[] = [];
+    const responses = [
+      "是的，西班牙是传统强队。",
+      "是的，葡萄牙也是传统强队。",
+    ];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: responses.shift() ?? "fallback",
+            },
+          },
+        ],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "西班牙是强队吗",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "葡萄牙呢",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[answer]");
+      expect(output).toContain("葡萄牙也是传统强队");
+      expect(output).not.toContain("[tool] web_search");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const secondBody = JSON.parse(String(calls[1]?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(secondBody.messages[1]?.content).toContain("葡萄牙是强队吗");
+      expect(secondBody.messages[1]?.content).toContain("Resolved follow-up question: 葡萄牙是强队吗");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("does not override explicit web-answer intent for short follow-up questions", async () => {
+    process.chdir(tempRoot);
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Short Follow-up Web"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+
+      if (urlText.includes("duckduckgo.com/html")) {
+        return new Response(fakeDuckDuckGoHtml(), {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://example.com/roco-news") {
+        return new Response("<html><body><main>最新官方版本说明。</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+      if (body.messages[0]?.content.includes("web question planner")) {
+        return new Response(JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  standaloneQuestion: "最新的呢",
+                  searchQueries: ["最新的呢 官方 更新说明"],
+                  answerScope: "回答最新信息。",
+                  sourceHints: ["official source"],
+                  answerInstructions: ["只回答已核验的最新信息。"],
+                  needsLiveData: true,
+                  confidence: "high",
+                }),
+              },
+            },
+          ],
+        }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "这是联网回答。",
+            },
+          },
+        ],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你是谁",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "最新的呢",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[tool] web_search");
+      expect(output).toContain("[answer]");
+      expect(output).toContain("这是联网回答");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("replies naturally to accidental no-op messages without calling the model", async () => {
+    process.chdir(tempRoot);
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "没事，我按错了",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[answer]");
+      expect(output).toContain("好的，没事，你继续说就行。");
+      expect(output).not.toContain("用户误触");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("runs with OpenAICompatibleClient by default", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
@@ -934,6 +1929,10 @@ function fakeEdgDuckDuckGoHtml(): string {
     "</div>",
     "</body></html>",
   ].join("");
+}
+
+function hasStringArrayEntry(value: unknown, expected: string): boolean {
+  return Array.isArray(value) && value.some((item) => item === expected);
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

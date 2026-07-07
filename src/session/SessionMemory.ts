@@ -3,11 +3,13 @@ import type { SessionStore } from "./SessionStore.js";
 
 export interface SessionMemoryOptions {
   maxRecords?: number;
+  maxAuxiliaryRecords?: number;
   maxChars?: number;
 }
 
-const DEFAULT_MAX_RECORDS = 16;
-const DEFAULT_MAX_CHARS = 8_000;
+const DEFAULT_MAX_RECORDS = 80;
+const DEFAULT_MAX_AUXILIARY_RECORDS = 12;
+const DEFAULT_MAX_CHARS = 16_000;
 
 export async function readSessionMemory(
   sessionStore: SessionStore,
@@ -23,10 +25,19 @@ export function buildSessionMemory(
   options: SessionMemoryOptions = {},
 ): string {
   const maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
+  const maxAuxiliaryRecords = options.maxAuxiliaryRecords ?? Math.min(
+    DEFAULT_MAX_AUXILIARY_RECORDS,
+    Math.max(4, Math.floor(maxRecords * 0.25)),
+  );
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
-  const lines = records
-    .filter(isUsefulMemoryRecord)
-    .slice(-maxRecords)
+  const usefulRecords = records.filter(isUsefulMemoryRecord);
+  const selectedIds = new Set([
+    ...usefulRecords.filter(isPrimaryMemoryRecord).slice(-maxRecords),
+    ...usefulRecords.filter(isAuxiliaryMemoryRecord).slice(-maxAuxiliaryRecords),
+  ].map((record) => record.id));
+
+  const lines = usefulRecords
+    .filter((record) => selectedIds.has(record.id))
     .map(formatMemoryRecord)
     .filter((line) => line.length > 0);
 
@@ -34,16 +45,25 @@ export function buildSessionMemory(
   return truncateMiddle(memory, maxChars);
 }
 
-function isUsefulMemoryRecord(record: SessionRecord): boolean {
+function isPrimaryMemoryRecord(record: SessionRecord): boolean {
   return [
     "USER_MESSAGE",
     "ASSISTANT_MESSAGE",
     "TASK_SUMMARY",
     "ERROR",
-    "TOOL_RESULT",
-    "COMMAND_RESULT",
     "MEMORY_COMPACTION",
   ].includes(record.type);
+}
+
+function isAuxiliaryMemoryRecord(record: SessionRecord): boolean {
+  return [
+    "TOOL_RESULT",
+    "COMMAND_RESULT",
+  ].includes(record.type);
+}
+
+function isUsefulMemoryRecord(record: SessionRecord): boolean {
+  return isPrimaryMemoryRecord(record) || isAuxiliaryMemoryRecord(record);
 }
 
 function formatMemoryRecord(record: SessionRecord): string {

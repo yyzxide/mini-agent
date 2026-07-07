@@ -48,17 +48,17 @@
 - 追加 JSONL。
 - 读取 session。
 - 写入工具、命令、patch、diff、任务完成事件。
-- `/history`、`/events`、`/resume`、`/compact` 等交互式 session 操作。
+- `/history`、`/events`、`/resume`、`/review`、`/compact` 等交互式 session 操作。
 
 ### 1.4.1 Runtime Log / Change Log
 
 覆盖：
 
-- 运行日志写入 `.mini-agent/logs/YYYY-MM-DD.jsonl`。
+- 运行日志写入 `.mini-agent/logs/YYYY-MM-DD.jsonl`，包含代码审查阶段日志，以及补充相关文件加载记录。
 - 日志读取和按数量截断。
 - API key、authorization、token、password 等敏感字段脱敏。
 - 任务变更日志写入 `.mini-agent/change-log.jsonl`。
-- 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。
+- 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果；代码审查任务还要记录 review file、supplementalFiles、findings、rejectedFindings 和 verdict。
 - `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
 ### 1.5 LLM
@@ -156,6 +156,7 @@ mini-agent run "联网搜索一下 TypeScript 最新版本信息"
 
 - 仓库任务是否调用代码工具并输出最终 `[summary]`。
 - 联网任务是否调用 `web_search` / `fetch_url` 并输出 `[answer]`。
+- 当前来源抓取失败时，是否继续尝试后续候选来源。
 - 是否写 session/event。
 - 是否写 runtime log/change log，可用 `mini-agent logs` 和 `mini-agent changes` 查看。
 
@@ -180,9 +181,11 @@ git diff
 ```text
 mini-agent
 > /help
+> /review src/tools/WebSearchTool.ts
 > /session
 > /history 10
 > /events 10
+> /summary
 > /logs 10
 > /changes 10
 > /compact
@@ -196,6 +199,8 @@ mini-agent
 
 - `/new` 后 session id 改变。
 - `/resume` 后当前 session 切到指定 id。
+- `/review` 能直接触发文件级代码审查。
+- `/summary` 能输出当前 session 的压缩摘要。
 - `/history` 能看到当前 session 的用户消息、助手消息、工具结果、任务总结。
 - `/compact` 会写入 `MEMORY_COMPACTION` 记录。
 

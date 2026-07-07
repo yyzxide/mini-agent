@@ -92,6 +92,88 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toContain("[user] 之前聊过时间");
   });
 
+  it("records usage metrics that can be drained later", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        model: "agent-model",
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 6,
+          total_tokens: 16,
+          prompt_tokens_details: {
+            cached_tokens: 4,
+          },
+          completion_tokens_details: {
+            reasoning_tokens: 2,
+          },
+        },
+        choices: [{ finish_reason: "stop", message: { content: "收到了。" } }],
+      }), { status: 200 }),
+    });
+
+    const result = await client.completeText({
+      userGoal: "你好",
+      context: "上下文",
+      mode: "direct",
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.drainCallMetrics()).toEqual([
+      {
+        model: "agent-model",
+        finishReason: "stop",
+        usage: {
+          promptTokens: 10,
+          completionTokens: 6,
+          totalTokens: 16,
+          cachedPromptTokens: 4,
+          reasoningTokens: 2,
+        },
+      },
+    ]);
+    expect(client.drainCallMetrics()).toEqual([]);
+  });
+
+  it("continues direct answers when the first completion stops due to token length", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        model: "agent-model",
+        choices: [{ finish_reason: "length", message: { content: "第一段代码\n```html\n<div>2048" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        model: "agent-model",
+        choices: [{ finish_reason: "stop", message: { content: "</div>\n```" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn,
+    });
+
+    const result = await client.completeText({
+      userGoal: "写个 2048 页面",
+      context: "[user] 需要完整 HTML",
+      mode: "direct",
+    });
+
+    expect(result).toEqual({
+      success: true,
+      text: "第一段代码\n```html\n<div>2048</div>\n```",
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    expect(retryBody.messages[1]?.content).toContain("Continue the previous answer for the same request.");
+    expect(retryBody.messages[1]?.content).toContain("Previously generated partial answer");
+  });
+
   it("accepts reasoning_content as text completion fallback", async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
@@ -169,6 +251,73 @@ describe("OpenAICompatibleClient", () => {
     expect(retryBody.messages[1]?.content).toContain("previous model response was empty");
   });
 
+  it("retries once when model decision content is not valid JSON", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "```bash\nsudo apt update\n```" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"type\":\"FINAL\",\"summary\":\"Recovered\",\"success\":true}" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn,
+    });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision).toEqual({ type: "FINAL", summary: "Recovered", success: true });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>;
+      response_format?: unknown;
+    };
+    expect(retryBody.response_format).toBeUndefined();
+    expect(retryBody.messages[1]?.content).toContain("could not be parsed as an AgentDecision JSON object");
+    expect(retryBody.messages[1]?.content).toContain("Do not return markdown");
+  });
+
+  it("retries without response_format when the endpoint rejects json_object mode", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: "response_format json_object is not supported by this model",
+        },
+      }), { status: 400, statusText: "Bad Request" }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"type\":\"FINAL\",\"summary\":\"Recovered after fallback\",\"success\":true}" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn,
+    });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision).toEqual({ type: "FINAL", summary: "Recovered after fallback", success: true });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    const firstBody = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as {
+      response_format?: { type: string };
+    };
+    expect(firstBody.response_format).toEqual({ type: "json_object" });
+
+    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>;
+      response_format?: unknown;
+    };
+    expect(retryBody.response_format).toBeUndefined();
+    expect(retryBody.messages[1]?.content).toContain("rejected response_format=json_object");
+    expect(retryBody.messages[1]?.content).toContain("Return exactly one valid AgentDecision JSON object");
+  });
+
   it("parses array-shaped message content", async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
@@ -235,6 +384,86 @@ describe("OpenAICompatibleClient", () => {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
       restoreEnv("MINI_AGENT_MODEL", oldModel);
     }
+  });
+
+  it("parses structured code review JSON", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "Found one grounded issue.",
+                overallVerdict: "issues_found",
+                findings: [
+                  {
+                    severity: "medium",
+                    certainty: "confirmed",
+                    file: "src/tools/WebSearchTool.ts",
+                    line: 139,
+                    title: "Hex entities are not decoded",
+                    codeQuote: "replace(/&#(\\d+);/g",
+                    reasoning: "The decoder only handles decimal numeric entities.",
+                  },
+                ],
+                followUp: [],
+              }),
+            },
+          },
+        ],
+      }), { status: 200 }),
+    });
+
+    const result = await client.completeReview({
+      userGoal: "Review src/tools/WebSearchTool.ts for bugs",
+      context: "file content here",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.review?.findings[0]?.title).toBe("Hex entities are not decoded");
+  });
+
+  it("parses structured code review verification JSON", async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: async () => new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "Keep only the grounded finding.",
+                findings: [
+                  {
+                    index: 0,
+                    keep: true,
+                    certainty: "possible",
+                    reasoning: "The quoted code supports a decoder limitation, but impact still depends on actual input.",
+                  },
+                ],
+                followUp: ["Check real HTML samples."],
+              }),
+            },
+          },
+        ],
+      }), { status: 200 }),
+    });
+
+    const result = await client.verifyReview({
+      userGoal: "Verify review findings",
+      context: "review verification context",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.verification?.findings[0]).toMatchObject({
+      index: 0,
+      keep: true,
+      certainty: "possible",
+    });
   });
 });
 

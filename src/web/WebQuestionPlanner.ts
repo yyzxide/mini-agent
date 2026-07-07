@@ -73,10 +73,15 @@ export async function planWebQuestion(input: PlanWebQuestionInput): Promise<WebQ
 export function buildFallbackWebQuestionPlan(userGoal: string, sessionMemory: string): WebQuestionPlan {
   const originalQuestion = normalizeSpaces(userGoal);
   const previousUserMessage = extractLastUserMessage(sessionMemory);
+  const expandedFollowUp = previousUserMessage
+    ? expandShortFollowUpQuestion(originalQuestion, previousUserMessage)
+    : undefined;
   const shouldUsePreviousScope = previousUserMessage
     ? shouldCarryPreviousScope(originalQuestion, previousUserMessage)
     : false;
-  const standaloneQuestion = shouldUsePreviousScope
+  const standaloneQuestion = expandedFollowUp
+    ? expandedFollowUp
+    : shouldUsePreviousScope
     ? normalizeSpaces(`${previousUserMessage}；追问：${originalQuestion}`)
     : originalQuestion;
   const needsLiveData = isLikelyLiveOrCurrentQuestion(standaloneQuestion);
@@ -102,6 +107,15 @@ export function extractLastUserMessage(sessionMemory: string): string | undefine
   const matches = [...sessionMemory.matchAll(/^\[user\]\s+(.+)$/gm)];
   const latest = matches.at(-1)?.[1]?.trim();
   return latest && latest !== "(none)" ? latest : undefined;
+}
+
+export function resolveFollowUpQuestion(userGoal: string, sessionMemory: string): string | undefined {
+  const previousUserMessage = extractLastUserMessage(sessionMemory);
+  if (!previousUserMessage) {
+    return undefined;
+  }
+
+  return expandShortFollowUpQuestion(userGoal, previousUserMessage);
 }
 
 function normalizePlannerResult(
@@ -300,6 +314,43 @@ function buildAnswerInstructions(
   return uniqueStrings(instructions);
 }
 
+export function isShortFollowUpQuestion(value: string): boolean {
+  const normalized = normalizeSpaces(value);
+  if (normalized.length === 0 || normalized.length > 24) {
+    return false;
+  }
+
+  if (/^(那|那么|那如果|那要是|那对于|还有|然后)/.test(normalized)) {
+    return true;
+  }
+
+  if (/(呢|咋样|怎么样|如何)([？?]?)$/.test(normalized)) {
+    return true;
+  }
+
+  return normalized.length <= 8;
+}
+
+export function expandShortFollowUpQuestion(currentGoal: string, previousUserMessage: string): string | undefined {
+  const current = normalizeSpaces(currentGoal);
+  const previous = normalizeSpaces(previousUserMessage);
+  if (!isShortFollowUpQuestion(current) || previous.length === 0) {
+    return undefined;
+  }
+
+  const subject = extractFollowUpSubject(current);
+  if (!subject) {
+    return undefined;
+  }
+
+  const predicate = extractFollowUpPredicate(previous);
+  if (!predicate) {
+    return undefined;
+  }
+
+  return normalizeSpaces(`${subject}${predicate}`);
+}
+
 function shouldCarryPreviousScope(currentGoal: string, previousUserMessage: string): boolean {
   const current = currentGoal.toLowerCase();
   const previous = previousUserMessage.toLowerCase();
@@ -368,6 +419,38 @@ function isLikelyLiveOrCurrentQuestion(value: string): boolean {
     "price",
     "news",
   ]);
+}
+
+function extractFollowUpSubject(value: string): string | undefined {
+  const normalized = normalizeSpaces(value)
+    .replace(/^(那|那么|那如果|那要是|那对于|还有|然后)/, "")
+    .replace(/(呢|咋样|怎么样|如何)([？?]?)$/, "")
+    .replace(/[？?]+$/, "")
+    .trim();
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function extractFollowUpPredicate(previousUserMessage: string): string | undefined {
+  const normalized = normalizeSpaces(previousUserMessage).replace(/[？?]+$/, "");
+  const markerPatterns = [
+    /^(?:.+?)(是.+)$/,
+    /^(?:.+?)((?:世界杯|world cup).+)$/i,
+    /^(?:.+?)((?:最新|latest).+)$/i,
+    /^(?:.+?)((?:最近|recent).+)$/i,
+    /^(?:.+?)(.*(?:比分|得分|赛果|成绩|战绩|score|scores|result|results).*)$/i,
+    /^(?:.+?)(.*(?:强队|厉害|实力|怎么样|如何|冠军|夺冠|版本|发布|更新|新闻).*)$/i,
+  ];
+
+  for (const pattern of markerPatterns) {
+    const match = normalized.match(pattern);
+    const candidate = match?.[1] ? normalizeSpaces(match[1]) : "";
+    if (candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
 function isLikelyAmbiguousChampionQuestion(value: string): boolean {

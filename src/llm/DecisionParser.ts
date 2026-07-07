@@ -28,21 +28,52 @@ function extractJsonText(rawText: string): string {
     throw new InvalidAgentDecisionError("LLM response is empty");
   }
 
-  const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (codeBlock?.[1]) {
-    return codeBlock[1].trim();
+  const codeBlockJson = extractJsonFromCodeBlocks(text);
+  if (codeBlockJson) {
+    return codeBlockJson;
   }
 
   if (text.startsWith("{") && text.endsWith("}")) {
     return text;
   }
 
-  const objectText = extractFirstJsonObject(text);
+  const objectText = extractFirstJsonObject(removeNonJsonCodeBlocks(text));
   if (objectText) {
     return objectText;
   }
 
   throw new InvalidAgentDecisionError("LLM response did not contain a JSON object");
+}
+
+function extractJsonFromCodeBlocks(text: string): string | undefined {
+  const codeBlockPattern = /```([^\n`]*)\n?([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = codeBlockPattern.exec(text)) !== null) {
+    const language = (match[1] ?? "").trim().toLowerCase();
+    const content = (match[2] ?? "").trim();
+    if (!content) {
+      continue;
+    }
+
+    if (language === "json" || (!language && content.startsWith("{"))) {
+      return content;
+    }
+  }
+
+  return undefined;
+}
+
+function removeNonJsonCodeBlocks(text: string): string {
+  return text.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (block, language: string, content: string) => {
+    const normalizedLanguage = language.trim().toLowerCase();
+    const normalizedContent = content.trim();
+    if (normalizedLanguage === "json" || (!normalizedLanguage && normalizedContent.startsWith("{"))) {
+      return block;
+    }
+
+    return "";
+  });
 }
 
 function parseJson(jsonText: string): unknown {

@@ -19,14 +19,22 @@
 普通聊天、独立代码片段和联网问答不会强行进入代码修改循环。当前版本会先用 `TaskRouter` 分成三类：
 
 - `DIRECT_ANSWER`：普通问答、解释、独立代码片段，输出 `[answer]`。
-- `WEB_ANSWER`：需要最新资料或公网信息的问题，先执行 `web_search` / `fetch_url`，再输出更完整的 `[answer]`。
+- `WEB_ANSWER`：需要最新资料或公网信息的问题，先执行 `web_search` / `fetch_url`，会优先考虑更像官方/高可信的来源，继承当前 session 的追问范围，并在前几个来源抓取失败时继续尝试后续候选来源，再输出更完整的 `[answer]`。
+- `CODE_REVIEW`：文件级代码审查和 bug 检查。CLI 会先读取目标文件，再自动补充少量由本地 import / include 解析出来的相关文件作为上下文，然后要求模型输出结构化 findings，先在本地校验引用代码是否真的出现在主文件里，再做一轮 review 复核，必要时把过度武断的结论降级或丢弃，输出 `[review]`。
 - `AGENT_LOOP`：真正的仓库阅读、修改、测试和修复任务，输出 `[plan]`、`[tool]`、`[patch]`、`[command]`、`[summary]`。
 
+对于“分析当前项目”“总结这个仓库”这类仓库分析请求，CLI 现在不会只依赖目录树摘要直接作答，而是会先强制执行一轮取证：列目录、读取 README / 构建文件、读取代表性源码文件，然后再让模型输出带文件依据的项目分析。
+
 `WEB_ANSWER` 不是简单把用户原话丢给搜索引擎。它会先用 `WebQuestionPlanner` 结合 session 记忆生成独立问题、搜索 query、回答范围、来源提示和回答约束；规划失败时再用本地 fallback 策略补齐追问范围和 source-focused query。
+
+对于 `葡萄牙呢`、`那这个呢`、`and Portugal?` 这种很短的追问，CLI 现在也会先结合当前 session 做一次本地补全；如果上一轮问法已经明确了省略掉的谓语或范围，就会先重写成更完整的问题，再决定走直接回答还是联网回答。
 
 ## 文档索引
 
 - [架构设计说明](ARCHITECTURE.md)：解释 CLI Agent 的模块拆分、工具系统、权限、session 和 LLM 接入。
+- [项目现状评估](PROJECT_STATUS.md)：当前完成度、100 分制评分、与 Claude Code/Codex 的差距、后续优先级。
+- [AI 知识补习指南](AI_STUDY_GUIDE.md)：为了把这个项目讲清楚、继续做下去，需要优先补哪些 AI 知识。
+- [简历包装与求职使用说明](RESUME_PACKAGE.md)：怎么写进简历、怎么讲项目、适合投什么岗位。
 - [演示脚本](DEMO_SCRIPT.md)：用于本地演示和录屏的操作步骤。
 - [面试讲解稿](INTERVIEW_GUIDE.md)：把项目讲成一个完整工程故事。
 - [面试问答](INTERVIEW_QA.md)：常见追问和回答。
@@ -47,9 +55,10 @@
 - 命令执行超时、输出截断和危险命令拦截。
 - patch 应用前 `git apply --check`。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
-- `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志。
+- `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
 - `mini-agent config` 管理本地模型配置。
-- `mini-agent --help`、`mini-agent run`、`mini-agent tool`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes` 等调试命令。
+- `mini-agent --help`、`mini-agent run`、`mini-agent review`、`mini-agent tool`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes` 等调试命令。
+- `mini-agent session summary <sessionId>` 可以直接查看某个会话的压缩摘要。
 
 ## 快速验证
 
@@ -76,16 +85,26 @@ cp mini-agent.config.example.json mini-agent.config.json
 ```text
 /help         查看命令帮助
 /new          新开会话
+/review <p>   审查单个仓库文件
 /resume <id>  切换到历史 session
+/summary      查看当前会话压缩摘要
+/sessions     列出带最近消息/摘要提示的会话
 /history [n]  查看当前 session 最近记录
 /events [n]   查看当前 session 最近事件
 /logs [n]     查看运行日志
 /changes [n]  查看任务变更日志
 /compact      写入一条本地压缩记忆
-/status       查看仓库状态摘要
+/status       查看当前会话状态与已记录的 LLM token 用量
+/repo         查看仓库状态摘要
 /diff         查看 git diff
 /exit         结束会话
 ```
+
+交互模式里现在支持 `Tab` 补全 slash 命令，例如输入 `/sta` 后按 `Tab` 会补成 `/status`；如果一个前缀对应多个命令，连续按 `Tab` 可以看到候选列表。
+
+其中交互式 `/status` 现在是“会话状态”语义：会显示当前 session、最近一次模式、最近用户消息、最新摘要、已配置模型，以及本地累计的 prompt/completion/total token。至于“当前还剩多少上下文 token”，大多数 OpenAI-compatible API 不会直接返回，所以这里只会明确标记为暂不可得。
+
+如果要看仓库层面的变更摘要，请用 `/repo`。非交互模式下，`mini-agent status` 和 `mini-agent repo` 仍然输出仓库状态摘要；`mini-agent session status <sessionId>` 输出某个会话的 JSON 状态。
 
 ## 项目边界
 

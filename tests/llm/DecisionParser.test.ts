@@ -26,6 +26,27 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("ignores non-JSON code blocks before a JSON decision", () => {
+    expect(parser.parse([
+      "I would run:",
+      "```bash",
+      "sudo apt update",
+      "```",
+      "{\"type\":\"PLAN\",\"message\":\"Use a safe decision instead\"}",
+    ].join("\n"))).toEqual({
+      type: "PLAN",
+      message: "Use a safe decision instead",
+    });
+  });
+
+  it("does not parse JSON-looking content inside non-JSON code blocks", () => {
+    expect(() => parser.parse([
+      "```bash",
+      "echo '{\"type\":\"PLAN\",\"message\":\"not a decision\"}'",
+      "```",
+    ].join("\n"))).toThrow(/did not contain a JSON object/);
+  });
+
   it("parses structured RUN_COMMAND decisions", () => {
     expect(parser.parse(JSON.stringify({
       type: "RUN_COMMAND",

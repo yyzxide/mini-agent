@@ -26,7 +26,7 @@ CLI
 2. 构建仓库上下文和当前 session 的短期记忆。
 3. 先用 `TaskRouter` 判断是直接回答、联网回答，还是进入仓库 AgentLoop。
 4. 直接回答任务只调用文本 LLM，不改文件。
-5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`，最后把资料交给文本 LLM 生成完整回答。
+5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`；如果前几个来源抓取失败，会继续尝试后续候选来源，最后把资料交给文本 LLM 生成完整回答。
 6. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
 7. 根据 decision 执行工具、应用 patch、运行命令或结束。
 8. 命令失败时把日志放回上下文。
@@ -57,7 +57,9 @@ tests                自动化测试
 
 - 普通问答和独立代码片段走 `DIRECT_ANSWER`，只输出答案，不改仓库。
 - 需要最新资料、新闻、版本、赛事结果等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
+- 文件级 bug 检查和代码审查走 `CODE_REVIEW`，先读取目标文件，再额外加载少量由相对 import、require、`#include` 推导出来的相关文件作为补充上下文，再让模型返回结构化 findings，先由本地代码校验 `codeQuote` 是否真的落在主文件对应行附近，再做一轮 review 复核，进一步过滤“引用代码是真的，但结论过度武断”的 finding。
 - 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
+- 对于“分析当前项目”“总结当前仓库”这类仓库分析请求，CLI 虽然仍归在 `AGENT_LOOP` 大类下，但会先执行一条本地强制取证路径：列出目录、读取 README / 构建文件、读取代表性源码文件；如果没有读到源码文件，就拒绝直接总结。这样能避免模型只看目录树摘要就给出看似正确、实则不够扎实的概述。
 - “刚才聊了什么 / 还记得吗 / 上次呢”这类会话追问走 `DIRECT_ANSWER`，但会带上当前 session 的最近记录。
 - `--agent-loop` 可以强制进入仓库修改流程。
 
@@ -71,6 +73,8 @@ tests                自动化测试
 - `needsLiveData`：标记是否属于实时或强时效问题。
 
 规划优先由 LLM 根据 session memory 完成；如果规划失败，会回退到本地启发式策略。例如上一轮问“世界杯最新比分”，下一轮问“日本队最近几场的成绩”，搜索 query 会携带“世界杯”范围，避免泛化成日本国家队所有友谊赛、预选赛或其它赛事成绩。
+
+对于 `葡萄牙呢`、`那这个呢` 这类很短的追问，CLI 还会先做一层本地 follow-up 重写：如果上一轮用户问题已经明确了省略掉的谓语或范围，例如“西班牙是强队吗”，那么短追问会先被补成“葡萄牙是强队吗”，再继续走路由和回答流程。
 
 对于 EDG、T1、Apple 这类可能跨游戏、跨产品或跨领域的实体，如果用户没有指定领域，规划器不能默认选择一个方向。它会生成更宽的 query，并要求最终回答按领域列出主要可能，或提示用户补充范围。例如“EDG 哪一年夺冠了”应区分《英雄联盟》S11 2021 年和《无畏契约》Valorant Champions 2024 年，而不是只回答其中一个。
 
@@ -151,7 +155,7 @@ interface Tool<TInput, TResult> {
 - 只返回文本、HTML、JSON、XML 等可读内容。
 - HTML 会做简单文本抽取，避免把脚本和样式塞进上下文。
 
-当前 `web_search` 默认使用 DuckDuckGo HTML 结果页做轻量解析。后续如果需要更稳定的生产效果，可以接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
+当前 `web_search` 默认先尝试 DuckDuckGo HTML 结果页做轻量解析；如果 HTML 结果为空或质量不够，再降级到 DuckDuckGo Lite。CLI 在抓取来源前还会结合域名可信度、query 词项覆盖、官方/发布页特征和域名去重做一轮排序，尽量优先抓取更像官方说明、release notes、比赛结果页的来源，避免前三条都落在同一站点上。后续如果需要更稳定的生产效果，可以继续接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
 
 ## 7.5 仓库状态分析
 
@@ -163,7 +167,7 @@ interface Tool<TInput, TResult> {
 - package scripts。
 - 建议验证命令，例如 `npm test`、`pnpm test`、`mvn test`、`go test ./...`。
 
-交互式 `/status` 和 `mini-agent status` 使用这层摘要；`mini-agent git status` 仍保留为底层 git 调试命令。
+这层摘要主要用于仓库视角的状态查看：交互式请使用 `/repo`，非交互模式可以使用 `mini-agent status` 或 `mini-agent repo`；`mini-agent git status` 仍保留为底层 git 调试命令。
 
 ## 8. Patch 设计
 
@@ -226,12 +230,16 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 新增的运行日志和任务变更日志解决两个不同问题：
 
-- `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用和 CLI 异常。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
-- `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。它适合做 review、demo 复盘和面试材料整理。
+- `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用、CLI 异常，以及 `CODE_REVIEW` 的关键阶段，例如 review target 解析、主文件加载、补充文件加载、grounding 和 verification。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
+- `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。对于 `CODE_REVIEW`，还会额外记录 review file、loaded lines、supplemental files、findings 数量、rejected 数量和最终 verdict。它适合做 review、demo 复盘和面试材料整理。
 
 交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session，`/exit` 会结束当前 session。`mini-agent resume <sessionId>` 会重新打开指定 session，并继续把该 session 的最近记录作为上下文。
 
 交互式 CLI 也支持 `/resume <sessionId>` 在当前进程中切换历史 session，支持 `/history` 查看当前 session 记录，支持 `/events` 查看事件时间线，支持 `/logs` 和 `/changes` 查看运行日志和任务变更日志。
+
+命令行输入体验分成两层：
+
+- 交互式 `mini-agent` 内部，依赖 Node `readline` 的 completer，为 `/status`、`/repo`、`/review` 这类 slash 命令提供 `Tab` 补全。
 
 `SessionMemory` 会把最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
 
@@ -251,16 +259,21 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 - `/help`：查看命令。
 - `/new`：开启新会话。
+- `/review <file>`：直接对单个仓库文件做代码审查。
 - `/resume <sessionId>`：切换历史会话。
 - `/session`：查看当前 session 元信息。
-- `/sessions`：列出 session。
+- `/summary`：查看当前 session 的压缩摘要，不写入记录。
+- `/sessions`：列出 session，并显示最近消息/摘要提示。
 - `/history [n]`：查看当前 session 最近记录。
 - `/events [n]`：查看当前 session 最近事件。
 - `/logs [n]`：查看最近运行日志。
 - `/changes [n]`：查看最近任务变更日志。
 - `/compact`：写入一条本地压缩记忆。
-- `/status`：查看仓库状态摘要。
+- `/status`：查看当前 session 状态，包括最近模式、最近摘要和已记录的 LLM token 用量。
+- `/repo`：查看仓库状态摘要。
 - `/diff`：查看当前 diff。
+
+另外，非交互模式也支持 `mini-agent session summary <sessionId>`，用于把某个历史会话快速压缩成可阅读摘要；如果传 `--write`，还会把摘要写回 `MEMORY_COMPACTION` 记录。`mini-agent session status <sessionId>` 则会输出该会话的 JSON 状态，包括本地累计 token 使用量；剩余上下文窗口通常无法精确获得，因为大多数 OpenAI-compatible API 不返回这个值。
 - `/clear`：清屏。
 - `/exit`：结束当前 session 并退出。
 

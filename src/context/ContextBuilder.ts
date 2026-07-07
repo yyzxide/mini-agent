@@ -57,7 +57,7 @@ export class ContextBuilder {
       scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`),
       git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
-      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 18, maxChars: 8_000 })
+      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 80, maxChars: 12_000 })
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
 

@@ -399,7 +399,8 @@ function normalizeUnifiedDiff(patch: string): string {
     output[index] = `@@ -${match[1]},${oldCount} +${match[2]},${newCount} @@${match[3] ?? ""}`;
   }
 
-  return output.join("\n");
+  const normalized = output.join("\n");
+  return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
 }
 
 function inferChangeType(file: MutablePatchFile): PatchChangeType {

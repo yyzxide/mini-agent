@@ -3,6 +3,7 @@ export type SessionStatus = "ACTIVE" | "FINISHED" | "FAILED";
 export type SessionRecordType =
   | "USER_MESSAGE"
   | "ASSISTANT_MESSAGE"
+  | "LLM_USAGE"
   | "AGENT_DECISION"
   | "TOOL_CALL"
   | "TOOL_RESULT"
