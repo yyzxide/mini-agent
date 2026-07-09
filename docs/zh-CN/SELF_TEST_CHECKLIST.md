@@ -23,6 +23,7 @@ rg --version
 cd /home/sid/miniagent/mini-coding-agent
 npm install
 npm run build
+npm run test:regression
 npm test
 npm run verify
 ```
@@ -30,6 +31,7 @@ npm run verify
 期望：
 
 - TypeScript 编译通过。
+- 对话级回归测试通过。
 - Vitest 全部通过。
 - `verify` 只验证 CLI 项目。
 
@@ -140,7 +142,7 @@ mini-agent diff
 直接回答任务：
 
 ```bash
-mini-agent run "写一个两数之和的 C++ 代码"
+mini-agent run "给我一个两数之和的 C++ 代码片段，不要改文件"
 mini-agent run "非登记收款人是什么意思"
 ```
 
@@ -149,6 +151,62 @@ mini-agent run "非登记收款人是什么意思"
 - 输出 `[answer]`。
 - 不创建源码文件。
 - 不出现 `[patch]`。
+
+代码落文件任务：
+
+```bash
+mini-agent run "写一个两数之和的 C++ 代码"
+```
+
+期望补充检查：
+
+- 会进入 `AGENT_LOOP` 而不是纯 `[answer]`。
+- 仓库里会生成新文件，例如 `two_sum.cpp`。
+- 输出里应该出现 `[patch]` 和最终总结。
+
+短追问承接任务：
+
+```text
+mini-agent
+> 给我一个 Python 代码片段，写一个两数之和
+> 写进去
+```
+
+期望补充检查：
+
+- 第二轮不能再问“你想写什么内容到哪个文件”。
+- 应该直接进入文件落盘流程。
+- 仓库里会生成新文件。
+- 输出中应出现 `[patch]`。
+
+连续算法追问：
+
+```text
+mini-agent
+> 帮我写个 最长有效括号
+> 数据流的中位数呢
+```
+
+期望补充检查：
+
+- 第二轮不能只输出代码块。
+- 第二轮仍然应该进入 `AGENT_LOOP`。
+- 仓库中应该新增或修改一个中位数相关文件，例如 `median_finder.ts`。
+- 输出中应出现 `[patch]` 和最终总结。
+
+写入确认：
+
+```text
+mini-agent
+> 给我一个 TypeScript 代码片段，写一个数据流中位数
+> 你写入了嘛？
+```
+
+期望补充检查：
+
+- 如果上一轮只是 `[answer]`，这里必须回答没有查到文件写入记录。
+- 不能把更早之前的其它文件变更误说成刚才已经写入。
+- 如果上一轮确实走了 `[patch]`，这里应该列出 session 中记录的变更文件。
 
 联网回答任务：
 
@@ -262,3 +320,8 @@ mini-agent diff
 ```
 
 这条链路能跑通，就说明纯 CLI MVP 是健康的。
+期望补充检查：
+
+- 会进入 `AGENT_LOOP` 而不是纯 `[answer]`。
+- 仓库里会生成新文件，例如 `two_sum.cpp`。
+- 输出里应该出现 `[patch]` 和最终总结。

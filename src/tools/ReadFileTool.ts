@@ -33,6 +33,15 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
   readonly description = "Read a text file from the repository with line limits.";
   readonly inputSchema = ReadFileInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "filesystem" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  };
 
   async execute(input: ReadFileInput, context: ToolContext): Promise<ToolResult<ReadFileData>> {
     const absolutePath = resolveRepoPath(context.repoPath, input.path);

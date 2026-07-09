@@ -16,10 +16,13 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
+    "guess": "tsx src/guessing-game.ts",
+    "test:regression": "vitest run tests/cli-regression.test.ts tests/cli-real-api-regressions.test.ts",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:unused": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
-    "verify": "npm run build && npm test"
+    "verify": "npm run build && npm test",
+    "verify:regression": "npm run build && npm run test:regression"
   },
   "keywords": [
     "agent",

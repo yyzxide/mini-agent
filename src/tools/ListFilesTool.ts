@@ -34,6 +34,15 @@ export class ListFilesTool implements Tool<ListFilesInput, ListFilesData> {
   readonly description = "List files and directories under a repository path.";
   readonly inputSchema = ListFilesInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "filesystem" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  };
 
   async execute(input: ListFilesInput, context: ToolContext): Promise<ToolResult<ListFilesData>> {
     const targetPath = resolveRepoPath(context.repoPath, input.path);

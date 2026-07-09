@@ -6,7 +6,7 @@ import { InvalidAgentDecisionError } from "../utils/errors.js";
 export class DecisionParser {
   parse(rawText: string): AgentDecision {
     const jsonText = extractJsonText(rawText);
-    const value = parseJson(jsonText);
+    const value = normalizeDecisionCandidate(parseJson(jsonText));
     assertRequiredDecisionFields(value);
 
     const parsed = AgentDecisionSchema.safeParse(value);
@@ -15,6 +15,75 @@ export class DecisionParser {
     }
 
     return parsed.data;
+  }
+}
+
+function normalizeDecisionCandidate(value: unknown): unknown {
+  if (!isObject(value)) {
+    return value;
+  }
+
+  const rawType = readString(value.type);
+  if (!rawType) {
+    return value;
+  }
+
+  const type = rawType.trim().toUpperCase();
+  switch (type) {
+    case "PLAN":
+      return {
+        type,
+        message: readString(value.message) ?? readString(value.summary) ?? readString(value.description),
+      };
+    case "TOOL_CALL":
+      return {
+        type,
+        toolName: readString(value.toolName) ?? readString(value.name) ?? readString(value.tool),
+        input: isObject(value.input) ? value.input : {},
+      };
+    case "APPLY_PATCH":
+      return {
+        type,
+        patch: readRawString(value.patch) ?? readRawString(value.diff),
+        description: readString(value.description)
+          ?? readString(value.message)
+          ?? readString(value.summary)
+          ?? "Apply repository patch",
+      };
+    case "RUN_COMMAND": {
+      const command = readString(value.command);
+      const shell = typeof value.shell === "boolean" ? value.shell : Boolean(command && !readString(value.executable));
+      return {
+        type,
+        executable: readString(value.executable),
+        args: Array.isArray(value.args) ? value.args : [],
+        command,
+        shell,
+        cwd: readString(value.cwd),
+        timeoutMs: typeof value.timeoutMs === "number" ? value.timeoutMs : undefined,
+        description: readString(value.description)
+          ?? readString(value.message)
+          ?? (command ? `Run ${command}` : "Run command"),
+      };
+    }
+    case "ASK_USER":
+      return {
+        type,
+        message: readString(value.message) ?? readString(value.question) ?? readString(value.summary),
+      };
+    case "FINAL":
+      return {
+        type,
+        summary: readString(value.summary) ?? readString(value.message) ?? readString(value.answer),
+        success: typeof value.success === "boolean" ? value.success : true,
+      };
+    case "FAILED":
+      return {
+        type,
+        error: readString(value.error) ?? readString(value.message) ?? readString(value.summary),
+      };
+    default:
+      return { ...value, type };
   }
 }
 
@@ -177,4 +246,12 @@ function assertRequiredDecisionFields(value: unknown): void {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readRawString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }

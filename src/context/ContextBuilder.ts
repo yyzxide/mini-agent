@@ -1,9 +1,11 @@
 import { GitManager } from "../git/GitManager.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
+import { formatLongTermMemoryResults, LongTermMemoryStore } from "../memory/LongTermMemoryStore.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
+import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
 import { RepoScanner } from "./RepoScanner.js";
 import { truncateText } from "../utils/fs.js";
 import { formatRuntimeContext } from "./RuntimeContext.js";
@@ -17,12 +19,14 @@ export interface ContextBuilderOptions {
 export interface ContextSectionBudgets {
   task: number;
   memory: number;
+  longTermMemory: number;
   repoState: number;
   tools: number;
   runtime: number;
   git: number;
   repositoryStructure: number;
   projectDocs: number;
+  filePlacement: number;
   recentResults: number;
   diagnostics: number;
   diff: number;
@@ -46,11 +50,23 @@ export class ContextBuilder {
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
     const repoStateAnalyzer = new RepoStateAnalyzer({ repoPath: this.repoPath });
+    const filePlacementAdvisor = new FilePlacementAdvisor({ repoPath: this.repoPath });
 
     const sessionStore = new SessionStore({ repoPath: this.repoPath });
+    const longTermMemoryStore = new LongTermMemoryStore({ repoPath: this.repoPath });
 
-    const [repoState, isGitRepository, tree, readme, buildFiles, status, diff, sessionMemory] = await Promise.all([
-      repoStateAnalyzer.analyze().then(formatRepoState).catch((error: unknown) => `error: ${errorToText(error)}`),
+    const [
+      repoStateDetails,
+      isGitRepository,
+      tree,
+      readme,
+      buildFiles,
+      status,
+      diff,
+      sessionMemory,
+      longTermMemory,
+    ] = await Promise.all([
+      repoStateAnalyzer.analyze().catch((error: unknown) => ({ error: errorToText(error) })),
       scanner.isGitRepository().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
       scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
@@ -59,7 +75,18 @@ export class ContextBuilder {
       git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
       readSessionMemory(sessionStore, state.sessionId, { maxRecords: 80, maxChars: 12_000 })
         .catch((error: unknown) => `error: ${errorToText(error)}`),
+      longTermMemoryStore.search(state.userGoal, { limit: 5, sessionId: state.sessionId })
+        .then(formatLongTermMemoryResults)
+        .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
+    const repoState = hasErrorRecord(repoStateDetails)
+      ? `error: ${repoStateDetails.error}`
+      : formatRepoState(repoStateDetails);
+    const filePlacement = hasErrorRecord(repoStateDetails)
+      ? "error: repository state unavailable for file-placement advice"
+      : await filePlacementAdvisor.advise(state.userGoal, repoStateDetails)
+        .then(formatFilePlacementAdvice)
+        .catch((error: unknown) => `error: ${errorToText(error)}`);
 
     const snapshot = state.toSnapshot();
     const sections: ContextSection[] = [
@@ -73,6 +100,14 @@ export class ContextBuilder {
         ].join("\n\n"),
       },
       { title: "Conversation memory", budget: this.budgets.memory, content: sessionMemory },
+      {
+        title: "Long-term retrieved memory",
+        budget: this.budgets.longTermMemory,
+        content: [
+          "Relevant memories retrieved from previous local sessions. Treat them as hints; prefer current files, current tool output, and current user instructions when they conflict.",
+          longTermMemory,
+        ].join("\n\n"),
+      },
       { title: "Runtime context", budget: this.budgets.runtime, content: formatRuntimeContext() },
       { title: "Repository state summary", budget: this.budgets.repoState, content: repoState },
       { title: "Available tools", budget: this.budgets.tools, content: JSON.stringify(availableTools, null, 2) },
@@ -92,6 +127,11 @@ export class ContextBuilder {
           `README summary:\n${readme}`,
           `Build files:\n${buildFiles}`,
         ].join("\n\n"),
+      },
+      {
+        title: "New file placement guidance",
+        budget: this.budgets.filePlacement,
+        content: filePlacement,
       },
       {
         title: "Recent decisions and results",
@@ -130,16 +170,18 @@ interface ContextSection {
 function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
   return {
     task: Math.floor(maxChars * 0.08),
-    memory: Math.floor(maxChars * 0.10),
+    memory: Math.floor(maxChars * 0.09),
+    longTermMemory: Math.floor(maxChars * 0.08),
     repoState: Math.floor(maxChars * 0.08),
     tools: Math.floor(maxChars * 0.08),
     runtime: Math.floor(maxChars * 0.05),
     git: Math.floor(maxChars * 0.05),
-    repositoryStructure: Math.floor(maxChars * 0.11),
-    projectDocs: Math.floor(maxChars * 0.08),
-    recentResults: Math.floor(maxChars * 0.08),
+    repositoryStructure: Math.floor(maxChars * 0.09),
+    projectDocs: Math.floor(maxChars * 0.07),
+    filePlacement: Math.floor(maxChars * 0.07),
+    recentResults: Math.floor(maxChars * 0.07),
     diagnostics: Math.floor(maxChars * 0.07),
-    diff: Math.floor(maxChars * 0.10),
+    diff: Math.floor(maxChars * 0.09),
   };
 }
 
@@ -193,6 +235,10 @@ function formatBudgetedSectionContent(content: string, maxChars: number): string
 
 function errorToText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hasErrorRecord(value: unknown): value is { error: string } {
+  return typeof value === "object" && value !== null && "error" in value && typeof (value as { error?: unknown }).error === "string";
 }
 
 function summarizePatchFailures(state: AgentState): string {

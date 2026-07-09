@@ -209,6 +209,10 @@ function buildSearchQueries(standaloneQuestion: string, needsLiveData: boolean):
     additions.push("official news latest");
   }
 
+  if (isLikelyFinancialMarketQuestion(normalized)) {
+    additions.push("market close major indices change official finance");
+  }
+
   if (isLikelyAmbiguousChampionQuestion(normalized)) {
     additions.push("honours championships multiple games categories");
   }
@@ -253,6 +257,13 @@ function buildSourceFocusedQueries(standaloneQuestion: string, needsLiveData: bo
     queries.push(`${standaloneQuestion} official government source`);
   }
 
+  if (isLikelyFinancialMarketQuestion(standaloneQuestion)) {
+    queries.push(`${standaloneQuestion} 东方财富 新浪财经 上证指数 深证成指 创业板指 收盘`);
+    queries.push(`${standaloneQuestion} 上交所 深交所 指数 收盘 涨跌`);
+    queries.push(`site:finance.sina.com.cn ${standaloneQuestion} 上证指数 深证成指 创业板指`);
+    queries.push(`site:quote.eastmoney.com ${standaloneQuestion} A股 大盘 指数`);
+  }
+
   if (needsLiveData && queries.length === 0) {
     queries.push(`${standaloneQuestion} official latest update`);
   }
@@ -274,6 +285,10 @@ function buildSourceHints(standaloneQuestion: string, needsLiveData: boolean): s
 
   if (containsAnyText(lower, ["版本", "release", "version"])) {
     hints.push("official release notes", "project documentation");
+  }
+
+  if (isLikelyFinancialMarketQuestion(standaloneQuestion)) {
+    hints.push("official exchange site", "major finance quote page", "market close summary");
   }
 
   if (needsLiveData) {
@@ -300,6 +315,11 @@ function buildAnswerInstructions(
 
   if (containsAnyText(lower, ["世界杯", "world cup", "比分", "赛果", "成绩", "战绩", "score", "scores", "result", "results"])) {
     instructions.push("For sports results, keep competitions separate; do not mix friendlies, qualifiers, leagues, cups, or different tournaments unless the user asks for all competitions.");
+  }
+
+  if (isLikelyFinancialMarketQuestion(standaloneQuestion)) {
+    instructions.push("For financial market data, distinguish index level, point change, percentage change, trading date, and whether the figure is intraday or closing data.");
+    instructions.push("Do not give investment advice. If exact current close data is not verified by sources, say that clearly.");
   }
 
   if (isLikelyAmbiguousChampionQuestion(standaloneQuestion)) {
@@ -418,6 +438,37 @@ function isLikelyLiveOrCurrentQuestion(value: string): boolean {
     "scores",
     "price",
     "news",
+  ]);
+}
+
+function isLikelyFinancialMarketQuestion(value: string): boolean {
+  return containsAnyText(value.toLowerCase(), [
+    "股市",
+    "股票",
+    "a股",
+    "大盘",
+    "指数",
+    "上证",
+    "深证",
+    "创业板",
+    "沪深",
+    "收盘",
+    "开盘",
+    "涨跌",
+    "涨幅",
+    "跌幅",
+    "行情",
+    "证券",
+    "汇率",
+    "stock",
+    "stocks",
+    "stock market",
+    "market index",
+    "indices",
+    "index",
+    "market close",
+    "closing price",
+    "exchange rate",
   ]);
 }
 

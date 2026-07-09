@@ -9,7 +9,8 @@ import { AgentLoop } from "../../src/agent/AgentLoop.js";
 import type { AgentProgressEvent } from "../../src/agent/AgentLoop.js";
 import { CommandRunner } from "../../src/command/CommandRunner.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
-import type { LlmClient, LlmInput } from "../../src/llm/LlmClient.js";
+import type { LlmClient } from "../../src/llm/LlmClient.js";
+import { ScriptedLlmClient } from "../../src/eval/ScriptedLlmClient.js";
 import { PatchManager } from "../../src/patch/PatchManager.js";
 import { PermissionManager } from "../../src/permission/PermissionManager.js";
 import { EventStore } from "../../src/session/EventStore.js";
@@ -120,7 +121,7 @@ describe("AgentLoop", () => {
     const loop = createLoop({
       sessionStore,
       eventStore,
-      llmClient: new SequenceLlmClient([
+        llmClient: new ScriptedLlmClient([
         { type: "PLAN", message: "Run a failing test command." },
         {
           type: "RUN_COMMAND",
@@ -170,7 +171,7 @@ describe("AgentLoop", () => {
 
   it("requires explicit approval for shell-like structured commands", async () => {
     const loop = createLoop({
-      llmClient: new SequenceLlmClient([
+      llmClient: new ScriptedLlmClient([
         {
           type: "RUN_COMMAND",
           executable: "sh",
@@ -194,7 +195,7 @@ describe("AgentLoop", () => {
     const sessionStore = new SessionStore({ repoPath });
     const loop = createLoop({
       sessionStore,
-      llmClient: new SequenceLlmClient([
+      llmClient: new ScriptedLlmClient([
         { type: "TOOL_CALL", toolName: "not_a_tool", input: {} },
         { type: "FINAL", success: true, summary: "Recovered from bad tool call." },
       ]),
@@ -215,7 +216,7 @@ describe("AgentLoop", () => {
     const sessionStore = new SessionStore({ repoPath });
     const loop = createLoop({
       sessionStore,
-      llmClient: new SequenceLlmClient([
+      llmClient: new ScriptedLlmClient([
         { type: "TOOL_CALL", toolName: "read_file", input: { path: "demo.txt", maxLines: 999 } },
         { type: "FINAL", success: true, summary: "Recovered from bad tool input." },
       ]),
@@ -232,6 +233,88 @@ describe("AgentLoop", () => {
     expect(records.some((record) => JSON.stringify(record.payload).includes("Tool input validation failed"))).toBe(true);
   });
 
+  it("does not allow file-writing tasks to finish successfully without a patch", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "FINAL", success: true, summary: "Created src/answer.ts." },
+        {
+          type: "APPLY_PATCH",
+          description: "Create src/answer.ts",
+          patch: [
+            "diff --git a/src/answer.ts b/src/answer.ts",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/src/answer.ts",
+            "@@ -0,0 +1,3 @@",
+            "+export function answer(): number {",
+            "+  return 42;",
+            "+}",
+            "",
+          ].join("\n"),
+        },
+        { type: "FINAL", success: true, summary: "Created src/answer.ts." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "帮我写个 TypeScript 函数代码",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "src", "answer.ts"), "utf8")).resolves.toContain("answer");
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_REPOSITORY_CHANGE"))).toBe(true);
+  });
+
+  it("blocks redundant clarification when save-to-file follow-up already includes code", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "ASK_USER", message: "请提供要写入什么内容到哪个文件？" },
+        {
+          type: "APPLY_PATCH",
+          description: "Create src/median_finder.ts",
+          patch: [
+            "diff --git a/src/median_finder.ts b/src/median_finder.ts",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/src/median_finder.ts",
+            "@@ -0,0 +1,3 @@",
+            "+export class MedianFinder {",
+            "+  addNum(_num: number): void {}",
+            "+}",
+            "",
+          ].join("\n"),
+        },
+        { type: "FINAL", success: true, summary: "Created src/median_finder.ts." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: [
+        "请把上一轮已经生成的 TypeScript 代码真正写入仓库文件，而不是继续只在对话里展示。",
+        "需要落盘的代码如下：",
+        "```ts",
+        "export class MedianFinder {}",
+        "```",
+      ].join("\n"),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "src", "median_finder.ts"), "utf8")).resolves.toContain("MedianFinder");
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("REDUNDANT_FILE_WRITE_QUESTION"))).toBe(true);
+  });
+
   it("can use web_search for non-code research tasks", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       "<html><body>",
@@ -244,7 +327,7 @@ describe("AgentLoop", () => {
     const sessionStore = new SessionStore({ repoPath });
     const loop = createLoop({
       sessionStore,
-      llmClient: new SequenceLlmClient([
+      llmClient: new ScriptedLlmClient([
         { type: "PLAN", message: "Search the web for the user's research question." },
         { type: "TOOL_CALL", toolName: "web_search", input: { query: "current research topic", maxResults: 3 } },
         { type: "FINAL", success: true, summary: "Found a relevant public web result." },
@@ -268,7 +351,7 @@ describe("AgentLoop", () => {
     const eventStore = new EventStore({ repoPath });
     const loop = createLoop({
       eventStore,
-      llmClient: new SequenceLlmClient([
+      llmClient: new ScriptedLlmClient([
         { type: "TOOL_CALL", toolName: "missing_1", input: {} },
         { type: "TOOL_CALL", toolName: "missing_2", input: {} },
         { type: "TOOL_CALL", toolName: "missing_3", input: {} },
@@ -300,7 +383,7 @@ function createLoop(options: {
 
   return new AgentLoop({
     repoPath,
-    llmClient: options.llmClient ?? new SequenceLlmClient(scriptedDemoDecisions()),
+    llmClient: options.llmClient ?? new ScriptedLlmClient(scriptedDemoDecisions()),
     toolRegistry: createDefaultToolRegistry(),
     sessionStore,
     eventStore,
@@ -312,21 +395,6 @@ function createLoop(options: {
     contextBuilder: new ContextBuilder({ repoPath }),
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
   });
-}
-
-class SequenceLlmClient implements LlmClient {
-  private readonly decisions: AgentDecision[];
-
-  constructor(decisions: AgentDecision[]) {
-    this.decisions = decisions;
-  }
-
-  async chat(input: LlmInput): Promise<AgentDecision> {
-    return this.decisions[Math.min(input.state.step, this.decisions.length - 1)] ?? {
-      type: "FAILED",
-      error: "No decision configured",
-    };
-  }
 }
 
 function scriptedDemoDecisions(): AgentDecision[] {

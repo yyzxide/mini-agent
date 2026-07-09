@@ -51,6 +51,15 @@ export class SearchCodeTool implements Tool<SearchCodeInput, SearchCodeData> {
   readonly description = "Search repository code using ripgrep.";
   readonly inputSchema = SearchCodeInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "search" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  };
 
   async execute(input: SearchCodeInput, context: ToolContext): Promise<ToolResult<SearchCodeData>> {
     const absolutePath = resolveRepoPath(context.repoPath, input.path);

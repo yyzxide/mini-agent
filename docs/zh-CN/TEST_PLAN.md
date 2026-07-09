@@ -17,6 +17,18 @@
 - `fetch_url` 能读取公网文本内容，拒绝 localhost/内网目标，并限制输出。
 - `git_status` 和 `git_diff`。
 - `apply_patch` 权限、check、apply、失败返回。
+- tool manifest 输出 source、category 和能力标注。
+- MCP 风格 tool descriptor 输出 inputSchema、annotations 和 permission metadata。
+
+### 1.1.1 MCP Bridge
+
+覆盖：
+
+- 本地工具能导出 MCP 风格 descriptor。
+- `fetch_url`、`web_search` 等外部世界工具带 `openWorldHint`。
+- `apply_patch` 等修改型工具带 `destructiveHint`。
+- MCP server config schema 校验 command/url、args、enabled。
+- `mini-agent mcp tools` 能输出结构化 JSON。
 
 ### 1.2 CommandRunner
 
@@ -48,7 +60,7 @@
 - 追加 JSONL。
 - 读取 session。
 - 写入工具、命令、patch、diff、任务完成事件。
-- `/history`、`/events`、`/resume`、`/review`、`/compact` 等交互式 session 操作。
+- `/history`、`/events`、`/resume`、`/pause`、`/review`、`/compact` 等交互式 session 操作。
 
 ### 1.4.1 Runtime Log / Change Log
 
@@ -61,6 +73,21 @@
 - 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果；代码审查任务还要记录 review file、supplementalFiles、findings、rejectedFindings 和 verdict。
 - `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
+### 1.4.2 Long-term Memory / RAG
+
+覆盖：
+
+- 从 `TASK_SUMMARY` 和 `MEMORY_COMPACTION` 生成 `.mini-agent/memory/index.jsonl`。
+- 重复索引同一个 session 不产生重复 memory id。
+- 支持中英文关键词抽取。
+- 支持本地向量式相似度 + 关键词混合检索。
+- `MemoryQueryBuilder` 能识别代码任务、联网问题、运行错误和会话记忆问题。
+- `MemoryReranker` 能根据任务模式、同 session、时间新鲜度和实体命中调整排序。
+- `MemoryEvidenceSelector` 能限制单 session 结果过度集中，并标记证据选择原因。
+- `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
+- `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
+- 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
+
 ### 1.5 LLM
 
 覆盖：
@@ -70,6 +97,7 @@
 - baseUrl 拼接。
 - 超时配置。
 - 模型返回 decision 解析。
+- 常见 decision 形状漂移的容错，例如小写 type、`message`/`summary` 字段混用、`APPLY_PATCH` 漏写 description。
 - 配置缺失时给出清晰错误。
 
 测试中可以 stub `fetch`，避免依赖真实网络。
@@ -79,7 +107,8 @@
 覆盖：
 
 - 普通聊天和解释类问题进入 `DIRECT_ANSWER`。
-- 独立代码片段请求进入 `DIRECT_ANSWER`。
+- 明确声明“代码片段 / 不要改文件”的请求进入 `DIRECT_ANSWER`。
+- 默认的代码生成请求进入 `AGENT_LOOP`，并真正创建或修改仓库文件。
 - 需要最新外部资料的问题进入 `WEB_ANSWER`。
 - 仓库阅读、修改、测试、修复任务进入 `AGENT_LOOP`。
 - 英文关键词按词边界匹配，避免 `latest` 被误判成 `test`。
@@ -103,8 +132,57 @@
 - apply_patch -> git diff -> final。
 - run_command 成功。
 - run_command 失败后进入下一轮。
+- 写文件类任务如果没有成功 patch，不能直接 final 成功。
+- 已经有代码上下文的“写进去 / 保存到文件”追问，不能反问用户重复提供代码或文件路径。
 - 最大步数终止。
 - session/event 写入。
+
+### 1.8.1 Agent Harness / Eval
+
+覆盖：
+
+- scripted LLM 能按预设 `AgentDecision` 驱动 AgentLoop。
+- Harness 能创建临时 git 仓库、写入初始文件、执行 patch、读取 diff。
+- Harness 能校验成功状态、diff 内容和文件内容。
+- 后续真实场景可以沉淀成 scenario，不再完全依赖人工 CLI 试用。
+
+### 1.9 Diagnostics
+
+覆盖：
+
+- `npm/pnpm/yarn` 找不到 `package.json` 时识别为运行目录错误。
+- `command not found` 识别为命令不存在或 PATH 问题。
+- `Port ... already in use` / `EADDRINUSE` 识别为端口占用。
+- `ECONNREFUSED host:port` 识别为依赖服务未启动或地址错误。
+- `EACCES` / `Permission denied` 识别为权限不足。
+- 普通聊天文本不能误判为错误诊断。
+
+### 1.10 对话级回归集
+
+新增一套独立的 CLI regression suite，目标不是单纯增加覆盖率，而是固定住已经踩过的真实问题。当前至少覆盖：
+
+- 明确要求“代码片段 / 不要改文件”的请求，不能误入 `AGENT_LOOP`
+- “帮我写个 最长有效括号”这类实现型请求，应该真正落到文件
+- 先返回代码片段，再追问“写入一个文件里面”或“写进去”时，必须自动承接上一轮代码块并创建文件
+- 上一轮是代码落盘任务时，继续问“数据流的中位数呢”这类短算法追问，必须继续走 `AGENT_LOOP`
+- 用户问“你写入了嘛？”时，必须读取 session 中的 `FILE_CHANGE` 记录作答，不能让模型猜测
+- 用户贴出 `npm error enoent Could not read package.json`，且报错路径不在当前仓库时，必须诊断为运行目录错误，而不是说代码本身能跑
+- `葡萄牙呢` 这种短追问，必须结合上一轮会话补全为明确问题
+- “分析当前文件夹的项目”必须先读取真实仓库证据，再总结
+- 模型声称“已写入”但没有 patch 时，必须被质量闸门拦截并继续修复
+- 模型在已经有代码上下文时反问“写入什么内容到哪个文件”，必须被质量闸门拦截
+
+执行命令：
+
+```bash
+npm run test:regression
+```
+
+演示前快速验收：
+
+```bash
+npm run verify:regression
+```
 
 ## 2. 手工测试范围
 
@@ -191,6 +269,7 @@ mini-agent
 > /compact
 > /new
 > /sessions
+> /pause
 > /resume <sessionId>
 > /exit
 ```
@@ -198,7 +277,9 @@ mini-agent
 观察：
 
 - `/new` 后 session id 改变。
+- `/pause` 后当前 session 状态变为 `PAUSED`，并提示 resume 命令。
 - `/resume` 后当前 session 切到指定 id。
+- resume 后 session 状态切回 `ACTIVE`。
 - `/review` 能直接触发文件级代码审查。
 - `/summary` 能输出当前 session 的压缩摘要。
 - `/history` 能看到当前 session 的用户消息、助手消息、工具结果、任务总结。
@@ -208,6 +289,7 @@ mini-agent
 
 ```bash
 npm run build
+npm run test:regression
 npm test
 npm run verify
 git diff --check
@@ -224,6 +306,9 @@ git diff --check
 | URL 读取失控 | fetch_url 超时、大小、内网目标测试 |
 | patch 损坏 | PatchManager check 测试 |
 | session 丢失 | SessionStore/EventStore 测试 |
+| 长期记忆误检索 | LongTermMemoryStore 和 ContextBuilder 测试 |
+| MCP/tool 元数据漂移 | ToolRegistry 和 McpToolBridge 测试 |
+| 多步 Agent 场景不可回归 | AgentHarness 测试 |
 | 真实 API 不可用 | 配置错误提示和 fetch stub 测试 |
 
 ## 5. 当前不测

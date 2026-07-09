@@ -22,6 +22,7 @@ import { toJsonObject, toJsonValue } from "../utils/json.js";
 import type { AgentDecision } from "./AgentDecision.js";
 import { decisionToMessage } from "./AgentPlanner.js";
 import { AgentState } from "./AgentState.js";
+import { validateAgentDecisionGuardrails } from "./TaskGuardrails.js";
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 
 export interface AgentLoopOptions {
@@ -40,6 +41,7 @@ export interface AgentLoopOptions {
 
 export interface AgentRunInput {
   userGoal: string;
+  originalUserGoal?: string;
   sessionId?: string;
   maxSteps?: number;
   autoApprove?: boolean;
@@ -108,11 +110,12 @@ export class AgentLoop {
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const userGoal = input.userGoal.trim();
+    const originalUserGoal = input.originalUserGoal?.trim() || userGoal;
     if (userGoal.length === 0) {
       throw new Error("User goal cannot be empty");
     }
 
-    const sessionId = await this.ensureSession(userGoal, input.sessionId);
+    const sessionId = await this.ensureSession(originalUserGoal, input.sessionId);
     await this.emit({ type: "session", sessionId });
 
     const state = new AgentState({
@@ -122,7 +125,7 @@ export class AgentLoop {
       ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
     });
 
-    await this.recordUserMessage(state, userGoal);
+    await this.recordUserMessage(state, originalUserGoal);
     let consecutiveFailures = 0;
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
@@ -189,14 +192,30 @@ export class AgentLoop {
         return await this.executeCommandDecision(state, decision, input);
 
       case "ASK_USER":
-        return await this.executeAskUserDecision(state, decision.message, input);
+        return await this.guardDecisionThenContinue(state, decision)
+          ?? await this.executeAskUserDecision(state, decision.message, input);
 
       case "FINAL":
-        return { failed: false, result: await this.finish(state, decision.summary, decision.success, input) };
+        return await this.guardDecisionThenContinue(state, decision)
+          ?? { failed: false, result: await this.finish(state, decision.summary, decision.success, input) };
 
       case "FAILED":
         return { failed: true, result: await this.fail(state, decision.error, input) };
     }
+  }
+
+  private async guardDecisionThenContinue(
+    state: AgentState,
+    decision: AgentDecision,
+  ): Promise<StepOutcome | undefined> {
+    const violation = validateAgentDecisionGuardrails(state, decision);
+    if (!violation) {
+      return undefined;
+    }
+
+    state.setLastError(`${violation.code}: ${violation.message}`);
+    await this.recordError(state.sessionId, state.lastError);
+    return { failed: true };
   }
 
   private async executeToolDecision(
@@ -365,6 +384,7 @@ export class AgentLoop {
       payload: {
         summary,
         success,
+        mode: "AGENT_LOOP",
         finalDiff,
         steps: state.step,
       },
@@ -408,6 +428,7 @@ export class AgentLoop {
       payload: {
         summary: error,
         success: false,
+        mode: "AGENT_LOOP",
         finalDiff,
         steps: state.step,
       },

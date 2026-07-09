@@ -1,4 +1,6 @@
+import { hasHighConfidenceDiagnostic } from "../diagnostics/ErrorClassifier.js";
 import { extractLikelyReviewFilePath, looksLikeReviewableFilePath } from "../review/CodeReview.js";
+import { looksLikeFileWriteConfirmation, looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
 
 export type TaskIntent = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP";
 
@@ -91,27 +93,101 @@ const REPOSITORY_ACTION_KEYWORDS = [
   "test",
 ];
 
-const DIRECT_CODE_KEYWORDS = [
+const DIRECT_SNIPPET_KEYWORDS = [
   "代码片段",
   "示例代码",
   "写一段",
-  "写一个",
-  "写个",
-  "做个",
-  "帮我写个",
-  "给我一个",
-  "实现一个",
-  "leetcode",
-  "算法",
-  "两数之和",
-  "游戏代码",
-  "脚本",
-  "程序",
   "two sum",
   "snippet",
   "example code",
+  "sample code",
+];
+
+const DIRECT_SNIPPET_ONLY_SIGNALS = [
+  "不要改文件",
+  "不改文件",
+  "别改文件",
+  "只要代码片段",
+  "只要片段",
+  "只给我代码",
+  "snippet only",
+  "without editing files",
+  "do not edit files",
+];
+
+const CODE_GENERATION_ACTION_KEYWORDS = [
+  "写个",
+  "写一个",
+  "帮我写个",
+  "做个",
+  "做一个",
+  "实现一个",
+  "实现下",
+  "生成一个",
+  "创建一个",
+  "build a",
+  "create a",
   "write a",
   "implement a",
+];
+
+const CODE_GENERATION_TARGET_KEYWORDS = [
+  "代码",
+  "程序",
+  "游戏",
+  "页面",
+  "脚本",
+  "组件",
+  "服务",
+  "接口",
+  "工具",
+  "2048",
+  "c++",
+  "cpp",
+  "python",
+  "java",
+  "go",
+  "rust",
+  "html",
+  "css",
+  "javascript",
+  "typescript",
+  "node",
+  "react",
+  "vue",
+  "前端",
+  "后端",
+  "算法题",
+];
+
+const ALGORITHM_PROBLEM_KEYWORDS = [
+  "算法",
+  "题",
+  "括号",
+  "数组",
+  "链表",
+  "二叉树",
+  "字符串",
+  "回文",
+  "最长",
+  "中位数",
+  "数据流",
+  "堆",
+  "最短",
+  "子串",
+  "子序列",
+  "动态规划",
+  "贪心",
+  "滑动窗口",
+  "哈希",
+  "栈",
+  "队列",
+  "图",
+  "树",
+  "dfs",
+  "bfs",
+  "dp",
+  "leetcode",
 ];
 
 const QUESTION_KEYWORDS = [
@@ -235,6 +311,26 @@ const WEB_RESEARCH_KEYWORDS = [
   "世界杯",
   "大师赛",
   "比赛结果",
+  "股市",
+  "股票",
+  "a股",
+  "A股",
+  "大盘",
+  "指数",
+  "上证",
+  "深证",
+  "创业板",
+  "沪深",
+  "收盘",
+  "开盘",
+  "涨跌",
+  "涨幅",
+  "跌幅",
+  "行情",
+  "证券",
+  "金融市场",
+  "汇率",
+  "价格",
   "search the web",
   "web search",
   "look up",
@@ -250,6 +346,16 @@ const WEB_RESEARCH_KEYWORDS = [
   "standings",
   "champion",
   "world cup",
+  "stock",
+  "stocks",
+  "stock market",
+  "market index",
+  "indices",
+  "index",
+  "closing price",
+  "market close",
+  "exchange rate",
+  "price",
 ];
 
 const CODE_REVIEW_KEYWORDS = [
@@ -341,6 +447,34 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
+  if (looksLikeFileWriteConfirmation(userGoal)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task asks whether a previous file write actually happened, which should be answered from local session state.",
+    };
+  }
+
+  if (hasHighConfidenceDiagnostic({ text: userGoal, repoPath: "." })) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task includes a recognizable runtime error that should be diagnosed locally before asking the model.",
+    };
+  }
+
+  if (looksLikeWebCapabilityQuestion(normalized)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task asks about the CLI's web capability, which should be answered from local product knowledge.",
+    };
+  }
+
+  if (looksLikeSaveToFileFollowUp(userGoal)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task asks to save previously generated code into repository files.",
+    };
+  }
+
   if (looksLikeReviewableFilePath(userGoal.trim())) {
     return {
       intent: "CODE_REVIEW",
@@ -362,6 +496,20 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
+  if (looksLikeExplicitSnippetRequest(normalized)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task explicitly asks for a code snippet without repository edits.",
+    };
+  }
+
+  if (looksLikeStandaloneCodeGenerationTask(normalized, userGoal)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task looks like a request to implement code in repository files rather than only chat about code.",
+    };
+  }
+
   if (containsAny(normalized, REPOSITORY_KEYWORDS)) {
     return {
       intent: "AGENT_LOOP",
@@ -369,7 +517,7 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
-  if (containsAny(normalized, DIRECT_CODE_KEYWORDS)) {
+  if (containsAny(normalized, DIRECT_SNIPPET_KEYWORDS)) {
     return {
       intent: "DIRECT_ANSWER",
       reason: "Task looks like a standalone code snippet request.",
@@ -416,6 +564,46 @@ export function looksLikeRepositoryAnalysisTask(userGoal: string): boolean {
   return !containsAny(normalized, REPOSITORY_MUTATION_KEYWORDS);
 }
 
+export function shouldPreserveAgentLoopIntent(userGoal: string): boolean {
+  const normalized = normalizeTask(userGoal);
+  return looksLikeStandaloneCodeGenerationTask(normalized, userGoal)
+    || looksLikeCodeContinuationFollowUp(normalized)
+    || looksLikeSaveToFileFollowUp(userGoal)
+    || containsAny(normalized, REPOSITORY_ACTION_KEYWORDS)
+    || looksLikeRepositoryAnalysisTask(userGoal);
+}
+
+export function looksLikeCodeContinuationFollowUp(userGoal: string): boolean {
+  const normalized = normalizeTask(userGoal);
+  if (normalized.length === 0 || normalized.startsWith("/")) {
+    return false;
+  }
+
+  return containsAny(normalized, ALGORITHM_PROBLEM_KEYWORDS)
+    || containsAny(normalized, CODE_GENERATION_TARGET_KEYWORDS);
+}
+
+export function looksLikeWebCapabilityQuestion(normalized: string): boolean {
+  const compact = normalized.replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】]/g, "");
+  return [
+    "你不能联网吗",
+    "你能联网吗",
+    "你可以联网吗",
+    "能联网吗",
+    "可以联网吗",
+    "有没有联网能力",
+    "有联网能力吗",
+    "不能联网吗",
+    "不能上网吗",
+    "能上网吗",
+    "可以上网吗",
+    "能访问网页吗",
+    "可以访问网页吗",
+  ].some((phrase) => compact.includes(phrase))
+    || /\b(can|could)\s+you\s+(access\s+the\s+internet|browse|search\s+the\s+web)\b/i.test(normalized)
+    || /\bdo\s+you\s+have\s+(web|internet|browsing)\s+(access|capability)\b/i.test(normalized);
+}
+
 function looksLikeShortPlainChat(normalized: string, userGoal: string): boolean {
   const trimmed = userGoal.trim();
   if (!trimmed || trimmed.startsWith("/")) {
@@ -436,6 +624,38 @@ function looksLikeShortPlainChat(normalized: string, userGoal: string): boolean 
   }
 
   return tokens.length <= 3 && trimmed.length <= 32;
+}
+
+function looksLikeStandaloneCodeGenerationTask(normalized: string, userGoal: string): boolean {
+  const trimmed = userGoal.trim();
+  if (!trimmed || trimmed.startsWith("/")) {
+    return false;
+  }
+
+  if (containsAny(normalized, DIRECT_SNIPPET_KEYWORDS)) {
+    return false;
+  }
+
+  const hasAction = containsAny(normalized, CODE_GENERATION_ACTION_KEYWORDS);
+  if (!hasAction) {
+    return false;
+  }
+
+  const hasTarget = containsAny(normalized, CODE_GENERATION_TARGET_KEYWORDS)
+    || containsAny(normalized, ALGORITHM_PROBLEM_KEYWORDS)
+    || /\b(c\+\+|cpp|python|java|go|rust|html|css|javascript|typescript|node|react|vue)\b/i.test(userGoal)
+    || /\.(ts|js|jsx|tsx|java|go|py|cpp|c|cc|html|css|sh)\b/i.test(userGoal);
+
+  return hasTarget;
+}
+
+function looksLikeExplicitSnippetRequest(normalized: string): boolean {
+  if (containsAny(normalized, DIRECT_SNIPPET_ONLY_SIGNALS)) {
+    return true;
+  }
+
+  return containsAny(normalized, DIRECT_SNIPPET_KEYWORDS)
+    && !containsAny(normalized, REPOSITORY_MUTATION_KEYWORDS);
 }
 
 function normalizeTask(value: string): string {

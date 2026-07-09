@@ -127,6 +127,48 @@ describe("ToolRegistry", () => {
       permissionLevel: "REVIEW",
     }));
   });
+
+  it("exposes a tool manifest with capability annotations", () => {
+    const registry = createDefaultToolRegistry();
+
+    expect(registry.listManifest()).toContainEqual(expect.objectContaining({
+      name: "web_search",
+      source: "local",
+      category: "web",
+      annotations: expect.objectContaining({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: true,
+      }),
+    }));
+    expect(registry.listManifest()).toContainEqual(expect.objectContaining({
+      name: "apply_patch",
+      category: "patch",
+      annotations: expect.objectContaining({
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+      }),
+    }));
+  });
+
+  it("exports local tools as MCP-style descriptors", () => {
+    const registry = createDefaultToolRegistry();
+    const descriptors = registry.listMcpToolDescriptors();
+
+    expect(descriptors).toContainEqual(expect.objectContaining({
+      name: "read_file",
+      inputSchema: expect.objectContaining({ type: "object" }),
+      annotations: expect.objectContaining({
+        readOnlyHint: true,
+        destructiveHint: false,
+      }),
+      metadata: expect.objectContaining({
+        source: "local",
+        permissionLevel: "SAFE",
+      }),
+    }));
+  });
 });
 
 describe("read-only repository tools", () => {

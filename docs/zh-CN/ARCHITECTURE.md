@@ -32,6 +32,8 @@ CLI
 8. 命令失败时把日志放回上下文。
 9. 达到 final 或最大步数后输出总结和 diff。
 
+如果任务是“写个 demo / 写个页面 / 写个游戏 / 写个某语言示例”，当前版本默认也会进入 `AGENT_LOOP`，并通过一段本地生成的“新文件放置建议”告诉模型优先把新文件落到哪里，例如 `src/`、`public/`、`src/main/java/`、`tests/` 或仓库根目录。
+
 ## 3. 目录职责
 
 ```text
@@ -44,8 +46,12 @@ src/command          命令执行、超时、输出截断
 src/git              git status/diff/commit 辅助能力
 src/permission       权限级别和危险命令拦截
 src/session          JSONL session/event 存储
+src/memory           本地长期记忆索引、关键词和向量式检索
+src/mcp              MCP 风格工具描述、外部工具配置模型和本地工具桥接
+src/eval             Agent 评测 harness、脚本化 LLM 客户端
 src/llm              LLM 接口和 OpenAI-compatible 客户端
 src/web              联网问题规划、追问改写和搜索源策略
+src/diagnostics      常见运行错误分类和本地诊断
 src/config           本地配置文件读取和脱敏
 src/utils            路径安全、错误处理、运行日志
 tests                自动化测试
@@ -55,8 +61,12 @@ tests                自动化测试
 
 `TaskRouter` 在进入 AgentLoop 之前先做轻量分流：
 
-- 普通问答和独立代码片段走 `DIRECT_ANSWER`，只输出答案，不改仓库。
-- 需要最新资料、新闻、版本、赛事结果等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
+- 普通问答和明确只要片段的请求走 `DIRECT_ANSWER`，只输出答案，不改仓库。
+- 默认的“写代码 / 实现功能 / 做个 demo / 写个游戏”会走 `AGENT_LOOP`，优先把结果落成仓库文件，而不是只在聊天里贴代码。
+- 如果当前输入本身很短，但语义上是在承接上一轮代码结果，例如“写入一个文件里面”“写进去”“保存一下”“把刚才那个保存成文件”，CLI 会先从当前 session 中提取最近一段代码块，重写成明确的写文件任务，再进入 `AGENT_LOOP`。
+- 如果上一轮是仓库编辑任务，下一轮是“数据流的中位数呢”这类短代码追问，CLI 会保留 `AGENT_LOOP`，避免把连续实现需求误判成普通聊天。
+- 如果用户问“你写入了嘛？”，CLI 不会把这个问题交给模型猜，而是直接检查 session 中上一轮请求之后是否存在 `FILE_CHANGE` 记录。
+- 需要最新资料、新闻、版本、赛事结果、收盘行情、汇率、市场指数等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
 - 文件级 bug 检查和代码审查走 `CODE_REVIEW`，先读取目标文件，再额外加载少量由相对 import、require、`#include` 推导出来的相关文件作为补充上下文，再让模型返回结构化 findings，先由本地代码校验 `codeQuote` 是否真的落在主文件对应行附近，再做一轮 review 复核，进一步过滤“引用代码是真的，但结论过度武断”的 finding。
 - 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
 - 对于“分析当前项目”“总结当前仓库”这类仓库分析请求，CLI 虽然仍归在 `AGENT_LOOP` 大类下，但会先执行一条本地强制取证路径：列出目录、读取 README / 构建文件、读取代表性源码文件；如果没有读到源码文件，就拒绝直接总结。这样能避免模型只看目录树摘要就给出看似正确、实则不够扎实的概述。
@@ -76,9 +86,15 @@ tests                自动化测试
 
 对于 `葡萄牙呢`、`那这个呢` 这类很短的追问，CLI 还会先做一层本地 follow-up 重写：如果上一轮用户问题已经明确了省略掉的谓语或范围，例如“西班牙是强队吗”，那么短追问会先被补成“葡萄牙是强队吗”，再继续走路由和回答流程。
 
+仓库任务也有类似机制，但处理的是“代码产物承接”而不是问句补全。比如上一轮是“给我一个 Python 代码片段”，下一轮是“写入一个文件里面”或“写进去”，本地 `TaskFollowUp` 会从 session 记录中提取最近的代码块、保留原始需求、丢掉解释性文字，再把它拼成一个明确的落盘任务，避免 Agent 反过来再问用户“要写什么、写到哪里”。
+
+写入确认问题也有本地兜底。`你写入了嘛？` 会读取当前 session 的 JSONL 记录，查找上一轮用户请求之后是否出现 `FILE_CHANGE`。如果没有，CLI 会明确说“没有查到上一轮请求对应的新文件写入记录”，并最多补充最近一次历史文件变更，防止模型把旧文件变更误说成刚才已经写入。
+
 对于 EDG、T1、Apple 这类可能跨游戏、跨产品或跨领域的实体，如果用户没有指定领域，规划器不能默认选择一个方向。它会生成更宽的 query，并要求最终回答按领域列出主要可能，或提示用户补充范围。例如“EDG 哪一年夺冠了”应区分《英雄联盟》S11 2021 年和《无畏契约》Valorant Champions 2024 年，而不是只回答其中一个。
 
 对于实时比分、版本发布、政策新闻等强时效问题，fallback 策略会自动追加 source-focused query。例如赛事比分会优先尝试官方赛事站、比分页和赛程结果页；版本问题会追加官方 release notes、changelog 和 GitHub releases。
+
+对于股市、汇率和大盘指数这类金融行情问题，fallback 策略会补充东方财富、新浪财经、交易所和指数关键词，并要求回答区分指数点位、涨跌点数、涨跌幅、交易日期以及是否为收盘数据；如果来源无法核验精确行情，必须明确说明不确定性，不能给投资建议。
 
 当前联网工具是受控公网搜索和页面抓取，不是实时比分或商业搜索 API。遇到动态比分页、反爬页面或 JS 渲染页面时，工具可能只能拿到摘要或拿不到结构化数据。此时回答必须说明“无法核验实时比分”，不能编造结果。
 
@@ -93,6 +109,53 @@ Agent 每轮从模型获得一个结构化决策：
 
 这种设计把“模型想做什么”和“程序怎么执行”分开，方便做权限控制、日志记录和测试。
 
+## 4.1 决策质量闸门
+
+真实模型会出现两类典型问题：一类是 JSON 形状轻微漂移，例如 `apply_patch` 写成小写、`description` 漏掉、把 `summary` 写成 `message`；另一类是语义上撒谎，例如没有真正写文件却说“已创建”，或者 session 中已经有上一轮代码却反问“要写什么内容”。
+
+当前版本用两层机制兜底：
+
+1. `DecisionParser` 先对常见字段漂移做规范化，再交给 zod 校验。它只宽容低风险形状问题，不会补造核心内容。例如 patch 文本缺失仍然失败，未知 decision type 仍然失败。
+2. `TaskGuardrails` 在 `AgentLoop` 执行关键 decision 前做后置条件校验。对于“写代码 / 保存到文件 / 创建文件 / 实现功能”这类仓库写入任务，如果没有成功 `APPLY_PATCH`，模型不能直接 `FINAL success`；如果已经有足够代码上下文，也不能再 `ASK_USER` 要用户重复提供内容或文件名。
+
+如果质量闸门拦截了 decision，它不会立即把任务判死，而是把错误写入 session 的 `ERROR` 和下一轮上下文，让模型根据明确错误继续修正。只有连续失败或重复同一错误超过阈值时，AgentLoop 才会失败退出。
+
+这层设计的原则是：模型可以提出计划和补丁，但“是否真的完成”必须由本地状态、工具结果和 session 记录判断，而不是相信模型一句总结。
+
+## 4.2 运行错误诊断器
+
+用户经常会把终端报错直接贴进对话。如果所有报错都交给模型自由解释，模型容易忽略当前仓库路径、命令执行目录、端口状态等本地事实。
+
+当前版本新增 `ErrorClassifier`，把常见运行错误先归类成结构化诊断结果：
+
+- `WRONG_WORKING_DIRECTORY`：例如 `npm error enoent Could not read package.json`，且报错路径指向当前仓库外部。
+- `COMMAND_NOT_FOUND`：例如 `mini-agent: command not found`。
+- `PORT_IN_USE`：例如 `Port 8080 was already in use` 或 `EADDRINUSE`。
+- `CONNECTION_REFUSED`：例如 `ECONNREFUSED 127.0.0.1:3308`。
+- `PERMISSION_DENIED`：例如 `EACCES` 或 `Permission denied`。
+
+`TaskRouter` 只根据“是否存在高置信诊断”把任务分到 `DIRECT_ANSWER`；真正的诊断渲染在 CLI 中完成。这样以后新增错误类型时，只需要扩展 `src/diagnostics/ErrorClassifier.ts` 和对应测试，不需要继续在 Router、CLI、Prompt 里散落一堆特殊判断。
+
+诊断结果包含 `category`、`confidence`、`title`、`explanation`、`evidence`、`suggestedCommands` 和 `metadata`。模型后续如果要参与修复，也应该基于这个结构化诊断，而不是直接猜测错误原因。
+
+## 4.5 新文件放置建议
+
+为了减少模型在“用户没给目标路径”时乱猜文件位置，`ContextBuilder` 现在会额外注入一段 `New file placement guidance`。这段内容由 `FilePlacementAdvisor` 根据仓库真实结构生成，例如：
+
+- 是否存在 `src/`、`app/`、`public/`、`static/`、`scripts/`
+- 是否是 Maven / Gradle / Go / Node.js 项目
+- 当前主要语言分布
+- 当前任务更像源码、测试、脚本还是独立浏览器 demo
+
+然后给出 1 到 4 个建议目标路径，例如：
+
+- `src/median_finder.ts`
+- `public/game_2048.html`
+- `src/main/java/MedianFinder.java`
+- `tests/median_finder.test.ts`
+
+这样模型即便不知道当前仓库的惯例，也会优先沿着本地工程结构来创建新文件。
+
 ## 5. 工具系统
 
 每个工具实现统一接口：
@@ -103,6 +166,16 @@ interface Tool<TInput, TResult> {
   description: string;
   inputSchema: z.ZodSchema<TInput>;
   permissionLevel: PermissionLevel;
+  metadata?: {
+    source?: "local" | "mcp";
+    category?: "filesystem" | "search" | "git" | "patch" | "command" | "web" | "external";
+    annotations?: {
+      readOnlyHint?: boolean;
+      destructiveHint?: boolean;
+      idempotentHint?: boolean;
+      openWorldHint?: boolean;
+    };
+  };
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TResult>>;
 }
 ```
@@ -115,6 +188,17 @@ interface Tool<TInput, TResult> {
 - 包装执行异常。
 - 返回结构化 `ToolResult`。
 - 导出工具 spec 给 LLM prompt。
+- 导出带能力标注的 tool manifest。
+- 导出 MCP 风格 tool descriptor，供后续外部工具协议接入。
+
+工具 metadata 中的 `annotations` 用于描述工具边界：
+
+- `readOnlyHint`：是否只读。
+- `destructiveHint`：是否可能修改本地状态。
+- `idempotentHint`：重复调用是否相对安全。
+- `openWorldHint`：是否访问公网或外部世界。
+
+这层信息会进入 LLM tool spec，也可以通过 `mini-agent tool manifest` 或 `mini-agent mcp tools` 查看。它的作用是让模型、CLI、未来 UI 和外部工具协议都能理解工具风险，而不是只靠工具名字猜。
 
 目前工具：
 
@@ -126,6 +210,8 @@ interface Tool<TInput, TResult> {
 - `web_search`
 - `fetch_url`
 - `apply_patch`
+
+当前的 MCP 相关能力是“桥接层”，不是完整 MCP runtime：本地工具可以导出 MCP 风格 descriptor，MCP server 配置也有 schema 校验；后续要真正连接第三方 MCP server，需要再实现 stdio/SSE client、工具发现、权限映射和调用转发。这个边界在代码里已经通过 `src/mcp` 和 tool metadata 预留。
 
 ## 6. 路径安全
 
@@ -156,6 +242,8 @@ interface Tool<TInput, TResult> {
 - HTML 会做简单文本抽取，避免把脚本和样式塞进上下文。
 
 当前 `web_search` 默认先尝试 DuckDuckGo HTML 结果页做轻量解析；如果 HTML 结果为空或质量不够，再降级到 DuckDuckGo Lite。CLI 在抓取来源前还会结合域名可信度、query 词项覆盖、官方/发布页特征和域名去重做一轮排序，尽量优先抓取更像官方说明、release notes、比赛结果页的来源，避免前三条都落在同一站点上。后续如果需要更稳定的生产效果，可以继续接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
+
+“你不能联网吗？”这类能力询问不应该触发网页搜索。CLI 会在本地直接回答：当前项目有受控、按需的联网工具，但不是浏览器式常驻联网，也没有手动联网按钮。如果 `WEB_ANSWER` 已经执行了 `web_search` / `fetch_url`，而模型最终回答却否认联网能力或编造“联网开关”，本地会把该回答判为无效，并要求模型基于已有工具证据重写；重写仍失败时，会返回一段本地纠偏说明。
 
 ## 7.5 仓库状态分析
 
@@ -218,6 +306,7 @@ patch 由 `PatchManager` 管理：
   sessions/<sessionId>.jsonl
   events/<sessionId>.jsonl
   logs/YYYY-MM-DD.jsonl
+  memory/index.jsonl
 ```
 
 Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，是因为：
@@ -233,7 +322,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用、CLI 异常，以及 `CODE_REVIEW` 的关键阶段，例如 review target 解析、主文件加载、补充文件加载、grounding 和 verification。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
 - `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。对于 `CODE_REVIEW`，还会额外记录 review file、loaded lines、supplemental files、findings 数量、rejected 数量和最终 verdict。它适合做 review、demo 复盘和面试材料整理。
 
-交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session，`/exit` 会结束当前 session。`mini-agent resume <sessionId>` 会重新打开指定 session，并继续把该 session 的最近记录作为上下文。
+交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session。`/pause` 会把当前 session 标记为 `PAUSED` 并退出，适合临时离开；`/exit` 会把当前 session 标记为 `FINISHED`，表示这轮会话已经结束。`mini-agent resume <sessionId>` 会重新打开指定 session，把状态切回 `ACTIVE`，并继续把该 session 的最近记录作为上下文。
 
 交互式 CLI 也支持 `/resume <sessionId>` 在当前进程中切换历史 session，支持 `/history` 查看当前 session 记录，支持 `/events` 查看事件时间线，支持 `/logs` 和 `/changes` 查看运行日志和任务变更日志。
 
@@ -241,11 +330,28 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 - 交互式 `mini-agent` 内部，依赖 Node `readline` 的 completer，为 `/status`、`/repo`、`/review` 这类 slash 命令提供 `Tab` 补全。
 
-`SessionMemory` 会把最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
+`SessionMemory` 会把当前 session 最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
 
-`/compact` 当前是第一版本地压缩：它把最近 session 记录压成一条 `MEMORY_COMPACTION` 写回 session，避免长会话完全依赖原始消息堆积。它还不是向量数据库或长程 RAG，后续可以升级为“LLM 摘要 + 关键词索引 + 文件级检索”的混合记忆。
+长期记忆由 `LongTermMemoryStore` 负责。它会读取 session 里的 `TASK_SUMMARY` 和 `MEMORY_COMPACTION` 记录，生成 `.mini-agent/memory/index.jsonl`。每条长期记忆包含：
 
-当前这层记忆是 transcript memory，不是完整 RAG。它解决同一会话连续性；如果要跨仓库、跨天、跨长文档检索，需要后续再加索引、摘要和向量/关键词检索。
+- `sessionId`：来源会话。
+- `source`：来自任务总结还是压缩记忆。
+- `title`：通常取最近一次用户请求。
+- `text`：可检索摘要正文。
+- `keywords`：中英文混合关键词。
+- `vector`：本地确定性向量表示。
+- `metadata`：模式、成功状态、证据文件数量等可选字段。
+
+长期记忆检索现在拆成四层：
+
+1. `MemoryQueryBuilder`：把用户问题转换为检索 query，识别意图、实体、关键词、偏好的回答模式、时间敏感度和证据预算。
+2. `MemoryRetriever`：定义统一检索接口，当前实现是 JSONL 本地索引；后续可替换为 SQLite FTS、LanceDB、Qdrant 或 pgvector。
+3. `MemoryReranker`：对召回候选做二次排序，综合基础相似度、任务模式匹配、同 session 加权、时间新鲜度和实体命中。
+4. `MemoryEvidenceSelector`：从重排结果里选择最终证据，限制单个 session 过度占用结果，给每条证据附加选择原因。
+
+这个设计不依赖外部向量库，适合本地 MVP；后续如果要升级成生产级 RAG，可以把本地确定性向量替换成真实 embedding，把 JSONL 存储替换成向量数据库，同时保留 query building、rerank 和 evidence selection 的上层逻辑。
+
+每次任务结束后，CLI 会自动索引当前 session；`/compact` 写入压缩记忆后也会同步索引。`ContextBuilder` 会用当前用户任务检索长期记忆，并把结果注入 `Long-term retrieved memory` 段落。模型必须把它当成历史线索，而不是当前事实；当长期记忆与当前文件、当前工具输出或当前用户指令冲突时，后者优先。
 
 ## 10.5 CLI 诊断和常用 slash 命令
 
@@ -254,6 +360,9 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `mini-agent doctor`：检查 Node、git、rg、pnpm、模型配置、仓库状态、session/log/change-log 状态。
 - `mini-agent logs`：查看最近运行日志。
 - `mini-agent changes`：查看最近任务变更日志。
+- `mini-agent memory index [sessionId]`：索引一个 session；不传 sessionId 时索引全部本地 session。
+- `mini-agent memory search <query>`：检索本地长期记忆。
+- `mini-agent memory list`：列出最近写入的长期记忆。
 
 交互式 slash 命令：
 
@@ -261,6 +370,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `/new`：开启新会话。
 - `/review <file>`：直接对单个仓库文件做代码审查。
 - `/resume <sessionId>`：切换历史会话。
+- `/pause`：暂停当前会话并退出，后续可 resume。
 - `/session`：查看当前 session 元信息。
 - `/summary`：查看当前 session 的压缩摘要，不写入记录。
 - `/sessions`：列出 session，并显示最近消息/摘要提示。
@@ -269,6 +379,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `/logs [n]`：查看最近运行日志。
 - `/changes [n]`：查看最近任务变更日志。
 - `/compact`：写入一条本地压缩记忆。
+- `/memory <query>`：检索本地长期记忆；不传 query 时列出最近记忆。
 - `/status`：查看当前 session 状态，包括最近模式、最近摘要和已记录的 LLM token 用量。
 - `/repo`：查看仓库状态摘要。
 - `/diff`：查看当前 diff。
@@ -276,6 +387,15 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 另外，非交互模式也支持 `mini-agent session summary <sessionId>`，用于把某个历史会话快速压缩成可阅读摘要；如果传 `--write`，还会把摘要写回 `MEMORY_COMPACTION` 记录。`mini-agent session status <sessionId>` 则会输出该会话的 JSON 状态，包括本地累计 token 使用量；剩余上下文窗口通常无法精确获得，因为大多数 OpenAI-compatible API 不返回这个值。
 - `/clear`：清屏。
 - `/exit`：结束当前 session 并退出。
+
+## 10.6 Agent Harness 和评测
+
+真实 API 调用存在不稳定性，不能把所有质量保障都押在人工试用上。当前项目新增 `src/eval`：
+
+- `ScriptedLlmClient`：用一组预设 `AgentDecision` 模拟模型输出，记录每次调用输入。
+- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop、执行脚本化决策，并检查最终 diff 和文件内容。
+
+Harness 解决的是“能不能把一个真实用户场景变成可重复测试”的问题。例如“修改一个文件、查看 diff、最终成功”可以变成一条 scenario，而不是每次都手动打开 CLI 测。后续可以继续扩展成 YAML/JSON 场景集、真实模型抽样评测和回放工具。
 
 ## 11. LLM 接入
 

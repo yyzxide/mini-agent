@@ -1,4 +1,4 @@
-export type SessionStatus = "ACTIVE" | "FINISHED" | "FAILED";
+export type SessionStatus = "ACTIVE" | "PAUSED" | "FINISHED" | "FAILED";
 
 export type SessionRecordType =
   | "USER_MESSAGE"
@@ -17,6 +17,7 @@ export type SessionRecordType =
 export type EventType =
   | "SESSION_CREATED"
   | "SESSION_RESUMED"
+  | "SESSION_PAUSED"
   | "SESSION_COMPACTED"
   | "USER_MESSAGE"
   | "ASSISTANT_MESSAGE"

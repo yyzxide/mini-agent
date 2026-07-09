@@ -6,6 +6,13 @@ export interface ToolSpec {
   description: string;
   inputSchema: unknown;
   permissionLevel: string;
+  source?: "local" | "mcp";
+  annotations?: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  };
 }
 
 export interface LlmInput {

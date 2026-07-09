@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { ToolSpec } from "../llm/LlmClient.js";
+import type { McpToolDescriptor } from "../mcp/McpTypes.js";
+import { describeZodInputSchema, resolveToolAnnotations, toMcpToolDescriptor } from "../mcp/McpToolBridge.js";
 import {
   errorToCode,
   errorToDetails,
@@ -24,6 +26,17 @@ export interface ToolSummary {
   name: string;
   description: string;
   permissionLevel: string;
+}
+
+export interface ToolManifestEntry extends ToolSummary {
+  source: "local" | "mcp";
+  category?: string;
+  annotations: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  };
 }
 
 export class ToolRegistry {
@@ -56,9 +69,30 @@ export class ToolRegistry {
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
-        inputSchema: describeInputSchema(tool.inputSchema),
+        inputSchema: describeZodInputSchema(tool.inputSchema),
         permissionLevel: tool.permissionLevel,
+        source: tool.metadata?.source ?? "local",
+        annotations: resolveToolAnnotations(tool),
       }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  listManifest(): ToolManifestEntry[] {
+    return Array.from(this.tools.values())
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        permissionLevel: tool.permissionLevel,
+        source: tool.metadata?.source ?? "local",
+        ...(tool.metadata?.category ? { category: tool.metadata.category } : {}),
+        annotations: resolveToolAnnotations(tool),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  listMcpToolDescriptors(): McpToolDescriptor[] {
+    return Array.from(this.tools.values())
+      .map((tool) => toMcpToolDescriptor(tool, describeZodInputSchema(tool.inputSchema)))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
@@ -160,16 +194,6 @@ export class ToolRegistry {
     } catch (error) {
       return toolFailure(errorToCode(error, "EVENT_WRITE_FAILED"), errorToMessage(error), errorToDetails(error));
     }
-  }
-}
-
-function describeInputSchema(schema: z.ZodType<unknown>): unknown {
-  try {
-    return z.toJSONSchema(schema);
-  } catch {
-    return {
-      type: schema.constructor.name,
-    };
   }
 }
 

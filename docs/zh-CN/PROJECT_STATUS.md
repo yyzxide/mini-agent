@@ -18,17 +18,17 @@
 
 ## 100 分制评分
 
-### 结论分数：78 / 100
+### 结论分数：86 / 100
 
 | 维度 | 分值 | 当前评分 | 说明 |
 | --- | --- | --- | --- |
-| CLI 可用性 | 15 | 13 | 交互模式、`run`、`resume`、`sessions`、`review`、`summary` 已具备。 |
-| 工具系统 | 15 | 13 | 本地读写、搜索、patch、命令、git、联网检索链路已打通。 |
-| Session 与日志 | 15 | 13 | 有 JSONL session/event、本地 memory compaction、runtime log、change log。 |
-| Agent Loop 设计 | 15 | 11 | 已有路由、循环、补丁、命令、失败反馈，但策略仍偏启发式。 |
-| 问答与上下文体验 | 15 | 10 | 已支持 direct/web/review/agent 四模式，但追问理解和事实可靠性仍有限。 |
+| CLI 可用性 | 15 | 14 | 交互模式、`run`、`resume`、`sessions`、`review`、`summary` 已具备，代码生成默认落文件体验也更像真正的代码助手。 |
+| 工具系统 | 15 | 14 | 本地读写、搜索、patch、命令、git、联网检索链路已打通，并补充 tool manifest、能力标注和 MCP 风格 descriptor。 |
+| Session、日志与记忆 | 15 | 14 | 有 JSONL session/event、本地 memory compaction、长期记忆索引、检索重排、runtime log、change log。 |
+| Agent Loop 设计 | 15 | 11 | 已有路由、循环、补丁、命令、失败反馈和决策质量闸门，但策略仍偏启发式。 |
+| 问答与上下文体验 | 15 | 11 | 已支持 direct/web/review/agent 四模式，且代码生成默认落文件；但追问理解和事实可靠性仍有限。 |
 | 代码结构 | 10 | 6 | 核心能力齐，但 `src/cli/index.ts` 过大，职责过于集中。 |
-| 测试与可回归性 | 10 | 8 | 162 个测试已通过，覆盖核心链路，但端到端场景还可以继续补。 |
+| 测试与可回归性 | 10 | 9 | 已有单元/集成/回归测试，并新增 Agent Harness 支持脚本化端到端场景。 |
 | 产品化程度 | 5 | 2 | 缺少更强的评测体系、配置 profile、插件化、TUI/编辑器集成。 |
 
 ## 为什么说它已经“合格”
@@ -37,8 +37,9 @@
 
 - 有**任务路由**，不是所有输入都硬塞进代码编辑循环。
 - 有**工具系统**，并且是结构化参数校验，不是随手拼命令。
+- 有**工具能力标注和 MCP 风格 descriptor**，开始具备外部工具协议扩展能力。
 - 有**权限边界**，补丁和命令执行不是裸奔。
-- 有**会话记忆**，不是每次都完全失忆。
+- 有**短期会话记忆和本地长期记忆检索**，不是每次都完全失忆。
 - 有**本地审计记录**，出了问题能回放。
 - 有**代码审查模式**，说明项目开始从“只会改代码”往“会分析代码”走。
 - 有**联网资料模式**，说明它不是只能在 repo 里打转。
@@ -65,13 +66,17 @@
 
 - session transcript
 - memory compaction
+- `.mini-agent/memory/index.jsonl` 长期记忆索引
+- 关键词 + 本地向量式混合检索
+- query builder / retriever / reranker / evidence selector 分层
 - readme / tree / diff / recent results 注入
 
 但还没有做到更成熟的上下文治理，例如：
 
 - 按任务阶段动态裁剪上下文
-- 区分长期记忆 / 短期记忆 / 工具证据
-- 基于相关性选择历史片段
+- 更细地区分长期记忆 / 短期记忆 / 工具证据的优先级
+- 使用真实 embedding 和向量数据库替换本地向量表示
+- 对长期记忆做过期、冲突、置信度管理
 
 ### 3. 联网能力还不够强
 
@@ -124,9 +129,10 @@
 
 1. `TaskRouter` 仍是规则驱动，泛化能力一般。
 2. `WebQuestionPlanner` 和联网回答仍会受到数据源质量限制。
-3. 缺少真正的检索增强层，不算严格意义上的 RAG。
-4. 缺少系统化 eval 数据集，很多体验问题只能靠人工试。
-5. CLI 主文件过重，后续继续堆功能会越来越脆。
+3. 已有本地轻量 RAG，但还不是生产级向量检索系统。
+4. 已有 Agent Harness，但系统化 eval 数据集还不够多。
+5. 已有 MCP descriptor bridge，但还没有真正连接第三方 MCP server runtime。
+6. CLI 主文件过重，后续继续堆功能会越来越脆。
 
 ## 后续优化优先级
 
@@ -136,13 +142,15 @@
 2. 给 task routing、follow-up rewrite、web answer 增加更多回归测试
 3. 给联网回答增加“证据不足时禁止强答”的更严格约束
 4. 为 direct/web/review/agent 四种模式增加统一的响应渲染层
+5. 扩展 Agent Harness 场景集，形成可复用 eval suite
 
 ### P1：强烈建议做
 
-1. 做轻量级检索层，支持从本地代码库抽取更相关片段
-2. 引入更细的 session memory 分层
+1. 把长期记忆的本地向量替换为真实 embedding，并评估 SQLite/LanceDB/Qdrant 等存储
+2. 引入更细的 session memory 分层和过期策略
 3. 给代码修改任务增加更强的“计划 -> 执行 -> 复盘”结构
 4. 为 web answer 增加来源引用摘要
+5. 实现真实 MCP stdio/SSE client、server lifecycle 和 tools/call 转发
 
 ### P2：有余力再做
 

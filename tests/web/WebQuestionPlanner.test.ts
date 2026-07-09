@@ -39,6 +39,16 @@ describe("WebQuestionPlanner", () => {
     expect(plan.sourceHints).toContain("live score source");
   });
 
+  it("adds finance-focused queries for current stock market close data", () => {
+    const plan = buildFallbackWebQuestionPlan("今天中国股市已经收盘了，查看一下大盘指数的涨跌情况", "(none)");
+
+    expect(plan.needsLiveData).toBe(true);
+    expect(plan.searchQueries.some((query) => query.includes("东方财富") || query.includes("新浪财经"))).toBe(true);
+    expect(plan.searchQueries.some((query) => query.includes("上证指数") && query.includes("创业板指"))).toBe(true);
+    expect(plan.sourceHints).toContain("major finance quote page");
+    expect(plan.answerInstructions.join("\n")).toContain("index level");
+  });
+
   it("does not assume one domain for ambiguous championship questions", () => {
     const plan = buildFallbackWebQuestionPlan("edg在哪一年中夺冠了", "(none)");
 

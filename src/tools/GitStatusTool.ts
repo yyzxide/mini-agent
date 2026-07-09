@@ -20,6 +20,15 @@ export class GitStatusTool implements Tool<GitStatusInput, GitStatusData> {
   readonly description = "Show git status --short for the current repository.";
   readonly inputSchema = GitStatusInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "git" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  };
 
   async execute(_input: GitStatusInput, context: ToolContext): Promise<ToolResult<GitStatusData>> {
     if (!(await isGitRepository(context.repoPath))) {

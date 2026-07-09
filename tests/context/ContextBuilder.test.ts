@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
+import { LongTermMemoryStore } from "../../src/memory/LongTermMemoryStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
 
 const execFileAsync = promisify(execFile);
@@ -58,6 +59,8 @@ describe("ContextBuilder", () => {
     expect(context).toContain("Context builder readme.");
     expect(context).toContain("Build files:");
     expect(context).toContain("package.json");
+    expect(context).toContain("New file placement guidance:");
+    expect(context).toContain("Suggested target paths:");
     expect(context).toContain("Recent tool results:");
     expect(context.length).toBeLessThanOrEqual(10_000);
   });
@@ -85,6 +88,37 @@ describe("ContextBuilder", () => {
     expect(context).toContain("Conversation memory:");
     expect(context).toContain("[user] 第一轮我们讨论了 session 记忆");
     expect(context).toContain("[assistant] 我会在后续轮次引用这段上下文");
+  });
+
+  it("injects retrieved long-term memory into the agent context", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const oldSession = await sessionStore.createSession({ title: "old coding task" });
+    await sessionStore.appendRecord(oldSession.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "帮我写贪吃蛇小游戏" },
+    });
+    await sessionStore.appendRecord(oldSession.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary: "已创建 demo_app.html，里面是一个浏览器可直接打开的贪吃蛇小游戏。",
+        success: true,
+        mode: "AGENT_LOOP",
+      },
+    });
+    await new LongTermMemoryStore({ repoPath }).indexSession(sessionStore, oldSession.sessionId);
+
+    const currentSession = await sessionStore.createSession({ title: "current task" });
+    const state = new AgentState({
+      sessionId: currentSession.sessionId,
+      repoPath,
+      userGoal: "之前那个贪吃蛇游戏怎么运行",
+    });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
+
+    expect(context).toContain("Long-term retrieved memory:");
+    expect(context).toContain("demo_app.html");
+    expect(context).toContain("贪吃蛇");
   });
 
   it("keeps task diagnostics and diff under tight context budgets", async () => {

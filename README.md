@@ -21,12 +21,19 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Starts an interactive local coding-agent session with `mini-agent`.
 - Keeps one active session in interactive mode, so follow-up prompts can use recent conversation history.
 - Runs one-shot tasks with `mini-agent run "..."`.
-- Routes standalone questions/code snippets to direct-answer mode before using the repository-editing agent loop.
+- Routes normal questions and explicit snippet-only requests to direct-answer mode before using the repository-editing agent loop.
 - Routes current external-information questions to web-answer mode instead of treating them as code tasks.
 - Calls real OpenAI-compatible chat completions APIs.
 - Answers general non-code questions in direct-answer mode.
+- Creates or updates repository files by default for code-generation tasks, instead of only printing code in chat.
+- Reuses the active session to resolve short repository follow-ups such as "写入一个文件里面" and can save the latest generated code into a real file.
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
+- Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
+- Maintains local long-term memory from task summaries and compaction records, then retrieves relevant memories into future prompts.
+- Exposes tool capability annotations and MCP-style local tool descriptors for future external-tool integration.
+- Provides a scripted Agent Harness for repeatable end-to-end agent-loop scenarios.
+- Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
 - Reads files with repository path safety checks.
 - Applies unified diff patches after `git apply --check`.
@@ -56,6 +63,7 @@ From this project directory:
 ```bash
 npm install
 npm run build
+npm run test:regression
 npm link
 ```
 
@@ -122,10 +130,15 @@ mini-agent review src/tools/WebSearchTool.ts
 mini-agent resume <sessionId>
 mini-agent sessions
 mini-agent session summary <sessionId>
+mini-agent memory index
+mini-agent memory search "之前数据流中位数怎么实现的"
+mini-agent memory list
 mini-agent status
 mini-agent diff
 mini-agent tool list
+mini-agent tool manifest
 mini-agent tool run read_file '{"path":"README.md"}'
+mini-agent mcp tools
 mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent command run "echo hello"
 mini-agent patch preview < patch.diff
@@ -148,10 +161,12 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 
 `mini-agent` separates user input into three modes:
 
-- `DIRECT_ANSWER`: normal chat, explanations, and standalone code snippets. Output uses `[answer]`.
+- `DIRECT_ANSWER`: normal chat, explanations, and explicit snippet-only requests. Output uses `[answer]`.
 - `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Output uses `[answer]`.
 - `CODE_REVIEW`: file-focused bug inspection and code review. The CLI reads the target file, automatically loads a few related files referenced by local imports/includes, asks the model for structured findings, locally filters out findings whose quoted code does not match the primary file, then runs a second-pass verification step that can downgrade or drop overreaching findings. Output uses `[review]`.
 - `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
+
+When the user asks to write code but does not provide a target path, the agent now prefers the repository-editing loop and receives task-specific file-placement guidance from local project signals such as `src/`, `public/`, `src/main/java/`, `tests/`, build files, and detected languages.
 
 For repository analysis requests such as "analyze this repository" or "总结当前项目", the CLI now forces an evidence-gathering pass before summarizing: it lists files, reads README/build files, loads representative source files, and only then asks the model for a grounded project analysis. This avoids shallow summaries based only on a tree snapshot.
 
@@ -161,6 +176,35 @@ For example, after asking about World Cup scores, a follow-up like "Japan's rece
 
 Very short follow-up prompts such as `葡萄牙呢`, `那这个呢`, or `and Portugal?` also reuse the active session. When the previous question makes the omitted predicate clear, the CLI rewrites the follow-up into a fuller question before routing and answering.
 
+Short repository follow-ups can also reuse the active session. For example, if the previous turn returned a code snippet and the next turn says `写入一个文件里面`, `写进去`, or `保存一下`, the CLI rewrites that into an explicit repository task, carries over the latest code block, and lets `AGENT_LOOP` create the file instead of asking the user to repeat the code. Short coding follow-ups after an edit task, such as `数据流的中位数呢`, keep the repository-editing mode instead of falling back to chat-only output.
+
+File-write confirmation is answered from local session records. If the user asks `你写入了嘛？`, the CLI checks whether a `FILE_CHANGE` record was created after the previous request. It will not ask the model to guess, and it will not claim a file was written when no write record exists.
+
+## Regression Suite
+
+The project keeps a focused conversation-level regression suite for the user-visible failures that are easiest to reintroduce:
+
+- explicit snippet requests must stay chat-only
+- implementation requests must create or update files
+- short follow-ups such as `写入一个文件里面` or `写进去` must reuse the latest generated code
+- short algorithm follow-ups after an edit task must remain in repository-editing mode
+- write-confirmation questions such as `你写入了嘛？` must be grounded in session `FILE_CHANGE` records
+- package-manager `ENOENT package.json` errors must be diagnosed as wrong working-directory problems when the pasted path is outside the active repo
+- omitted-predicate follow-ups such as `葡萄牙呢` must reuse session context
+- repository analysis must read real repository evidence before summarizing
+
+Run it with:
+
+```bash
+npm run test:regression
+```
+
+For a quick pre-demo gate:
+
+```bash
+npm run verify:regression
+```
+
 Interactive slash commands:
 
 ```text
@@ -168,6 +212,7 @@ Interactive slash commands:
 /new          Start a new conversation session in the same repo.
 /review <p>   Run a focused code review for one repository file.
 /resume <id>  Switch to a previous session without restarting the CLI.
+/pause        Pause the active session and exit; resume it later.
 /session      Show current session metadata.
 /summary      Show a compact summary of the current session.
 /sessions     List local sessions with recent message/summary hints.
@@ -185,6 +230,8 @@ Interactive slash commands:
 
 Inside interactive mode, pressing `Tab` now completes slash commands such as `/sta` -> `/status`. If a prefix matches multiple commands, repeated `Tab` shows the available candidates.
 
+Use `/pause` when you are leaving temporarily and want the session shown as `PAUSED`; use `/exit` when the session is finished. A paused session can be reopened with `mini-agent resume <sessionId>` or interactive `/resume <sessionId>`.
+
 Interactive `/status` is session-oriented. It shows the current session id, last mode, last user message, latest summary, configured model, and locally tracked token usage when the provider returns usage metrics. The remaining context window is reported as unavailable because most OpenAI-compatible APIs do not expose it directly.
 
 Use `/repo` for the repository summary. Outside interactive mode, `mini-agent status` and `mini-agent repo` both print the repository state summary, while `mini-agent session status <sessionId>` prints the JSON version of session status.
@@ -198,10 +245,10 @@ cd /path/to/your/repo
 mini-agent run "find the README and explain how this project is structured"
 ```
 
-For a standalone question or code snippet, `run` answers directly without editing files:
+For a standalone question or an explicit snippet-only request, `run` answers directly without editing files:
 
 ```bash
-mini-agent run "write a C++ two-sum example"
+mini-agent run "give me a C++ code snippet for two sum"
 mini-agent run "非登记收款人是什么意思"
 ```
 
@@ -219,7 +266,7 @@ In interactive mode, follow-up questions reuse the same session until `/new` or 
 
 ```text
 mini-agent
-> 写一个两数之和的 C++ 例子，不要改文件
+> 给我一个两数之和的 C++ 代码片段，不要改文件
 > 你还记得刚才让我写什么了吗
 ```
 
@@ -233,6 +280,7 @@ For a real coding task:
 
 ```bash
 mini-agent run "add validation for uploaded file extensions and update tests"
+mini-agent run "write a C++ two-sum example"
 ```
 
 At the end, inspect changes:
@@ -283,6 +331,7 @@ The current MVP uses local guardrails:
 - `search_code` limits result count.
 - `fetch_url` requires review permission, blocks localhost/private-network targets, validates DNS and each redirect hop, limits timeout/download size, and returns only readable text-like content.
 - `web_search` returns bounded public result titles, URLs, and snippets; it currently tries DuckDuckGo HTML first and falls back to DuckDuckGo Lite when needed. The CLI then ranks sources by domain trust hints, query overlap, and page type before deciding what to fetch, but it still does not grant arbitrary browser control.
+- If a model-generated web answer contradicts the executed tool trace by claiming the CLI has no web capability or needs a manual web switch, the CLI treats that as invalid and asks for a grounded rewrite. Capability questions such as "你不能联网吗" are answered locally without calling the model.
 - Patch application runs `git apply --check` before `git apply`.
 - Commands execute as structured `executable + args` processes with shell disabled by default, plus timeout and output truncation.
 - Explicit shell or shell-like commands require additional approval; dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
@@ -303,6 +352,8 @@ Each repository gets a local `.mini-agent/` directory:
     <sessionId>.jsonl
   logs/
     YYYY-MM-DD.jsonl
+  memory/
+    index.jsonl
 ```
 
 Session records include:
@@ -315,7 +366,11 @@ Session records include:
 - test pass/fail markers
 - final git diff
 
-The current session records are also used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt. This is lightweight transcript memory, not a full vector RAG system.
+The current session records are used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt.
+
+Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. After tasks finish, the CLI indexes `TASK_SUMMARY` and `MEMORY_COMPACTION` records with keywords and a deterministic local vector representation. Retrieval is split into query building, candidate retrieval, reranking, and evidence selection before `ContextBuilder` injects the final memories as `Long-term retrieved memory`.
+
+This is a local lightweight RAG layer. It is intentionally dependency-free for the MVP, so it is not the same as a production vector database or hosted embedding service. The design leaves an explicit extension point for replacing the deterministic local vector with real embeddings and a vector store later.
 
 Runtime logs and task change logs serve different purposes:
 
@@ -333,6 +388,8 @@ Inspect one session:
 ```bash
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
+mini-agent memory index <sessionId>
+mini-agent memory search "search query"
 mini-agent logs
 mini-agent changes
 mini-agent doctor

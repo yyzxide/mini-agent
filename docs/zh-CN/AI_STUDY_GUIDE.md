@@ -82,7 +82,7 @@
 
 ### 4. RAG 与检索增强
 
-严格说，你当前项目还不算真正做了成熟 RAG。
+当前项目已经有了轻量本地 RAG，但还不是成熟生产级 RAG。
 
 你现在有的是：
 
@@ -90,15 +90,18 @@
 - 文件读取
 - 搜索代码
 - session memory
+- long-term memory index
+- keyword + local vector-like retrieval
 - web search / fetch
 
-这是一种“轻量检索增强”，但还不是真正的：
+它已经能把任务总结和压缩记忆索引到 `.mini-agent/memory/index.jsonl`，再在新任务中召回相关历史。但它还没有做到生产级常见能力：
 
 - chunking
-- embedding
-- vector retrieval
+- hosted embedding
+- vector database
 - reranking
 - evidence selection
+- memory aging / conflict handling
 
 你下一步该补的重点不是马上上向量数据库，而是先理解：
 

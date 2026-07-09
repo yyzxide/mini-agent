@@ -109,6 +109,19 @@ describe("PatchManager", () => {
     await expect(fs.readFile(path.join(repoPath, "game_2048.html"), "utf8")).resolves.toContain("<title>2048</title>");
   });
 
+  it("repairs model patches for new files when added lines are missing plus prefixes", async () => {
+    const manager = new PatchManager({ repoPath });
+
+    const result = await manager.applyPatch({ patch: modelStyleBareNewFilePatch() });
+
+    expect(result.success).toBe(true);
+    expect(result.changedFiles).toEqual([
+      { path: "src/generated_feature.ts", changeType: "ADDED", additions: 6, deletions: 0 },
+    ]);
+    await expect(fs.readFile(path.join(repoPath, "src", "generated_feature.ts"), "utf8"))
+      .resolves.toContain("export function longestValidParentheses");
+  });
+
   it("returns git diff after applying a patch", async () => {
     const manager = new PatchManager({ repoPath });
 
@@ -219,6 +232,22 @@ function modelStyle2048PatchWithoutTrailingNewline(): string {
     "+</head>",
     "+<body>play</body>",
     "+</html>",
+  ].join("\n");
+}
+
+function modelStyleBareNewFilePatch(): string {
+  return [
+    "diff --git a/src/generated_feature.ts b/src/generated_feature.ts",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/src/generated_feature.ts",
+    "@@ -0,0 +1,6 @@",
+    "export function longestValidParentheses(s: string): number {",
+    "  void s;",
+    "  return 0;",
+    "}",
+    "",
+    "",
   ].join("\n");
 }
 

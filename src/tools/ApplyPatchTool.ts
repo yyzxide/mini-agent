@@ -35,6 +35,15 @@ export class ApplyPatchTool implements Tool<ApplyPatchInput, ApplyPatchData> {
   readonly description = "Preview, check, and apply a unified diff patch.";
   readonly inputSchema = ApplyPatchInputSchema;
   readonly permissionLevel = PermissionLevel.REVIEW;
+  readonly metadata = {
+    category: "patch" as const,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  };
 
   async execute(input: ApplyPatchInput, context: ToolContext): Promise<ToolResult<ApplyPatchData>> {
     const patchManager = new PatchManager({ repoPath: context.repoPath });

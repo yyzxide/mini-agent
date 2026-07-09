@@ -62,6 +62,27 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("normalizes common model decision shape drift", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "apply_patch",
+      patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+hello\n",
+      message: "write file",
+    }))).toEqual({
+      type: "APPLY_PATCH",
+      patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+hello\n",
+      description: "write file",
+    });
+
+    expect(parser.parse(JSON.stringify({
+      type: "final",
+      message: "done",
+    }))).toEqual({
+      type: "FINAL",
+      summary: "done",
+      success: true,
+    });
+  });
+
   it("rejects unknown decision types", () => {
     expect(() => parser.parse('{"type":"NOPE"}')).toThrow(/Unknown AgentDecision type/);
   });

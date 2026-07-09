@@ -37,6 +37,15 @@ export class WebSearchTool implements Tool<WebSearchInput, WebSearchData> {
   readonly description = "Search the public web for general information and return bounded result titles, URLs, and snippets.";
   readonly inputSchema = webSearchInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "web" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  };
 
   async execute(input: WebSearchInput, _context: ToolContext): Promise<ToolResult<WebSearchData>> {
     const providerOrder = resolveProviderOrder(input.provider);

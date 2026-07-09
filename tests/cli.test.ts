@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { completeInteractiveInput, createProgram } from "../src/cli/index.js";
+import { SessionStore } from "../src/session/SessionStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +39,8 @@ describe("mini-agent CLI", () => {
       "doctor",
       "git",
       "logs",
+      "mcp",
+      "memory",
       "patch",
       "repo",
       "resume",
@@ -58,6 +61,12 @@ describe("mini-agent CLI", () => {
     const [matches, fragment] = completeInteractiveInput("/sta");
     expect(fragment).toBe("/sta");
     expect(matches).toEqual(["/status"]);
+  });
+
+  it("completes the pause slash command", () => {
+    const [matches, fragment] = completeInteractiveInput("/pa");
+    expect(fragment).toBe("/pa");
+    expect(matches).toEqual(["/pause"]);
   });
 
   it("lists matching interactive slash commands for ambiguous prefixes", () => {
@@ -108,6 +117,58 @@ describe("mini-agent CLI", () => {
     expect(sessions).toContainEqual(expect.objectContaining({
       sessionId: created.sessionId,
       title: "Listed Session",
+    }));
+  });
+
+  it("indexes and searches long-term memory from the CLI", async () => {
+    process.chdir(tempRoot);
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const session = await sessionStore.createSession({ title: "memory cli session" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary: "本次任务实现了最长有效括号算法，导出 longestValidParentheses 函数。",
+        mode: "AGENT_LOOP",
+        success: true,
+      },
+    });
+
+    const indexOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["memory", "index", session.sessionId], { from: "user" });
+    });
+    const indexResult = JSON.parse(indexOutput) as { indexedEntries: number };
+
+    const searchOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["memory", "search", "最长有效括号"], { from: "user" });
+    });
+    const searchResult = JSON.parse(searchOutput) as Array<{ entry: { text: string } }>;
+
+    expect(indexResult.indexedEntries).toBe(1);
+    expect(searchResult[0].entry.text).toContain("longestValidParentheses");
+  });
+
+  it("prints MCP-style local tool descriptors from the CLI", async () => {
+    process.chdir(tempRoot);
+
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync(["mcp", "tools"], { from: "user" });
+    });
+    const descriptors = JSON.parse(output) as Array<{
+      name: string;
+      annotations: { readOnlyHint: boolean; openWorldHint: boolean };
+      metadata: { source: string; permissionLevel: string };
+    }>;
+
+    expect(descriptors).toContainEqual(expect.objectContaining({
+      name: "web_search",
+      annotations: expect.objectContaining({
+        readOnlyHint: true,
+        openWorldHint: true,
+      }),
+      metadata: expect.objectContaining({
+        source: "local",
+        permissionLevel: "SAFE",
+      }),
     }));
   });
 
@@ -589,7 +650,7 @@ describe("mini-agent CLI", () => {
     await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toContain("hello from mini-agent");
   });
 
-  it("answers standalone code requests without editing the repository", async () => {
+  it("answers explicit snippet-only requests without editing the repository", async () => {
     process.chdir(tempRoot);
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
@@ -609,7 +670,7 @@ describe("mini-agent CLI", () => {
       const output = await captureStdout(async () => {
         await createProgram().parseAsync([
           "run",
-          "写一个两数之和的C++代码",
+          "给我一个 C++ 代码片段，计算两数之和",
           "--model",
           "test-model",
           "--base-url",
@@ -620,7 +681,7 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[answer]");
       expect(output).toContain("```cpp");
       expect(output).not.toContain("[task]");
-      expect(output).not.toContain("写一个两数之和的C++代码");
+      expect(output).not.toContain("给我一个 C++ 代码片段，计算两数之和");
       expect(output).not.toContain("[patch]");
       await expect(fs.stat(path.join(tempRoot, "two_sum.cpp"))).rejects.toMatchObject({ code: "ENOENT" });
 
@@ -628,6 +689,124 @@ describe("mini-agent CLI", () => {
       const init = call?.[1] as RequestInit | undefined;
       const body = JSON.parse(String(init?.body)) as { response_format?: unknown };
       expect(body.response_format).toBeUndefined();
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("creates repository files for code implementation requests", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const fetchMock = stubDecisionResponses(scriptedStandaloneCodeFileResponses());
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "写一个两数之和的C++代码",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[session]");
+      expect(output).toContain("[patch]");
+      expect(output).toContain("[summary]");
+      await expect(fs.readFile(path.join(tempRoot, "two_sum.cpp"), "utf8")).resolves.toContain("int twoSum(int a, int b)");
+
+      const call = fetchMock.mock.calls[0];
+      const init = call?.[1] as RequestInit | undefined;
+      const body = JSON.parse(String(init?.body)) as { response_format?: { type: string } };
+      expect(body.response_format).toEqual({ type: "json_object" });
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("saves the previous direct-answer code into a file on short follow-up", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+
+    const sessionOutput = await captureStdout(async () => {
+      await createProgram().parseAsync(["session", "create", "--title", "Save previous code"], { from: "user" });
+    });
+    const session = JSON.parse(sessionOutput) as { sessionId: string };
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      [
+        "```python",
+        "def two_sum(a: int, b: int) -> int:",
+        "    return a + b",
+        "```",
+      ].join("\n"),
+      JSON.stringify({
+        type: "APPLY_PATCH",
+        description: "Save the previous Python solution into solution.py",
+        patch: [
+          "diff --git a/solution.py b/solution.py",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/solution.py",
+          "@@ -0,0 +1,2 @@",
+          "+def two_sum(a: int, b: int) -> int:",
+          "+    return a + b",
+          "",
+        ].join("\n"),
+      }),
+      "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
+      "{\"type\":\"FINAL\",\"summary\":\"Saved the previous code into solution.py\",\"success\":true}",
+    ];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: responses.shift() ?? responses.at(-1) ?? "" } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "给我一个 Python 代码片段，写一个两数之和",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "写入一个文件里面",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[patch]");
+      expect(output).toContain("solution.py");
+      await expect(fs.readFile(path.join(tempRoot, "solution.py"), "utf8")).resolves.toContain("def two_sum");
+
+      const secondCall = fetchMock.mock.calls[1];
+      const secondInit = secondCall?.[1] as RequestInit | undefined;
+      const secondBody = JSON.parse(String(secondInit?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(secondBody.messages[1]?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
+      expect(secondBody.messages[1]?.content).toContain("def two_sum(a: int, b: int) -> int:");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1900,6 +2079,38 @@ function scriptedDemoDecisionResponses(): string[] {
     }),
     "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
     "{\"type\":\"FINAL\",\"summary\":\"Updated demo.txt and verified the change\",\"success\":true}",
+  ];
+}
+
+function scriptedStandaloneCodeFileResponses(): string[] {
+  return [
+    "{\"type\":\"PLAN\",\"message\":\"Create a new C++ file for the requested two-sum example\"}",
+    JSON.stringify({
+      type: "APPLY_PATCH",
+      description: "Add a standalone two_sum.cpp program",
+      patch: [
+        "diff --git a/two_sum.cpp b/two_sum.cpp",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/two_sum.cpp",
+        "@@ -0,0 +1,15 @@",
+        "+#include <iostream>",
+        "+",
+        "+int twoSum(int a, int b) {",
+        "+    return a + b;",
+        "+}",
+        "+",
+        "+int main() {",
+        "+    int x, y;",
+        "+    std::cin >> x >> y;",
+        "+    std::cout << twoSum(x, y) << std::endl;",
+        "+    return 0;",
+        "+}",
+        "",
+      ].join("\n"),
+    }),
+    "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
+    "{\"type\":\"FINAL\",\"summary\":\"Created two_sum.cpp in the repository\",\"success\":true}",
   ];
 }
 

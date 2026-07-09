@@ -351,9 +351,9 @@ function parseUnifiedDiff(patch: string): PatchPreviewResult {
 }
 
 function normalizeUnifiedDiff(patch: string): string {
-  const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  const lines = repairModelStylePatchLines(patch.replace(/\r\n/g, "\n").split("\n"));
   const output = [...lines];
-  const hunkHeaderPattern = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/;
+  const hunkHeaderPattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -396,11 +396,152 @@ function normalizeUnifiedDiff(patch: string): string {
       }
     }
 
-    output[index] = `@@ -${match[1]},${oldCount} +${match[2]},${newCount} @@${match[3] ?? ""}`;
+    const oldStart = match[1] ?? "0";
+    const newStart = match[3] ?? "0";
+    const suffix = match[5] ?? "";
+    output[index] = `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${suffix}`;
   }
 
   const normalized = output.join("\n");
   return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+}
+
+function repairModelStylePatchLines(lines: string[]): string[] {
+  const repaired = [...lines];
+  const hunkHeaderPattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
+  let currentChangeType: PatchChangeType = "MODIFIED";
+
+  for (let index = 0; index < repaired.length; index += 1) {
+    const line = repaired[index] ?? "";
+
+    if (line.startsWith("diff --git ")) {
+      currentChangeType = "MODIFIED";
+      continue;
+    }
+
+    if (line.startsWith("new file mode ")) {
+      currentChangeType = "ADDED";
+      continue;
+    }
+
+    if (line.startsWith("deleted file mode ")) {
+      currentChangeType = "DELETED";
+      continue;
+    }
+
+    if (line.startsWith("--- ")) {
+      const oldPath = parseHeaderPath(line.slice(4));
+      if (oldPath === undefined) {
+        currentChangeType = "ADDED";
+      }
+      continue;
+    }
+
+    if (line.startsWith("+++ ")) {
+      const newPath = parseHeaderPath(line.slice(4));
+      if (newPath === undefined) {
+        currentChangeType = "DELETED";
+      }
+      continue;
+    }
+
+    const headerMatch = hunkHeaderPattern.exec(line);
+    if (!headerMatch) {
+      continue;
+    }
+
+    const expectedOld = parseHunkCount(headerMatch[2], headerMatch[1]);
+    const expectedNew = parseHunkCount(headerMatch[4], headerMatch[3]);
+    let oldSeen = 0;
+    let newSeen = 0;
+    const bareLineIndexes: number[] = [];
+
+    for (let cursor = index + 1; cursor < repaired.length; cursor += 1) {
+      const hunkLine = repaired[cursor] ?? "";
+
+      if (
+        hunkHeaderPattern.test(hunkLine)
+        || hunkLine.startsWith("diff --git ")
+        || hunkLine.startsWith("--- ")
+        || hunkLine.startsWith("+++ ")
+      ) {
+        break;
+      }
+
+      if (hunkLine.startsWith("\\ No newline at end of file")) {
+        continue;
+      }
+
+      if (currentChangeType === "ADDED") {
+        if (hunkLine.startsWith("+") && !hunkLine.startsWith("+++")) {
+          newSeen += 1;
+          continue;
+        }
+
+        bareLineIndexes.push(cursor);
+        continue;
+      }
+
+      if (currentChangeType === "DELETED") {
+        if (hunkLine.startsWith("-") && !hunkLine.startsWith("---")) {
+          oldSeen += 1;
+          continue;
+        }
+
+        bareLineIndexes.push(cursor);
+        continue;
+      }
+
+      if (hunkLine.startsWith("+") && !hunkLine.startsWith("+++")) {
+        newSeen += 1;
+        continue;
+      }
+
+      if (hunkLine.startsWith("-") && !hunkLine.startsWith("---")) {
+        oldSeen += 1;
+        continue;
+      }
+
+      if (hunkLine.startsWith(" ")) {
+        oldSeen += 1;
+        newSeen += 1;
+        continue;
+      }
+
+      bareLineIndexes.push(cursor);
+    }
+
+    if (currentChangeType === "ADDED" && newSeen < expectedNew) {
+      const deficit = expectedNew - newSeen;
+      if (bareLineIndexes.length < deficit) {
+        continue;
+      }
+      for (const cursor of bareLineIndexes.slice(0, deficit)) {
+        repaired[cursor] = `+${repaired[cursor] ?? ""}`;
+      }
+      continue;
+    }
+
+    if (currentChangeType === "DELETED" && oldSeen < expectedOld) {
+      const deficit = expectedOld - oldSeen;
+      if (bareLineIndexes.length < deficit) {
+        continue;
+      }
+      for (const cursor of bareLineIndexes.slice(0, deficit)) {
+        repaired[cursor] = `-${repaired[cursor] ?? ""}`;
+      }
+    }
+  }
+
+  return repaired;
+}
+
+function parseHunkCount(rawCount: string | undefined, rawStart: string | undefined): number {
+  if (rawCount !== undefined) {
+    return Number.parseInt(rawCount, 10);
+  }
+
+  return rawStart === "0" ? 0 : 1;
 }
 
 function inferChangeType(file: MutablePatchFile): PatchChangeType {

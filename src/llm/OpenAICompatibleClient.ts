@@ -676,7 +676,9 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" 
     "Do not turn casual chat into a ticket note, task log, operator summary, or third-person report.",
     "Avoid phrases like '用户误触', '未做任何操作', 'the user mis-clicked', or 'no action was taken' unless the user explicitly asks for a formal log entry.",
     "Use short paragraphs or bullets when they improve clarity.",
-    "For code requests, provide complete code in a fenced code block and add only brief notes when useful.",
+    "For explicit snippet-only requests, provide complete code in a fenced code block and add only brief notes when useful.",
+    "Do not falsely claim that the overall CLI lacks file-writing capability. If the user asks why a file was not created, explain that this chat-style answer path does not apply repository edits, while repository-editing tasks do.",
+    "Do not falsely claim that the overall CLI lacks web capability. If a current-data question reaches this chat-style path without web evidence, say that the answer path has no gathered web evidence and suggest using the web-answer mode, rather than saying the product cannot network.",
   ];
 
   if (mode === "web") {

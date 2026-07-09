@@ -39,6 +39,15 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
   readonly description = "Fetch a public HTTP(S) URL and return bounded text content.";
   readonly inputSchema = fetchUrlInputSchema;
   readonly permissionLevel = PermissionLevel.REVIEW;
+  readonly metadata = {
+    category: "web" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  };
 
   async execute(input: FetchUrlInput, context: ToolContext): Promise<ToolResult<FetchUrlData>> {
     let parsedUrl: URL;

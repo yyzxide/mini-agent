@@ -14,12 +14,13 @@
 -> 根据失败日志继续修复
 -> 输出总结和 git diff
 -> 保存本地 session/event
+-> 索引长期记忆供后续任务检索
 ```
 
-普通聊天、独立代码片段和联网问答不会强行进入代码修改循环。当前版本会先用 `TaskRouter` 分成三类：
+普通聊天、明确只要代码片段的请求和联网问答不会强行进入代码修改循环。当前版本会先用 `TaskRouter` 分成四类：
 
-- `DIRECT_ANSWER`：普通问答、解释、独立代码片段，输出 `[answer]`。
-- `WEB_ANSWER`：需要最新资料或公网信息的问题，先执行 `web_search` / `fetch_url`，会优先考虑更像官方/高可信的来源，继承当前 session 的追问范围，并在前几个来源抓取失败时继续尝试后续候选来源，再输出更完整的 `[answer]`。
+- `DIRECT_ANSWER`：普通问答、解释、明确只要代码片段的请求，输出 `[answer]`。
+- `WEB_ANSWER`：需要最新资料或公网信息的问题，先执行 `web_search` / `fetch_url`，会优先考虑更像官方/高可信的来源，继承当前 session 的追问范围，并在前几个来源抓取失败时继续尝试后续候选来源，再输出更完整的 `[answer]`。这类问题包括最新版本、新闻、赛事比分、实时/收盘行情、汇率和市场指数等强时效查询。
 - `CODE_REVIEW`：文件级代码审查和 bug 检查。CLI 会先读取目标文件，再自动补充少量由本地 import / include 解析出来的相关文件作为上下文，然后要求模型输出结构化 findings，先在本地校验引用代码是否真的出现在主文件里，再做一轮 review 复核，必要时把过度武断的结论降级或丢弃，输出 `[review]`。
 - `AGENT_LOOP`：真正的仓库阅读、修改、测试和修复任务，输出 `[plan]`、`[tool]`、`[patch]`、`[command]`、`[summary]`。
 
@@ -49,26 +50,62 @@
 ## 核心能力
 
 - 真实 OpenAI-compatible API 接入。
-- 普通问答、联网问答、仓库任务三种模式分流。
+- 普通问答、联网问答、代码审查、仓库任务四种模式分流。
 - 统一 ToolRegistry 和 zod 参数校验。
 - `list_files`、`read_file`、`search_code`、`web_search`、`fetch_url`、`git_status`、`git_diff`、`apply_patch`。
 - 命令执行超时、输出截断和危险命令拦截。
+- 常见运行错误本地诊断，例如运行目录错误、命令不存在、端口占用、连接拒绝和权限不足。
 - patch 应用前 `git apply --check`。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
 - `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
+- `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
+- Tool manifest 和 MCP 风格工具描述，标注只读、破坏性、幂等性、是否访问外部世界等能力边界。
+- `AgentHarness` 和 `ScriptedLlmClient`，用于把多步 AgentLoop 场景变成可重复评测。
 - `mini-agent config` 管理本地模型配置。
-- `mini-agent --help`、`mini-agent run`、`mini-agent review`、`mini-agent tool`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes` 等调试命令。
+- `mini-agent --help`、`mini-agent run`、`mini-agent review`、`mini-agent tool`、`mini-agent mcp`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes`、`mini-agent memory` 等调试命令。
 - `mini-agent session summary <sessionId>` 可以直接查看某个会话的压缩摘要。
+- 代码生成请求默认会创建或修改仓库文件；只有明确要求“代码片段 / 不要改文件”时才走纯回答模式。
+- 如果上一轮先给了代码片段，下一轮再说“写入一个文件里面”“写进去”“保存一下”“把刚才的代码保存到文件里”，CLI 会复用当前 session，把上一轮代码块补成明确写文件任务，再交给 `AGENT_LOOP` 落盘。
+- 如果上一轮是代码落盘任务，下一轮继续说“数据流的中位数呢”这类短算法追问，CLI 会继承上一轮的仓库编辑模式，而不是退回到纯聊天贴代码。
+- 如果用户问“你写入了嘛？”，CLI 会直接检查当前 session 里上一轮之后是否出现 `FILE_CHANGE` 记录；没有记录就明确说明没有查到本次落盘，不让模型凭记忆猜。
+- 项目额外维护了一套“对话级回归测试”，专门覆盖真实用户最容易踩到的多轮场景。
+
+## 核心回归测试
+
+为了避免“每修一次又冒出一个新坑”，当前版本把真实踩过的问题固化成了一套独立回归集。重点覆盖：
+
+- “代码片段 / 不要改文件”必须停留在 `DIRECT_ANSWER`
+- 默认实现型请求必须真正写入文件
+- `写入一个文件里面`、`写进去` 这类短追问必须承接上一轮代码
+- `数据流的中位数呢` 这类代码连续追问必须继续走 `AGENT_LOOP`
+- `你写入了嘛？` 这类确认问题必须基于 session 文件变更记录回答
+- `葡萄牙呢` 这类短追问必须结合当前 session 补全语义
+- “分析当前项目”必须先读取 README / 构建文件 / 代表性源码再总结
+
+运行命令：
+
+```bash
+npm run test:regression
+```
+
+如果只是想在演示或提交前做一轮快速稳定性验收，可以运行：
+
+```bash
+npm run verify:regression
+```
 
 ## 快速验证
 
 ```bash
 npm install
 npm run build
+npm run test:regression
 npm test
 npm link
 mini-agent --help
 mini-agent tool list
+mini-agent tool manifest
+mini-agent mcp tools
 mini-agent doctor
 ```
 
@@ -87,6 +124,7 @@ cp mini-agent.config.example.json mini-agent.config.json
 /new          新开会话
 /review <p>   审查单个仓库文件
 /resume <id>  切换到历史 session
+/pause        暂停当前会话并退出，后续可继续恢复
 /summary      查看当前会话压缩摘要
 /sessions     列出带最近消息/摘要提示的会话
 /history [n]  查看当前 session 最近记录
@@ -94,6 +132,7 @@ cp mini-agent.config.example.json mini-agent.config.json
 /logs [n]     查看运行日志
 /changes [n]  查看任务变更日志
 /compact      写入一条本地压缩记忆
+/memory <q>   检索本地长期记忆
 /status       查看当前会话状态与已记录的 LLM token 用量
 /repo         查看仓库状态摘要
 /diff         查看 git diff
@@ -101,6 +140,8 @@ cp mini-agent.config.example.json mini-agent.config.json
 ```
 
 交互模式里现在支持 `Tab` 补全 slash 命令，例如输入 `/sta` 后按 `Tab` 会补成 `/status`；如果一个前缀对应多个命令，连续按 `Tab` 可以看到候选列表。
+
+临时离开时用 `/pause`，session 状态会变成 `PAUSED`，之后可以执行 `mini-agent resume <sessionId>` 或在交互模式中 `/resume <sessionId>` 接着使用。`/exit` 表示这个 session 已结束，会标记为 `FINISHED`。
 
 其中交互式 `/status` 现在是“会话状态”语义：会显示当前 session、最近一次模式、最近用户消息、最新摘要、已配置模型，以及本地累计的 prompt/completion/total token。至于“当前还剩多少上下文 token”，大多数 OpenAI-compatible API 不会直接返回，所以这里只会明确标记为暂不可得。
 

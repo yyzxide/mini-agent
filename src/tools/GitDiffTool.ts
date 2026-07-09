@@ -29,6 +29,15 @@ export class GitDiffTool implements Tool<GitDiffInput, GitDiffData> {
   readonly description = "Show git diff for the repository or a single path.";
   readonly inputSchema = GitDiffInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
+  readonly metadata = {
+    category: "git" as const,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  };
 
   async execute(input: GitDiffInput, context: ToolContext): Promise<ToolResult<GitDiffData>> {
     if (!(await isGitRepository(context.repoPath))) {

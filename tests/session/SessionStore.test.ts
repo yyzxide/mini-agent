@@ -74,6 +74,10 @@ describe("SessionStore", () => {
     const store = new SessionStore({ repoPath });
     const session = await store.createSession({ title: "Status" });
 
+    const paused = await store.updateSessionStatus(session.sessionId, "PAUSED");
+    expect(paused.status).toBe("PAUSED");
+    await expect(store.getSessionMeta(session.sessionId)).resolves.toMatchObject({ status: "PAUSED" });
+
     const updated = await store.updateSessionStatus(session.sessionId, "FINISHED");
 
     expect(updated.status).toBe("FINISHED");

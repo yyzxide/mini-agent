@@ -39,11 +39,27 @@ export interface ToolResult<TData = unknown> {
   metadata?: Record<string, unknown>;
 }
 
+export type ToolSource = "local" | "mcp";
+
+export interface ToolAnnotations {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+export interface ToolMetadata {
+  source?: ToolSource;
+  category?: "filesystem" | "search" | "git" | "patch" | "command" | "web" | "external";
+  annotations?: Partial<ToolAnnotations>;
+}
+
 export interface Tool<TInput = unknown, TResult = unknown> {
   name: string;
   description: string;
   inputSchema: z.ZodType<TInput>;
   permissionLevel: PermissionLevel;
+  metadata?: ToolMetadata;
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TResult>>;
 }
 
