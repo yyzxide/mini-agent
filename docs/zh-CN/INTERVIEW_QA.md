@@ -36,7 +36,7 @@ LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和
 
 ## Q8：如何保证路径安全？
 
-所有路径都会通过 `resolveRepoPath(repoPath, targetPath)` 解析成绝对路径，再判断结果是否仍在仓库目录内。这样 `../` 和绝对路径逃逸都会被拒绝。
+所有路径都会通过 `resolveRepoPath(repoPath, targetPath)` 解析成绝对路径，再判断结果是否仍在仓库目录内。这样 `../` 和绝对路径逃逸都会被拒绝。`read_file` 和 `search_code` 还会拒绝 `.git`、`.mini-agent` 这类内部元数据路径，避免把仓库配置、session、日志和记忆记录暴露给模型。
 
 ## Q9：联网能力怎么控制？
 
@@ -46,7 +46,7 @@ LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和
 
 ## Q10：patch 为什么不用直接写文件？
 
-patch 更适合审计和回滚。应用前可以预览，可以 `git apply --check`，失败时能得到明确错误，成功后可以直接用 `git diff` 展示最终变更。
+patch 更适合审计和回滚。应用前可以预览，可以 `git apply --check`，失败时能得到明确错误，成功后可以直接用 `git diff` 展示最终变更。实现里还会固定 `core.autocrlf=false`，避免不同开发机的 Git 换行配置影响同一个 patch 的结果。
 
 ## Q10.1：如果用户只说“写个 2048 游戏”，Agent 怎么知道文件落在哪里？
 

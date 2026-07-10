@@ -20,9 +20,11 @@ rg --version
 ## 2. 安装和构建
 
 ```bash
-cd /home/sid/miniagent/mini-coding-agent
+cd <mini-agent-repo>
 npm install
 npm run build
+npm run typecheck
+npm run lint:unused
 npm run test:regression
 npm test
 npm run verify
@@ -31,8 +33,9 @@ npm run verify
 期望：
 
 - TypeScript 编译通过。
+- 未使用符号检查通过。
 - 对话级回归测试通过。
-- Vitest 全部通过。
+- Vitest 全部通过，当前基线是 32 个测试文件、230 个测试用例。
 - `verify` 只验证 CLI 项目。
 
 ## 3. 全局命令
@@ -89,12 +92,15 @@ mini-agent tool run git_diff '{}'
 
 ```bash
 mini-agent tool run read_file '{"path":"../README.md"}'
+mini-agent tool run read_file '{"path":".git/config"}'
+mini-agent tool run search_code '{"query":"HEAD","path":".git"}'
 ```
 
 期望：
 
 - 返回结构化错误。
 - 错误 message 能说明路径越过仓库边界。
+- `.git`、`.mini-agent` 等内部元数据路径返回 `INTERNAL_PATH`，不能把内部记录暴露给模型。
 
 ## 7. 命令执行
 

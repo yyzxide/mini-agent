@@ -2,6 +2,13 @@
 
 当前项目只保留本地 CLI Agent，因此测试目标也收缩为：保证 CLI、任务分流、工具系统、AgentLoop、LLM 客户端、patch、命令执行和 session 记录稳定。
 
+截至本轮修复，已验证：
+
+- `tsc -p tsconfig.json --noEmit` 通过。
+- `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
+- 全量 Vitest 通过：32 个测试文件、230 个测试用例。
+- Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
+
 ## 1. 自动化测试范围
 
 ### 1.1 ToolRegistry 和工具
@@ -12,11 +19,11 @@
 - zod 参数校验失败。
 - 工具不存在。
 - `list_files` 忽略目录和数量限制。
-- `read_file` 行范围、二进制拒绝、路径越权。
-- `search_code` 调用 ripgrep。
+- `read_file` 行范围、二进制拒绝、路径越权、内部元数据路径拒绝。
+- `search_code` 调用 ripgrep、路径规范化、异常 JSON 行容错、内部元数据路径拒绝。
 - `fetch_url` 能读取公网文本内容，拒绝 localhost/内网目标，并限制输出。
 - `git_status` 和 `git_diff`。
-- `apply_patch` 权限、check、apply、失败返回。
+- `apply_patch` 权限、check、apply、失败返回，并验证 patch 行尾不会被全局 Git `core.autocrlf` 配置干扰。
 - tool manifest 输出 source、category 和能力标注。
 - MCP 风格 tool descriptor 输出 inputSchema、annotations 和 permission metadata。
 
@@ -40,6 +47,7 @@
 - 超时。
 - 输出截断。
 - cwd 设置。
+- 跨平台测试不依赖 Unix shell 工具。
 
 ### 1.3 PermissionManager
 
@@ -289,6 +297,8 @@ mini-agent
 
 ```bash
 npm run build
+npm run typecheck
+npm run lint:unused
 npm run test:regression
 npm test
 npm run verify
@@ -301,10 +311,12 @@ git diff --check
 | --- | --- |
 | 模型输出非 JSON | LLM/DecisionParser 测试 |
 | 工具参数错误 | ToolRegistry 测试 |
-| 路径越权 | fs/read_file/apply_patch 测试 |
+| 路径越权 | fs/read_file/search_code/apply_patch 测试 |
+| 内部元数据泄露 | read_file/search_code 的 `.git`、`.mini-agent` 拒绝测试 |
 | 命令卡死 | CommandRunner 超时测试 |
 | URL 读取失控 | fetch_url 超时、大小、内网目标测试 |
 | patch 损坏 | PatchManager check 测试 |
+| Git 换行配置影响 patch | PatchManager `core.autocrlf=false` 回归测试 |
 | session 丢失 | SessionStore/EventStore 测试 |
 | 长期记忆误检索 | LongTermMemoryStore 和 ContextBuilder 测试 |
 | MCP/tool 元数据漂移 | ToolRegistry 和 McpToolBridge 测试 |

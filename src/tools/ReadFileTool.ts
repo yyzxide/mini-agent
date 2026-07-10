@@ -56,6 +56,11 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
       return toolFailure("PATH_OUTSIDE_REPOSITORY", "Path is outside repository", { path: input.path });
     }
 
+    const repoRelativePath = toRepoRelativePath(context.repoPath, fileRealPath);
+    if (isInternalRepositoryPath(repoRelativePath)) {
+      return toolFailure("INTERNAL_PATH", "Refusing to read internal repository metadata", { path: input.path });
+    }
+
     const stat = await fs.stat(fileRealPath);
 
     if (!stat.isFile()) {
@@ -86,13 +91,20 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
       : input.startLine + selectedLines.length - 1;
 
     return toolSuccess({
-      path: toRepoRelativePath(context.repoPath, fileRealPath),
+      path: repoRelativePath,
       startLine: input.startLine,
       endLine,
       totalLines,
       content: selectedLines.join("\n"),
     });
   }
+}
+
+function isInternalRepositoryPath(relativePath: string): boolean {
+  return relativePath === ".git"
+    || relativePath.startsWith(".git/")
+    || relativePath === ".mini-agent"
+    || relativePath.startsWith(".mini-agent/");
 }
 
 async function isBinaryFile(filePath: string): Promise<boolean> {

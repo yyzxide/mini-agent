@@ -15,15 +15,18 @@
 - 工具能力标注：只读、破坏性、幂等性、是否访问外部世界。
 - MCP 风格本地 tool descriptor 导出：`mini-agent mcp tools`。
 - patch check/apply 和命令执行保护。
+- patch 应用固定 `core.autocrlf=false`，降低跨机器换行配置影响。
+- `read_file` / `search_code` 对 `.git`、`.mini-agent` 等内部元数据路径做拒绝保护。
 - JSONL session/event/log/change-log。
 - 本地长期记忆索引和轻量 RAG：query build、retrieve、rerank、evidence select、context injection。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
+- 当前全量回归通过 32 个测试文件、230 个测试用例。
 
 ## 1. P0：继续提高稳定性
 
 ### 1.1 拆分 CLI 主文件
 
-`src/cli/index.ts` 仍然过大，承担了命令注册、交互循环、direct/web/review/agent 四条执行链、日志和渲染逻辑。
+`src/cli/index.ts` 仍然过大，当前已经超过 4200 行，承担了命令注册、交互循环、direct/web/review/agent 四条执行链、日志和渲染逻辑。
 
 建议拆成：
 

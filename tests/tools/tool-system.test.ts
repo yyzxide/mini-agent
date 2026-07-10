@@ -211,6 +211,15 @@ describe("read-only repository tools", () => {
     expect(result.error?.message).toBe("Path is outside repository");
   });
 
+  it("read_file refuses internal repository metadata", async () => {
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("read_file", { path: ".git/config" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("INTERNAL_PATH");
+  });
+
   it("search_code finds matching code with ripgrep", async () => {
     if (!(await hasRipgrep())) {
       return;

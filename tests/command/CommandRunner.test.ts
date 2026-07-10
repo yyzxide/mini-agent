@@ -28,7 +28,7 @@ describe("CommandRunner", () => {
   it("captures stdout", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ executable: "printf", args: ["out"] });
+    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stdout.write('out')"] });
 
     expect(result.stdout).toBe("out");
   });
@@ -36,7 +36,7 @@ describe("CommandRunner", () => {
   it("captures stderr", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ executable: "sh", args: ["-c", "printf err 1>&2"] });
+    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stderr.write('err')"] });
 
     expect(result.stderr).toBe("err");
   });
@@ -44,16 +44,16 @@ describe("CommandRunner", () => {
   it("returns a non-zero exit code without throwing", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ executable: "false" });
+    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.exit(7)"] });
 
     expect(result.success).toBe(false);
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(7);
   });
 
   it("handles timeouts", async () => {
     const runner = new CommandRunner({ repoPath, defaultTimeoutMs: 50 });
 
-    const result = await runner.run({ executable: "sleep", args: ["1"] });
+    const result = await runner.run({ executable: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"] });
 
     expect(result.success).toBe(false);
     expect(result.timedOut).toBe(true);
@@ -62,7 +62,7 @@ describe("CommandRunner", () => {
   it("truncates long output", async () => {
     const runner = new CommandRunner({ repoPath, maxOutputChars: 10 });
 
-    const result = await runner.run({ executable: "printf", args: ["x".repeat(1000)] });
+    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stdout.write('x'.repeat(1000))"] });
 
     expect(result.truncated).toBe(true);
     expect(result.stdout).toHaveLength(10);
@@ -71,7 +71,7 @@ describe("CommandRunner", () => {
   it("rejects working directories outside the repository", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    await expect(runner.run({ executable: "pwd", cwd: ".." })).rejects.toMatchObject({
+    await expect(runner.run({ executable: process.execPath, args: ["-e", "process.cwd()"], cwd: ".." })).rejects.toMatchObject({
       code: "INVALID_WORKING_DIRECTORY",
     });
   });
@@ -79,10 +79,10 @@ describe("CommandRunner", () => {
   it("runs shell commands only when shell mode is explicit", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ command: "printf shell", shell: true });
+    const result = await runner.run({ command: "echo shell", shell: true });
 
     expect(result.success).toBe(true);
-    expect(result.stdout).toBe("shell");
+    expect(result.stdout.trim()).toBe("shell");
   });
 
   it("identifies shell-like structured commands as high risk", () => {

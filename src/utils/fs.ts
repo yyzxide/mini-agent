@@ -68,7 +68,7 @@ export function toRepoRelativePath(repoPath: string, absolutePath: string): stri
 }
 
 export function toPosixPath(filePath: string): string {
-  return filePath.split(path.sep).join("/");
+  return filePath.replace(/\\/g, "/");
 }
 
 export function isIgnoredRelativePath(relativePath: string): boolean {

@@ -222,7 +222,8 @@ interface Tool<TInput, TResult> {
 - 支持相对路径。
 - 拒绝访问仓库外路径。
 - 拒绝绝对路径逃逸。
-- 拒绝 `.git` 和 `.mini-agent` 等内部路径的危险写入。
+- 拒绝 `.git` 和 `.mini-agent` 等内部路径的危险读、搜、写。
+- 工具返回给模型的仓库相对路径统一为 POSIX 风格，避免 Windows `\` 路径影响后续工具调用。
 - 错误返回清晰 message，例如 `Path is outside repository`。
 
 这保证 Agent 即便收到不可靠的模型输出，也不能随意读写仓库外文件。
@@ -270,6 +271,8 @@ patch 由 `PatchManager` 管理：
 
 这样可以把“模型生成修改”和“本地实际落盘”之间加一层工程校验。
 
+实现上会用 `git -c core.autocrlf=false apply --check` 和 `git -c core.autocrlf=false apply`，避免开发者机器上的全局 Git 换行配置把 patch 行尾悄悄改掉，导致同一个补丁在不同系统上表现不一致。
+
 ## 9. 命令执行
 
 `CommandRunner` 使用子进程执行命令，返回结构化结果：
@@ -293,6 +296,7 @@ patch 由 `PatchManager` 管理：
 - 最大输出长度。
 - 危险命令拦截。
 - 工作目录限制。
+- 默认禁用 shell，只有显式 shell 模式才会走 shell 命令。
 - 失败结果进入下一轮上下文。
 
 ## 10. Session 和 Event

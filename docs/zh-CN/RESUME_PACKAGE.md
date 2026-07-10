@@ -43,26 +43,26 @@
 
 你可以直接抄这个，再按版面裁剪：
 
-> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。支持普通问答、联网问答、代码审查与仓库任务四类模式分流，具备 `ToolRegistry`、`AgentLoop`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块，实现代码搜索、文件读取、受控公网文档抓取、补丁应用、命令执行、测试反馈、本地长期记忆检索与 JSONL 审计记录；补充 tool capability annotations、MCP 风格 tool descriptor 和 Agent Harness，通过 Vitest 为核心流程建立回归测试。
+> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。支持普通问答、联网问答、代码审查与仓库任务四类模式分流，具备 `ToolRegistry`、`AgentLoop`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块，实现代码搜索、文件读取、受控公网文档抓取、补丁应用、命令执行、测试反馈、本地长期记忆检索与 JSONL 审计记录；补充 tool capability annotations、MCP 风格 tool descriptor 和 Agent Harness，并通过 Vitest 覆盖工具、patch、命令、CLI 回归和 AgentLoop 核心流程。
 
 ## 4. 项目亮点怎么挑
 
-如果简历空间有限，优先写这 4 个：
+如果简历空间有限，优先写这 5 个：
 
 1. **多模式任务路由**  
-   普通问答、联网问答、代码审查、仓库修改任务分流。
+   普通问答、联网问答、代码审查、仓库修改任务分流，对应 `DIRECT_ANSWER`、`WEB_ANSWER`、`CODE_REVIEW`、`AGENT_LOOP`。
 
 2. **受控工具系统**  
-   搜索代码、读文件、抓网页、打 patch、跑命令都走结构化工具和校验，并带能力标注。
+   搜索代码、读文件、抓网页、打 patch、跑命令都走结构化工具和 zod 校验，并带只读、破坏性、幂等性、外部访问等能力标注。
 
 3. **会话记忆与审计**  
    本地 JSONL session/event/log/change-log，加轻量长期记忆检索，可恢复、可追踪、可复盘。
 
 4. **安全边界**  
-   路径限制、patch check、命令超时、危险命令拦截、联网目标限制。
+   路径限制、`.git` / `.mini-agent` 内部路径拒绝、patch check、Git 换行配置隔离、命令超时、危险命令拦截、联网目标限制。
 
 5. **评测与扩展性**  
-   Agent Harness 支持脚本化多步场景；MCP 风格 descriptor 为未来外部工具协议接入预留边界。
+   Agent Harness 支持脚本化多步场景；MCP 风格 descriptor 为未来外部工具协议接入预留边界；当前全量回归为 32 个测试文件、230 个测试用例通过。
 
 ## 5. 面试自我介绍怎么接这个项目
 
@@ -82,7 +82,7 @@
 2. 再说方案：我做了本地 CLI Agent，不依赖后端和页面，先把核心闭环跑通。
 3. 再说架构：CLI、TaskRouter、AgentLoop、ToolRegistry、CommandRunner、PatchManager、SessionStore。
 4. 再说难点：结构化决策、路径安全、命令安全、上下文压缩、联网回答质量。
-5. 再说结果：能完成本地代码任务闭环，当前 32 个测试文件、229 个测试用例通过，可写入简历。
+5. 再说结果：能完成本地代码任务闭环，当前 32 个测试文件、230 个测试用例通过，可写入简历。
 
 ## 6. 适合投哪些岗位
 
@@ -130,12 +130,14 @@
 - 不要说“完整接入 MCP runtime”
 - 不要说“具备高可靠实时联网搜索”
 - 不要说“可以稳定自主完成任意复杂任务”
+- 不要说“已经能替代真实 IDE Agent 或成熟商业 Coding Agent”
 
 更稳的说法是：
 
 - 这是作品级、工程化导向的本地 Agent MVP
 - 核心闭环完整，能力边界清晰
 - 重点展示架构设计、工具执行、安全边界、上下文管理和轻量本地长期记忆
+- 当前主要价值在工程闭环和可回归性，不是模型算法创新
 
 ## 9. 如果面试官质疑“你原来是客户端，为什么做这个”
 

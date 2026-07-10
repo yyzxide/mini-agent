@@ -101,7 +101,7 @@ export class PatchManager {
       this.assertPatchAllowed(patch);
       const patchFile = await this.writeTempPatch(patch);
       try {
-        const result = await execa("git", ["apply", "--check", patchFile], {
+        const result = await execa("git", ["-c", "core.autocrlf=false", "apply", "--check", patchFile], {
           cwd: this.repoPath,
           reject: false,
           encoding: "utf8",
@@ -158,7 +158,7 @@ export class PatchManager {
 
     const patchFile = await this.writeTempPatch(patch);
     try {
-      const result = await execa("git", ["apply", patchFile], {
+      const result = await execa("git", ["-c", "core.autocrlf=false", "apply", patchFile], {
         cwd: this.repoPath,
         reject: false,
         encoding: "utf8",

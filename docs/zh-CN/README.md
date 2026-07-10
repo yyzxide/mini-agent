@@ -53,9 +53,10 @@
 - 普通问答、联网问答、代码审查、仓库任务四种模式分流。
 - 统一 ToolRegistry 和 zod 参数校验。
 - `list_files`、`read_file`、`search_code`、`web_search`、`fetch_url`、`git_status`、`git_diff`、`apply_patch`。
+- `read_file` / `search_code` 会拒绝 `.git`、`.mini-agent` 等内部元数据路径，代码搜索结果会统一为 POSIX 风格路径。
 - 命令执行超时、输出截断和危险命令拦截。
 - 常见运行错误本地诊断，例如运行目录错误、命令不存在、端口占用、连接拒绝和权限不足。
-- patch 应用前 `git apply --check`。
+- patch 应用前 `git apply --check`，并固定 `core.autocrlf=false`，避免全局 Git 换行配置影响补丁结果。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
 - `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
 - `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
@@ -94,11 +95,15 @@ npm run test:regression
 npm run verify:regression
 ```
 
+当前全量回归结果：32 个测试文件、230 个测试用例通过；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+
 ## 快速验证
 
 ```bash
 npm install
 npm run build
+npm run typecheck
+npm run lint:unused
 npm run test:regression
 npm test
 npm link

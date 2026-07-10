@@ -35,8 +35,9 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Provides a scripted Agent Harness for repeatable end-to-end agent-loop scenarios.
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
-- Reads files with repository path safety checks.
-- Applies unified diff patches after `git apply --check`.
+- Reads files with repository path safety checks and refuses internal metadata paths such as `.git` and `.mini-agent`.
+- Normalizes code-search result paths to POSIX-style repository paths for stable follow-up tool calls.
+- Applies unified diff patches after `git apply --check`, with `core.autocrlf=false` to avoid machine-specific Git line-ending behavior.
 - Executes structured commands with shell disabled by default.
 - Requires additional approval and dangerous-command checks for explicit shell or shell-like commands.
 - Records messages, tool calls, command results, patch events, file changes, and final diffs in `.mini-agent/`.
@@ -159,7 +160,7 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 
 ## Answer Modes
 
-`mini-agent` separates user input into three modes:
+`mini-agent` separates user input into four modes:
 
 - `DIRECT_ANSWER`: normal chat, explanations, and explicit snippet-only requests. Output uses `[answer]`.
 - `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Output uses `[answer]`.
@@ -192,6 +193,7 @@ The project keeps a focused conversation-level regression suite for the user-vis
 - package-manager `ENOENT package.json` errors must be diagnosed as wrong working-directory problems when the pasted path is outside the active repo
 - omitted-predicate follow-ups such as `葡萄牙呢` must reuse session context
 - repository analysis must read real repository evidence before summarizing
+- repository metadata such as `.git` and `.mini-agent` must not be exposed through read/search tools
 
 Run it with:
 
@@ -204,6 +206,8 @@ For a quick pre-demo gate:
 ```bash
 npm run verify:regression
 ```
+
+Current full local gate: 32 Vitest files and 230 tests pass, along with TypeScript type checking and unused-symbol checks.
 
 Interactive slash commands:
 

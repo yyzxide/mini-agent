@@ -116,6 +116,8 @@ describe("AgentLoop", () => {
   });
 
   it("records last error context when a command fails and continues", async () => {
+    const failScriptPath = path.join(repoPath, "fail-test.mjs");
+    await fs.writeFile(failScriptPath, "process.exit(1);\n", "utf8");
     const sessionStore = new SessionStore({ repoPath });
     const eventStore = new EventStore({ repoPath });
     const loop = createLoop({
@@ -125,8 +127,8 @@ describe("AgentLoop", () => {
         { type: "PLAN", message: "Run a failing test command." },
         {
           type: "RUN_COMMAND",
-          executable: "false",
-          args: ["npm", "test"],
+          executable: process.execPath,
+          args: [failScriptPath, "npm test"],
           description: "simulate test failure",
         },
         { type: "FINAL", success: true, summary: "Finished after recording command failure." },

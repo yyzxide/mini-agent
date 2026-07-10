@@ -8,6 +8,7 @@ import {
   normalizeRepoPath,
   resolveRepoPath,
   toRepoRelativePath,
+  toPosixPath,
 } from "../utils/fs.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
@@ -75,6 +76,9 @@ export class SearchCodeTool implements Tool<SearchCodeInput, SearchCodeData> {
     }
 
     const relativePath = toRepoRelativePath(repoRealPath, targetRealPath);
+    if (isInternalRepositoryPath(relativePath)) {
+      return toolFailure("INTERNAL_PATH", "Refusing to search internal repository metadata", { path: input.path });
+    }
 
     const args = [
       "--json",
@@ -131,7 +135,12 @@ function parseRgJson(stdout: string, maxResults: number): SearchCodeMatch[] {
       continue;
     }
 
-    const parsed = JSON.parse(line) as RgJsonLine;
+    let parsed: RgJsonLine;
+    try {
+      parsed = JSON.parse(line) as RgJsonLine;
+    } catch {
+      continue;
+    }
     if (parsed.type !== "match") {
       continue;
     }
@@ -159,7 +168,14 @@ function parseRgJson(stdout: string, maxResults: number): SearchCodeMatch[] {
 }
 
 function normalizeRgPath(filePath: string): string {
-  return filePath.replace(/^\.\//, "");
+  return toPosixPath(filePath).replace(/^\.\//, "");
+}
+
+function isInternalRepositoryPath(relativePath: string): boolean {
+  return relativePath === ".git"
+    || relativePath.startsWith(".git/")
+    || relativePath === ".mini-agent"
+    || relativePath.startsWith(".mini-agent/");
 }
 
 function isCommandNotFound(error: unknown): boolean {
