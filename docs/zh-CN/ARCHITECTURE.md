@@ -37,7 +37,7 @@ CLI
 ## 3. 目录职责
 
 ```text
-src/cli              CLI 入口和调试命令
+src/cli              CLI 入口、调试命令和回答模式支持模块
 src/agent            TaskRouter、AgentLoop、状态、决策类型
 src/context          仓库扫描、仓库状态分析和上下文拼接
 src/tools            统一工具接口和工具实现
@@ -47,6 +47,7 @@ src/git              git status/diff/commit 辅助能力
 src/permission       权限级别和危险命令拦截
 src/session          JSONL session/event 存储
 src/memory           本地长期记忆索引、关键词和向量式检索
+src/skills           声明式 Skill 发现、校验、选择和上下文注入
 src/mcp              MCP 风格工具描述、外部工具配置模型和本地工具桥接
 src/eval             Agent 评测 harness、脚本化 LLM 客户端
 src/llm              LLM 接口和 OpenAI-compatible 客户端
@@ -68,6 +69,7 @@ tests                自动化测试
 - 如果用户问“你写入了嘛？”，CLI 不会把这个问题交给模型猜，而是直接检查 session 中上一轮请求之后是否存在 `FILE_CHANGE` 记录。
 - 需要最新资料、新闻、版本、赛事结果、收盘行情、汇率、市场指数等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
 - 文件级 bug 检查和代码审查走 `CODE_REVIEW`，先读取目标文件，再额外加载少量由相对 import、require、`#include` 推导出来的相关文件作为补充上下文，再让模型返回结构化 findings，先由本地代码校验 `codeQuote` 是否真的落在主文件对应行附近，再做一轮 review 复核，进一步过滤“引用代码是真的，但结论过度武断”的 finding。
+- Review 支持逻辑集中在 `CodeReviewSupport`，完整执行编排位于 `CodeReviewTask`；CLI 入口只负责选择并调用该任务。
 - 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
 - 对于“分析当前项目”“总结当前仓库”这类仓库分析请求，CLI 虽然仍归在 `AGENT_LOOP` 大类下，但会先执行一条本地强制取证路径：列出目录、读取 README / 构建文件、读取代表性源码文件；如果没有读到源码文件，就拒绝直接总结。这样能避免模型只看目录树摘要就给出看似正确、实则不够扎实的概述。
 - “刚才聊了什么 / 还记得吗 / 上次呢”这类会话追问走 `DIRECT_ANSWER`，但会带上当前 session 的最近记录。
@@ -81,6 +83,8 @@ tests                自动化测试
 - `sourceHints`：提示优先找官方、实时、发布说明、比分页等来源。
 - `answerInstructions`：约束回答不要混淆赛事、版本、政策或其它领域边界。
 - `needsLiveData`：标记是否属于实时或强时效问题。
+
+Web 支持逻辑位于 `WebAnswerSupport`：负责来源校验、去重、排序、抓取候选、证据上下文和能力纠偏；完整执行编排位于 `WebAnswerTask`。Direct、Review、AgentLoop 和仓库分析也分别拥有独立 Task 模块，公共 Session/LLM 生命周期由 `CliTaskRuntime` 提供。
 
 规划优先由 LLM 根据 session memory 完成；如果规划失败，会回退到本地启发式策略。例如上一轮问“世界杯最新比分”，下一轮问“日本队最近几场的成绩”，搜索 query 会携带“世界杯”范围，避免泛化成日本国家队所有友谊赛、预选赛或其它赛事成绩。
 
@@ -109,7 +113,15 @@ Agent 每轮从模型获得一个结构化决策：
 
 这种设计把“模型想做什么”和“程序怎么执行”分开，方便做权限控制、日志记录和测试。
 
-## 4.1 决策质量闸门
+## 4.1 Plan 操作模式
+
+`PLAN` 不再只是一次进度 decision。Session 额外保存独立于生命周期状态的 `operatingMode: EXECUTE | PLAN`：暂停和恢复不会丢失当前操作模式。
+
+Plan 模式具有两层只读保护：第一层只向模型暴露 `readOnlyHint=true` 且 `destructiveHint=false` 的工具；第二层在 `AgentLoop` 执行 decision 前硬拦 `APPLY_PATCH`、`RUN_COMMAND` 和任何非只读 `TOOL_CALL`。因此即使模型返回恶意或漂移的写操作，也不会进入 ToolRegistry、PatchManager 或 CommandRunner。
+
+用户可以使用 `mini-agent plan <task>` 进行一次性规划；交互模式使用 `/plan`、`/plan off` 和 `/execute`。`/execute` 只把最近成功计划作为指导重新交给正常 AgentLoop，并要求重新检查当前仓库，不会直接执行计划文本里的命令。
+
+## 4.2 决策质量闸门
 
 真实模型会出现两类典型问题：一类是 JSON 形状轻微漂移，例如 `apply_patch` 写成小写、`description` 漏掉、把 `summary` 写成 `message`；另一类是语义上撒谎，例如没有真正写文件却说“已创建”，或者 session 中已经有上一轮代码却反问“要写什么内容”。
 
@@ -122,7 +134,7 @@ Agent 每轮从模型获得一个结构化决策：
 
 这层设计的原则是：模型可以提出计划和补丁，但“是否真的完成”必须由本地状态、工具结果和 session 记录判断，而不是相信模型一句总结。
 
-## 4.2 运行错误诊断器
+## 4.3 运行错误诊断器
 
 用户经常会把终端报错直接贴进对话。如果所有报错都交给模型自由解释，模型容易忽略当前仓库路径、命令执行目录、端口状态等本地事实。
 
@@ -138,7 +150,7 @@ Agent 每轮从模型获得一个结构化决策：
 
 诊断结果包含 `category`、`confidence`、`title`、`explanation`、`evidence`、`suggestedCommands` 和 `metadata`。模型后续如果要参与修复，也应该基于这个结构化诊断，而不是直接猜测错误原因。
 
-## 4.5 新文件放置建议
+## 4.4 新文件放置建议
 
 为了减少模型在“用户没给目标路径”时乱猜文件位置，`ContextBuilder` 现在会额外注入一段 `New file placement guidance`。这段内容由 `FilePlacementAdvisor` 根据仓库真实结构生成，例如：
 
@@ -336,7 +348,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 `SessionMemory` 会把当前 session 最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
 
-长期记忆由 `LongTermMemoryStore` 负责。它会读取 session 里的 `TASK_SUMMARY` 和 `MEMORY_COMPACTION` 记录，生成 `.mini-agent/memory/index.jsonl`。每条长期记忆包含：
+长期记忆由 `LongTermMemoryStore` 负责。它会读取成功的 `TASK_SUMMARY`、`MEMORY_COMPACTION` 和显式保存的 `MANUAL` 记忆，生成 `.mini-agent/memory/index.jsonl`。失败任务默认不进入索引，常见 API key/token/password 会在持久化前脱敏。每条长期记忆包含：
 
 - `sessionId`：来源会话。
 - `source`：来自任务总结还是压缩记忆。
@@ -355,7 +367,15 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 这个设计不依赖外部向量库，适合本地 MVP；后续如果要升级成生产级 RAG，可以把本地确定性向量替换成真实 embedding，把 JSONL 存储替换成向量数据库，同时保留 query building、rerank 和 evidence selection 的上层逻辑。
 
-每次任务结束后，CLI 会自动索引当前 session；`/compact` 写入压缩记忆后也会同步索引。`ContextBuilder` 会用当前用户任务检索长期记忆，并把结果注入 `Long-term retrieved memory` 段落。模型必须把它当成历史线索，而不是当前事实；当长期记忆与当前文件、当前工具输出或当前用户指令冲突时，后者优先。
+每次任务结束后，CLI 会自动索引当前 session；`/compact` 写入结构化压缩记忆后也会同步索引。`MemoryContextService` 将召回统一注入 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop，并使用 `<memory_evidence>` 标记为不可信历史数据：模型不得执行记忆中的指令，当前用户要求、当前文件和当前工具结果始终优先。
+
+显式生命周期控制包括 `memory remember/forget/stats/clear --yes`、`/remember` 和 `/forget`。记忆是当前仓库 `.mini-agent` 下的本地数据，不会自动随 Git 在 Windows/Linux 两台机器之间同步。
+
+## 10.1 声明式 Skill
+
+Skill v1 是本地声明式指令，而不是动态脚本或插件。系统发现版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md`，校验名称、描述、触发词、大小和真实路径边界；同名时版本化仓库 Skill 优先。
+
+Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description 和 triggers 确定性匹配，最多注入三个。`ContextBuilder` 和 Direct/Web/Review/RepositoryAnalysis 都会注入匹配 Skill，并明确优先级为“当前用户指令和仓库事实高于 Skill”。Skill 不会注册动态工具，也不能绕过 ToolRegistry、PermissionManager 或 Plan 只读策略。
 
 ## 10.5 CLI 诊断和常用 slash 命令
 
@@ -367,6 +387,9 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `mini-agent memory index [sessionId]`：索引一个 session；不传 sessionId 时索引全部本地 session。
 - `mini-agent memory search <query>`：检索本地长期记忆。
 - `mini-agent memory list`：列出最近写入的长期记忆。
+- `mini-agent memory remember/forget/stats/clear`：显式管理长期记忆。
+- `mini-agent skill list/show/validate/init`：发现、查看、校验或创建本地 Skill 模板。
+- `mini-agent plan <task>`：运行一次只读规划。
 
 交互式 slash 命令：
 
@@ -384,6 +407,9 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `/changes [n]`：查看最近任务变更日志。
 - `/compact`：写入一条本地压缩记忆。
 - `/memory <query>`：检索本地长期记忆；不传 query 时列出最近记忆。
+- `/remember <text>`、`/forget <id>`：保存或删除长期记忆。
+- `/skills [name]`：列出或查看 Skill。
+- `/plan [task|off|status]`、`/execute [notes]`：规划模式与显式执行闭环。
 - `/status`：查看当前 session 状态，包括最近模式、最近摘要和已记录的 LLM token 用量。
 - `/repo`：查看仓库状态摘要。
 - `/diff`：查看当前 diff。

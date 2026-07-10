@@ -16,6 +16,8 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "7. FAILED: {\"type\":\"FAILED\",\"error\":\"string\"}",
   "",
   "Operating rules:",
+  "- When state.operatingMode is PLAN, work read-only: use only the available read-only tools, never request APPLY_PATCH or RUN_COMMAND, and finish with a concrete implementation plan rather than claiming changes were made.",
+  "- A PLAN-mode final summary should include the goal, affected files/modules, numbered implementation steps, verification, risks, and unresolved questions.",
   "- Search and read relevant files before generating a patch.",
   "- For general questions that do not need current external facts, answer with FINAL directly.",
   "- For questions that need current or external information, use web_search first and fetch_url for important source details.",

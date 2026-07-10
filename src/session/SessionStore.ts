@@ -22,6 +22,7 @@ import type {
   SessionRecord,
   SessionRecordInput,
   SessionStatus,
+  AgentOperatingMode,
 } from "./SessionTypes.js";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +72,7 @@ export class SessionStore {
       status: "ACTIVE",
       messageCount: 0,
       eventCount: 0,
+      operatingMode: input.operatingMode ?? "EXECUTE",
     };
 
     await this.touchFile(this.sessionFilePath(sessionId));
@@ -89,7 +91,9 @@ export class SessionStore {
     await this.init();
     const index = await this.readIndex();
 
-    return [...index.sessions].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return index.sessions
+      .map(withDefaultOperatingMode)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   async getSessionMeta(sessionId: string): Promise<SessionMeta> {
@@ -103,7 +107,7 @@ export class SessionStore {
       throw new MiniAgentError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`, { sessionId });
     }
 
-    return meta;
+    return withDefaultOperatingMode(meta);
   }
 
   async appendRecord<TPayload extends JsonObject = JsonObject>(
@@ -156,6 +160,16 @@ export class SessionStore {
     return await this.updateSessionMeta(sessionId, (meta) => ({
       ...meta,
       status,
+      updatedAt,
+    }));
+  }
+
+  async updateOperatingMode(sessionId: string, operatingMode: AgentOperatingMode): Promise<SessionMeta> {
+    await this.getSessionMeta(sessionId);
+    const updatedAt = new Date().toISOString();
+    return await this.updateSessionMeta(sessionId, (meta) => ({
+      ...meta,
+      operatingMode,
       updatedAt,
     }));
   }
@@ -257,6 +271,10 @@ export class SessionStore {
       throw new MiniAgentError("INVALID_SESSION_ID", `Invalid session id: ${sessionId}`, { sessionId });
     }
   }
+}
+
+function withDefaultOperatingMode(meta: SessionMeta): SessionMeta {
+  return { ...meta, operatingMode: meta.operatingMode ?? "EXECUTE" };
 }
 
 function isMessageRecord(type: string): boolean {

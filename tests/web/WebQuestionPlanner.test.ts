@@ -31,6 +31,16 @@ describe("WebQuestionPlanner", () => {
     )).toBe("葡萄牙是强队吗");
   });
 
+  it("reuses the previous question when the user confirms switching to web", () => {
+    const plan = buildFallbackWebQuestionPlan(
+      "嗯切换吧",
+      "[user] YouTube现在最热门的视频是什么\n[assistant] 可以切换到联网模式查询。",
+    );
+
+    expect(plan.standaloneQuestion).toBe("YouTube现在最热门的视频是什么");
+    expect(plan.needsLiveData).toBe(true);
+  });
+
   it("adds source-focused queries for live sports data", () => {
     const plan = buildFallbackWebQuestionPlan("世界杯最新比分", "(none)");
 

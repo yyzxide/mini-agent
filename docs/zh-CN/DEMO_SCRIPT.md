@@ -2,6 +2,8 @@
 
 这份脚本用于演示纯 CLI 版 `mini-coding-agent`。目标是证明它能在本地仓库中完成“理解任务、调用工具、修改代码、执行命令、输出 diff、保存 session”的闭环。
 
+建议额外演示三条能力：`skill list` 查看声明式工作流、`/remember` 后跨 Session 召回，以及 `/plan <task>` 保持工作区不变后用 `/execute` 显式执行。
+
 ## 1. 准备项目
 
 ```bash

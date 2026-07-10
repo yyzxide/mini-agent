@@ -1,7 +1,7 @@
 import { GitManager } from "../git/GitManager.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
-import { formatLongTermMemoryResults, LongTermMemoryStore } from "../memory/LongTermMemoryStore.js";
+import { MemoryContextService } from "../memory/MemoryContextService.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
@@ -9,6 +9,7 @@ import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacement
 import { RepoScanner } from "./RepoScanner.js";
 import { truncateText } from "../utils/fs.js";
 import { formatRuntimeContext } from "./RuntimeContext.js";
+import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
@@ -20,6 +21,7 @@ export interface ContextSectionBudgets {
   task: number;
   memory: number;
   longTermMemory: number;
+  skills: number;
   repoState: number;
   tools: number;
   runtime: number;
@@ -53,7 +55,8 @@ export class ContextBuilder {
     const filePlacementAdvisor = new FilePlacementAdvisor({ repoPath: this.repoPath });
 
     const sessionStore = new SessionStore({ repoPath: this.repoPath });
-    const longTermMemoryStore = new LongTermMemoryStore({ repoPath: this.repoPath });
+    const memoryContextService = new MemoryContextService({ repoPath: this.repoPath });
+    const skillStore = new SkillStore({ repoPath: this.repoPath });
 
     const [
       repoStateDetails,
@@ -65,6 +68,7 @@ export class ContextBuilder {
       diff,
       sessionMemory,
       longTermMemory,
+      selectedSkills,
     ] = await Promise.all([
       repoStateAnalyzer.analyze().catch((error: unknown) => ({ error: errorToText(error) })),
       scanner.isGitRepository().catch((error: unknown) => `error: ${errorToText(error)}`),
@@ -75,8 +79,10 @@ export class ContextBuilder {
       git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
       readSessionMemory(sessionStore, state.sessionId, { maxRecords: 80, maxChars: 12_000 })
         .catch((error: unknown) => `error: ${errorToText(error)}`),
-      longTermMemoryStore.search(state.userGoal, { limit: 5, sessionId: state.sessionId })
-        .then(formatLongTermMemoryResults)
+      memoryContextService.build({ query: state.userGoal, limit: 5, sessionId: state.sessionId })
+        .catch((error: unknown) => `error: ${errorToText(error)}`),
+      skillStore.select(state.userGoal, 3)
+        .then(formatSkillsForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
     const repoState = hasErrorRecord(repoStateDetails)
@@ -107,6 +113,11 @@ export class ContextBuilder {
           "Relevant memories retrieved from previous local sessions. Treat them as hints; prefer current files, current tool output, and current user instructions when they conflict.",
           longTermMemory,
         ].join("\n\n"),
+      },
+      {
+        title: "Selected skills",
+        budget: this.budgets.skills,
+        content: selectedSkills,
       },
       { title: "Runtime context", budget: this.budgets.runtime, content: formatRuntimeContext() },
       { title: "Repository state summary", budget: this.budgets.repoState, content: repoState },
@@ -172,16 +183,17 @@ function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
     task: Math.floor(maxChars * 0.08),
     memory: Math.floor(maxChars * 0.09),
     longTermMemory: Math.floor(maxChars * 0.08),
+    skills: Math.floor(maxChars * 0.08),
     repoState: Math.floor(maxChars * 0.08),
     tools: Math.floor(maxChars * 0.08),
     runtime: Math.floor(maxChars * 0.05),
     git: Math.floor(maxChars * 0.05),
-    repositoryStructure: Math.floor(maxChars * 0.09),
+    repositoryStructure: Math.floor(maxChars * 0.07),
     projectDocs: Math.floor(maxChars * 0.07),
     filePlacement: Math.floor(maxChars * 0.07),
     recentResults: Math.floor(maxChars * 0.07),
     diagnostics: Math.floor(maxChars * 0.07),
-    diff: Math.floor(maxChars * 0.09),
+    diff: Math.floor(maxChars * 0.08),
   };
 }
 

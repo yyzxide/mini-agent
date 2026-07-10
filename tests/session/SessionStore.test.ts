@@ -83,6 +83,21 @@ describe("SessionStore", () => {
     expect(updated.status).toBe("FINISHED");
     await expect(store.getSessionMeta(session.sessionId)).resolves.toMatchObject({ status: "FINISHED" });
   });
+
+  it("persists plan operating mode independently from lifecycle status", async () => {
+    const store = new SessionStore({ repoPath });
+    const session = await store.createSession({ title: "Plan mode" });
+    expect(session.operatingMode).toBe("EXECUTE");
+
+    await store.updateOperatingMode(session.sessionId, "PLAN");
+    await store.updateSessionStatus(session.sessionId, "PAUSED");
+
+    const reloaded = new SessionStore({ repoPath });
+    await expect(reloaded.getSessionMeta(session.sessionId)).resolves.toMatchObject({
+      operatingMode: "PLAN",
+      status: "PAUSED",
+    });
+  });
 });
 
 async function expectPath(filePath: string): Promise<void> {

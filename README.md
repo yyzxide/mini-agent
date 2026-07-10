@@ -31,6 +31,9 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
 - Maintains local long-term memory from task summaries and compaction records, then retrieves relevant memories into future prompts.
+- Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory clear --yes`, `/remember`, and `/forget`; failed task summaries are excluded and common secrets are redacted.
+- Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into every answer/task mode without allowing skills to bypass tool permissions.
+- Provides a hard read-only plan mode through `mini-agent plan`, `/plan`, `/plan off`, and `/execute`; plan mode exposes only read-only tools and blocks patches and commands at runtime.
 - Exposes tool capability annotations and MCP-style local tool descriptors for future external-tool integration.
 - Provides a scripted Agent Harness for repeatable end-to-end agent-loop scenarios.
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
@@ -134,6 +137,11 @@ mini-agent session summary <sessionId>
 mini-agent memory index
 mini-agent memory search "之前数据流中位数怎么实现的"
 mini-agent memory list
+mini-agent memory remember "Use npm test before pushing"
+mini-agent memory stats
+mini-agent skill list
+mini-agent skill init testing --description "Use for Vitest regression work"
+mini-agent plan "refactor the CLI router"
 mini-agent status
 mini-agent diff
 mini-agent tool list
@@ -166,6 +174,21 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 - `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Output uses `[answer]`.
 - `CODE_REVIEW`: file-focused bug inspection and code review. The CLI reads the target file, automatically loads a few related files referenced by local imports/includes, asks the model for structured findings, locally filters out findings whose quoted code does not match the primary file, then runs a second-pass verification step that can downgrade or drop overreaching findings. Output uses `[review]`.
 - `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
+- `PLAN`: a persisted read-only operating mode for repository planning. Only read-only tools are exposed; patches, commands, and non-read-only tool calls are blocked again at execution time. Use `mini-agent plan`, `/plan`, `/plan off`, and `/execute`.
+
+Declarative skills use a small `SKILL.md` format:
+
+```markdown
+---
+name: testing
+description: Use for Vitest regression work
+triggers: vitest, regression
+---
+
+Run targeted tests before the full suite.
+```
+
+Versioned skills live in `skills/<name>/SKILL.md`; machine-local skills live in `.mini-agent/skills/<name>/SKILL.md`. Mention `$testing` to select one explicitly, or let deterministic trigger matching select up to three relevant skills.
 
 When the user asks to write code but does not provide a target path, the agent now prefers the repository-editing loop and receives task-specific file-placement guidance from local project signals such as `src/`, `public/`, `src/main/java/`, `tests/`, build files, and detected languages.
 
@@ -176,6 +199,8 @@ In interactive mode, web-answer follow-up questions reuse the active session con
 For example, after asking about World Cup scores, a follow-up like "Japan's recent results" is searched as a World Cup-scoped question instead of a broad national-team query.
 
 Very short follow-up prompts such as `葡萄牙呢`, `那这个呢`, or `and Portugal?` also reuse the active session. When the previous question makes the omitted predicate clear, the CLI rewrites the follow-up into a fuller question before routing and answering.
+
+Time-sensitive popularity questions such as `YouTube现在最热门的视频是什么` route directly to web-answer mode. If the assistant previously suggested web research, confirmations such as `嗯切换吧` or `联网查吧` also enter that mode and reuse the previous question instead of searching for the confirmation phrase itself.
 
 Short repository follow-ups can also reuse the active session. For example, if the previous turn returned a code snippet and the next turn says `写入一个文件里面`, `写进去`, or `保存一下`, the CLI rewrites that into an explicit repository task, carries over the latest code block, and lets `AGENT_LOOP` create the file instead of asking the user to repeat the code. Short coding follow-ups after an edit task, such as `数据流的中位数呢`, keep the repository-editing mode instead of falling back to chat-only output.
 
@@ -207,7 +232,7 @@ For a quick pre-demo gate:
 npm run verify:regression
 ```
 
-Current full local gate: 32 Vitest files and 230 tests pass, along with TypeScript type checking and unused-symbol checks.
+Current normal-environment gate: 34 Vitest files and 247 tests, along with TypeScript type checking and unused-symbol checks.
 
 Interactive slash commands:
 

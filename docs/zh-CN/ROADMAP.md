@@ -19,20 +19,23 @@
 - `read_file` / `search_code` 对 `.git`、`.mini-agent` 等内部元数据路径做拒绝保护。
 - JSONL session/event/log/change-log。
 - 本地长期记忆索引和轻量 RAG：query build、retrieve、rerank、evidence select、context injection。
+- 全模式长期记忆召回、显式 remember/forget、失败过滤、密钥脱敏和结构化 compaction。
+- 声明式 Skill 发现、校验、自动/显式选择以及全模式上下文注入。
+- Session 持久化的只读 Plan 模式和 `/plan` -> `/execute` 闭环，带运行时写操作硬拦截。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
-- 当前全量回归通过 32 个测试文件、230 个测试用例。
+- 当前正常环境回归基线为 34 个测试文件、247 个测试用例。
 
 ## 1. P0：继续提高稳定性
 
-### 1.1 拆分 CLI 主文件
+### 1.1 继续拆分 CLI 交互与命令注册
 
-`src/cli/index.ts` 仍然过大，当前已经超过 4200 行，承担了命令注册、交互循环、direct/web/review/agent 四条执行链、日志和渲染逻辑。
+第一轮拆分已经完成：`src/cli/index.ts` 从约 4270 行降到约 2350 行（包含新增 Skill/Memory/Plan 命令），Direct/Web/Review/AgentLoop/RepositoryAnalysis 执行链、公共 Session/LLM Runtime 和各模式支持逻辑均已独立。当前入口主要承担命令注册、交互循环、模式调度和状态展示。
 
-建议拆成：
+后续继续拆成：
 
 - `src/cli/program.ts`：Commander 命令注册。
 - `src/cli/interactive.ts`：交互式 session 和 slash commands。
-- `src/cli/taskRunner.ts`：run/review/direct/web/agent 模式调度。
+- `src/cli/taskRunner.ts`：统一模式调度入口，调用现有独立 Task 模块。
 - `src/cli/render.ts`：终端输出格式。
 - `src/cli/commands/*`：config、tool、mcp、memory、session、git 等子命令。
 
@@ -63,7 +66,7 @@
 - 抽象 `EmbeddingProvider`。
 - 接真实 embedding API。
 - 将 `MemoryRetriever` 的存储层替换为 SQLite FTS、LanceDB、Qdrant 或 pgvector。
-- 增加 memory aging、冲突检测、置信度和手动遗忘。
+- 增加 memory aging、冲突检测和置信度（手动遗忘已经具备）。
 - 对检索结果做 LLM rerank 或 cross-encoder rerank。
 
 ### 2.2 真实 MCP runtime

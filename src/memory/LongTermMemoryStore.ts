@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { SessionStore } from "../session/SessionStore.js";
 import type { JsonObject, SessionRecord, SessionRecordType } from "../session/SessionTypes.js";
 import { ensureDir, readJsonLines, resolveMiniAgentPath, truncateText } from "../utils/fs.js";
@@ -9,7 +10,8 @@ import type { MemoryRetrievalOptions, MemoryRetriever } from "./MemoryRetriever.
 import { rerankMemoryResults } from "./MemoryReranker.js";
 import { cosineSimilarity, embedText, extractKeywords, unique } from "./MemoryText.js";
 
-export type LongTermMemorySource = "TASK_SUMMARY" | "MEMORY_COMPACTION";
+export type LongTermMemorySource = "TASK_SUMMARY" | "MEMORY_COMPACTION" | "MANUAL";
+type IndexedSessionMemorySource = Exclude<LongTermMemorySource, "MANUAL">;
 
 export interface LongTermMemoryEntry {
   id: string;
@@ -48,6 +50,13 @@ export interface LongTermMemorySearchOptions {
   sessionId?: string;
 }
 
+export interface LongTermMemoryStats {
+  total: number;
+  bySource: Record<LongTermMemorySource, number>;
+  sessions: number;
+  indexPath: string;
+}
+
 const MEMORY_DIR = "memory";
 const MEMORY_INDEX_FILE = "index.jsonl";
 const DEFAULT_SEARCH_LIMIT = 5;
@@ -75,6 +84,73 @@ export class LongTermMemoryStore implements MemoryRetriever {
     return entries
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, Math.max(0, limit));
+  }
+
+  async remember(input: { text: string; title?: string; sessionId?: string }): Promise<LongTermMemoryEntry> {
+    await this.init();
+    const text = redactMemoryText(input.text.trim());
+    if (!text) {
+      throw new Error("Memory text cannot be empty");
+    }
+
+    const title = redactMemoryText(input.title?.trim() || truncateText(text.replace(/\s+/g, " "), 120).text);
+    const indexedText = truncateText(redactMemoryText(text), MAX_INDEXED_TEXT_CHARS).text;
+    const timestamp = new Date().toISOString();
+    const entry: LongTermMemoryEntry = {
+      id: `manual:${randomUUID()}`,
+      sessionId: input.sessionId?.trim() || "manual",
+      repoPath: this.repoPath,
+      source: "MANUAL",
+      title,
+      text: indexedText,
+      keywords: extractKeywords(`${title}\n${indexedText}`).slice(0, 160),
+      vector: embedText(`${title}\n${indexedText}`),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      metadata: { source: "manual" },
+    };
+
+    const entries = await this.readAll();
+    entries.push(entry);
+    await this.writeAll(entries);
+    return entry;
+  }
+
+  async remove(id: string): Promise<boolean> {
+    await this.init();
+    const entries = await this.readAll();
+    const next = entries.filter((entry) => entry.id !== id);
+    if (next.length === entries.length) {
+      return false;
+    }
+    await this.writeAll(next);
+    return true;
+  }
+
+  async clear(): Promise<number> {
+    await this.init();
+    const entries = await this.readAll();
+    await this.writeAll([]);
+    return entries.length;
+  }
+
+  async stats(): Promise<LongTermMemoryStats> {
+    await this.init();
+    const entries = await this.readAll();
+    const bySource: Record<LongTermMemorySource, number> = {
+      TASK_SUMMARY: 0,
+      MEMORY_COMPACTION: 0,
+      MANUAL: 0,
+    };
+    for (const entry of entries) {
+      bySource[entry.source] = (bySource[entry.source] ?? 0) + 1;
+    }
+    return {
+      total: entries.length,
+      bySource,
+      sessions: new Set(entries.map((entry) => entry.sessionId)).size,
+      indexPath: this.indexPath,
+    };
   }
 
   async indexSession(sessionStore: SessionStore, sessionId: string): Promise<LongTermMemoryIndexResult> {
@@ -131,7 +207,7 @@ export class LongTermMemoryStore implements MemoryRetriever {
     const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
     const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
     const queryVector = embedText(query.expandedQuery);
-    const entries = await this.readAll();
+    const entries = (await this.readAll()).filter((entry) => entry.metadata.success !== false);
 
     const candidates = entries
       .map((entry) => scoreMemoryEntry(entry, query, queryVector))
@@ -192,15 +268,19 @@ function extractMemoryEntries(input: {
       continue;
     }
 
+    if (record.payload.success === false) {
+      continue;
+    }
+
     const text = readPayloadString(record.payload, "summary");
     if (text.length === 0) {
       continue;
     }
 
-    const title = latestUserMessage.length > 0
+    const title = redactMemoryText(latestUserMessage.length > 0
       ? truncateText(latestUserMessage.replace(/\s+/g, " "), 120).text
-      : input.title;
-    const indexedText = truncateText(text, MAX_INDEXED_TEXT_CHARS).text;
+      : input.title);
+    const indexedText = truncateText(redactMemoryText(text), MAX_INDEXED_TEXT_CHARS).text;
 
     entries.push({
       id: `${input.sessionId}:${record.id}`,
@@ -220,11 +300,11 @@ function extractMemoryEntries(input: {
   return entries;
 }
 
-function isIndexableMemoryRecord(record: SessionRecord): record is SessionRecord & { type: LongTermMemorySource } {
+function isIndexableMemoryRecord(record: SessionRecord): record is SessionRecord & { type: IndexedSessionMemorySource } {
   return isIndexableMemoryType(record.type);
 }
 
-function isIndexableMemoryType(type: SessionRecordType): type is LongTermMemorySource {
+function isIndexableMemoryType(type: SessionRecordType): type is IndexedSessionMemorySource {
   return type === "TASK_SUMMARY" || type === "MEMORY_COMPACTION";
 }
 
@@ -268,3 +348,9 @@ function scoreMemoryEntry(
 }
 
 export { extractKeywords } from "./MemoryText.js";
+
+export function redactMemoryText(value: string): string {
+  return value
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_API_KEY]")
+    .replace(/\b(api[_-]?key|access[_-]?token|token|password|authorization)\s*[:=]\s*([^\s,;]+)/gi, "$1=[REDACTED]");
+}

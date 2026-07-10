@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LongTermMemoryStore, extractKeywords, formatLongTermMemoryResults } from "../../src/memory/LongTermMemoryStore.js";
+import { LongTermMemoryStore, extractKeywords, formatLongTermMemoryResults, redactMemoryText } from "../../src/memory/LongTermMemoryStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
 
 let repoPath: string;
@@ -94,5 +94,42 @@ describe("LongTermMemoryStore", () => {
       "数据",
       "中位",
     ]));
+  });
+
+  it("supports explicit remember, stats, forget, and clear lifecycle", async () => {
+    const store = new LongTermMemoryStore({ repoPath });
+    const first = await store.remember({ text: "Windows 环境使用 npm test 验证", title: "Windows verification" });
+    await store.remember({ text: "Linux 环境保持 LF 换行" });
+
+    await expect(store.search("Windows npm test", { limit: 3 })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entry: expect.objectContaining({ id: first.id, source: "MANUAL" }) }),
+    ]));
+    await expect(store.stats()).resolves.toMatchObject({ total: 2, bySource: { MANUAL: 2 } });
+    await expect(store.remove(first.id)).resolves.toBe(true);
+    await expect(store.remove(first.id)).resolves.toBe(false);
+    await expect(store.clear()).resolves.toBe(1);
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it("does not index failed task summaries", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const session = await sessionStore.createSession({ title: "failed task" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: { summary: "Incorrect failed conclusion", success: false, mode: "AGENT_LOOP" },
+    });
+
+    const store = new LongTermMemoryStore({ repoPath });
+    await store.indexSession(sessionStore, session.sessionId);
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it("redacts common secrets before persistence", async () => {
+    expect(redactMemoryText("api_key=secret-value password: hunter2 sk-abcdefghijklmnop")).toBe(
+      "api_key=[REDACTED] password=[REDACTED] [REDACTED_API_KEY]",
+    );
+    const store = new LongTermMemoryStore({ repoPath });
+    const entry = await store.remember({ text: "token=very-secret-token keep this decision" });
+    expect(entry.text).not.toContain("very-secret-token");
   });
 });

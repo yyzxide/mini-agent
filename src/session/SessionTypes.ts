@@ -1,4 +1,5 @@
 export type SessionStatus = "ACTIVE" | "PAUSED" | "FINISHED" | "FAILED";
+export type AgentOperatingMode = "EXECUTE" | "PLAN";
 
 export type SessionRecordType =
   | "USER_MESSAGE"
@@ -19,6 +20,9 @@ export type EventType =
   | "SESSION_RESUMED"
   | "SESSION_PAUSED"
   | "SESSION_COMPACTED"
+  | "PLAN_MODE_ENTERED"
+  | "PLAN_MODE_EXITED"
+  | "PLAN_EXECUTION_STARTED"
   | "USER_MESSAGE"
   | "ASSISTANT_MESSAGE"
   | "TOOL_CALL_STARTED"
@@ -58,6 +62,7 @@ export interface SessionMeta {
   status: SessionStatus;
   messageCount: number;
   eventCount: number;
+  operatingMode?: AgentOperatingMode;
 }
 
 export interface SessionRecord<TPayload extends JsonObject = JsonObject> {
@@ -99,6 +104,7 @@ export interface MiniAgentConfig {
 
 export interface CreateSessionInput {
   title?: string;
+  operatingMode?: AgentOperatingMode;
 }
 
 export interface SessionRecordInput<TPayload extends JsonObject = JsonObject> {

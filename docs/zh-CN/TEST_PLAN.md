@@ -6,7 +6,7 @@
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 全量 Vitest 通过：32 个测试文件、230 个测试用例。
+- 正常环境全量 Vitest 基线：34 个测试文件、247 个测试用例。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -95,6 +95,18 @@
 - `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
 - `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
+- Direct/Web/Review/RepositoryAnalysis/AgentLoop 都能召回长期记忆，并把它标记为不可信历史证据。
+- `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
+- 结构化 compaction 同时保留关键用户/助手事实和最近上下文。
+
+### 1.4.3 Skill
+
+覆盖：
+
+- 仓库 `skills/` 与本地 `.mini-agent/skills/` 发现、CRLF 解析和同名优先级。
+- metadata 缺失、非法名称、超长或逃逸路径不会进入有效 Skill 列表。
+- `$skill-name` 显式选择、trigger 自动匹配、稳定排序和数量上限。
+- Skill 上下文明确“当前用户指令和仓库事实优先”，且覆盖所有回答/任务模式。
 
 ### 1.5 LLM
 
@@ -144,6 +156,10 @@
 - 已经有代码上下文的“写进去 / 保存到文件”追问，不能反问用户重复提供代码或文件路径。
 - 最大步数终止。
 - session/event 写入。
+- Plan 模式只向模型暴露只读工具。
+- Plan 模式硬拦 `APPLY_PATCH`、`RUN_COMMAND` 和伪装成 `TOOL_CALL apply_patch` 的写操作。
+- 写代码目标可以在 Plan 模式正常 FINAL，而不会触发执行态的“必须已有 patch”后置条件。
+- Plan 完成不生成 diff，Session 中记录 `TASK_SUMMARY.mode=PLAN`。
 
 ### 1.8.1 Agent Harness / Eval
 

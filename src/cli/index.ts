@@ -6,13 +6,9 @@ import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { execa } from "execa";
-import { AgentLoop } from "../agent/AgentLoop.js";
-import type { AgentProgressEvent } from "../agent/AgentLoop.js";
-import { looksLikeFileWriteConfirmation, resolveRepositoryFollowUpTask } from "../agent/TaskFollowUp.js";
 import {
   looksLikeCodeContinuationFollowUp,
   looksLikeRepositoryAnalysisTask,
-  looksLikeWebCapabilityQuestion,
   routeTask,
   shouldPreserveAgentLoopIntent,
 } from "../agent/TaskRouter.js";
@@ -24,39 +20,20 @@ import {
   redactAgentConfig,
   resolveLlmConfig,
 } from "../config/AgentConfig.js";
-import { ContextBuilder } from "../context/ContextBuilder.js";
 import { MessageCompressor } from "../context/MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
-import { formatRuntimeContext } from "../context/RuntimeContext.js";
-import { classifyErrorText } from "../diagnostics/ErrorClassifier.js";
-import type { DiagnosticResult } from "../diagnostics/ErrorClassifier.js";
 import { GitManager } from "../git/GitManager.js";
-import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
 import { formatLongTermMemoryResults, LongTermMemoryStore } from "../memory/LongTermMemoryStore.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
-import {
-  applyReviewVerification,
-  buildLoadedReviewFile,
-  extractRelatedReviewFilePaths,
-  extractLikelyReviewFilePath,
-  formatReviewFileForPrompt,
-  groundCodeReviewResponse,
-} from "../review/CodeReview.js";
-import type {
-  GroundedCodeReviewFinding,
-  GroundedCodeReviewResult,
-  LoadedReviewFile,
-  ReviewFileChunk,
-} from "../review/CodeReview.js";
 import { EventStore } from "../session/EventStore.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
 import type { TaskChangeLogEntry, TaskChangeMode, TaskChangeTestResult } from "../session/TaskChangeLogStore.js";
 import type { EventRecord, JsonObject, SessionMeta, SessionRecord } from "../session/SessionTypes.js";
-import { ToolRegistry, createDefaultToolRegistry } from "../tools/ToolRegistry.js";
+import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext, ToolResult } from "../tools/Tool.js";
 import {
   CommandBlockedError,
@@ -69,12 +46,15 @@ import { resolveRepoPath } from "../utils/fs.js";
 import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger, readRuntimeLogs } from "../utils/logger.js";
 import type { LogLevel, LogRecord } from "../utils/logger.js";
-import type { WebQuestionPlan } from "../web/WebQuestionPlanner.js";
-import {
-  isShortFollowUpQuestion,
-  planWebQuestion,
-  resolveFollowUpQuestion,
-} from "../web/WebQuestionPlanner.js";
+import { isShortFollowUpQuestion } from "../web/WebQuestionPlanner.js";
+import { SkillStore } from "../skills/SkillStore.js";
+import { createStores } from "./CliTaskRuntime.js";
+import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
+import { runAgentLoopTask } from "./AgentLoopTask.js";
+import { runCodeReviewTask } from "./CodeReviewTask.js";
+import { runDirectAnswerTask } from "./DirectAnswerTask.js";
+import { runRepositoryAnalysisTask } from "./RepositoryAnalysisTask.js";
+import { runWebAnswerTask } from "./WebAnswerTask.js";
 
 const VERSION = "0.1.0";
 const INTERACTIVE_RESUME_LIST_LIMIT = 10;
@@ -82,6 +62,8 @@ const INTERACTIVE_SLASH_COMMANDS = [
   { command: "/help", usage: "/help", description: "Show this help." },
   { command: "/new", usage: "/new", description: "Start a new conversation session." },
   { command: "/review", usage: "/review <file>", description: "Run a focused code review for one file." },
+  { command: "/plan", usage: "/plan [task|off|status]", description: "Enter read-only plan mode." },
+  { command: "/execute", usage: "/execute [notes]", description: "Execute the latest approved plan." },
   { command: "/resume", usage: "/resume [n|id]", description: "Pick from recent sessions, or switch by number/id." },
   { command: "/pause", usage: "/pause", description: "Pause this session and exit; resume it later." },
   { command: "/session", usage: "/session", description: "Show current session metadata." },
@@ -93,47 +75,15 @@ const INTERACTIVE_SLASH_COMMANDS = [
   { command: "/changes", usage: "/changes [n]", description: "Show recent task change-log entries." },
   { command: "/compact", usage: "/compact", description: "Write a compact memory record for this session." },
   { command: "/memory", usage: "/memory <query>", description: "Search local long-term memory." },
+  { command: "/remember", usage: "/remember <text>", description: "Save an explicit long-term memory." },
+  { command: "/forget", usage: "/forget <id>", description: "Delete one long-term memory." },
+  { command: "/skills", usage: "/skills [name]", description: "List skills or show one skill." },
   { command: "/status", usage: "/status", description: "Show current agent/session status." },
   { command: "/repo", usage: "/repo", description: "Show repository state summary." },
   { command: "/diff", usage: "/diff", description: "Show git diff." },
   { command: "/clear", usage: "/clear", description: "Clear the terminal." },
   { command: "/exit", usage: "/exit", description: "Finish this session and exit." },
 ] as const;
-
-interface AgentCliOptions {
-  session?: string;
-  maxSteps?: number;
-  model?: string;
-  baseUrl?: string;
-  eventStream?: boolean;
-  agentLoop?: boolean;
-  keepSessionActive?: boolean;
-}
-
-interface CliTaskResult {
-  success: boolean;
-  sessionId?: string;
-  mode: TaskChangeMode;
-  summary: string;
-  error?: string;
-  metadata?: JsonObject;
-}
-
-interface RepositoryAnalysisFileEvidence {
-  path: string;
-  role: "readme" | "build" | "config" | "source";
-  startLine: number;
-  endLine: number;
-  totalLines: number;
-  content: string;
-}
-
-interface RepositoryAnalysisEvidence {
-  listedItems: Array<{ path: string; type: "file" | "directory" }>;
-  readFiles: RepositoryAnalysisFileEvidence[];
-  gitStatus: string;
-  gitDiff: string;
-}
 
 interface GitSnapshot {
   changedFiles: string[];
@@ -162,6 +112,7 @@ interface SessionAgentStatusOutput {
   repoPath: string;
   title: string;
   sessionStatus: string;
+  operatingMode: "EXECUTE" | "PLAN";
   createdAt: string;
   updatedAt: string;
   messageCount: number;
@@ -229,6 +180,27 @@ export function createProgram(): Command {
     });
 
   program
+    .command("plan")
+    .description("Create a read-only implementation plan")
+    .argument("<task...>", "Task to plan")
+    .option("--session <sessionId>", "Session id used for the plan")
+    .option("--max-steps <number>", "Maximum planning steps", parsePositiveInteger)
+    .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
+    .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
+    .option("--event-stream", "Print structured MINI_AGENT_EVENT lines")
+    .action(async (taskParts: string[], options: AgentCliOptions) => {
+      const task = taskParts.join(" ").trim();
+      if (!task) throw new Error("Plan task cannot be empty.");
+      const result = await runAgentTask(process.cwd(), task, {
+        ...options,
+        agentLoop: true,
+        operatingMode: "PLAN",
+        nonInteractive: true,
+      });
+      if (!result.success) process.exitCode = 1;
+    });
+
+  program
     .command("review")
     .description("Run a file-focused code review")
     .argument("<filePath>", "Repository-relative file path to review")
@@ -242,7 +214,7 @@ export function createProgram(): Command {
         throw new Error("File path cannot be empty.");
       }
 
-      const result = await runCodeReviewTask(process.cwd(), trimmedPath, options);
+      const result = await runAgentTask(process.cwd(), trimmedPath, options);
       if (!result.success) {
         process.exitCode = 1;
       }
@@ -466,6 +438,58 @@ export function createProgram(): Command {
       });
     });
 
+  const skillCommand = program
+    .command("skill")
+    .description("Discover and validate repository or local agent skills");
+
+  skillCommand
+    .command("list")
+    .description("List valid skills")
+    .action(async () => {
+      await runJsonAction(async () => {
+        writeJson(await new SkillStore({ repoPath: process.cwd() }).list());
+      });
+    });
+
+  skillCommand
+    .command("show")
+    .description("Show one skill")
+    .argument("<name>", "Skill name")
+    .action(async (name: string) => {
+      await runJsonAction(async () => {
+        const skill = await new SkillStore({ repoPath: process.cwd() }).get(name);
+        if (!skill) {
+          throw new Error(`Skill not found: ${name}`);
+        }
+        writeJson(skill);
+      });
+    });
+
+  skillCommand
+    .command("validate")
+    .description("Validate all discovered skills")
+    .action(async () => {
+      await runJsonAction(async () => {
+        const results = await new SkillStore({ repoPath: process.cwd() }).validateAll();
+        writeJson({
+          valid: results.filter((result) => result.valid).length,
+          invalid: results.filter((result) => !result.valid).length,
+          results,
+        });
+      });
+    });
+
+  skillCommand
+    .command("init")
+    .description("Create a local skill template under .mini-agent/skills")
+    .argument("<name>", "Skill name")
+    .requiredOption("--description <description>", "When this skill should be used")
+    .action(async (name: string, options: { description: string }) => {
+      await runJsonAction(async () => {
+        writeJson(await new SkillStore({ repoPath: process.cwd() }).create(name, options.description));
+      });
+    });
+
   memoryCommand
     .command("search")
     .description("Search local long-term memory")
@@ -485,7 +509,54 @@ export function createProgram(): Command {
     .action(async (options: { limit: number }) => {
       await runJsonAction(async () => {
         const memoryStore = new LongTermMemoryStore({ repoPath: process.cwd() });
-        writeJson(await memoryStore.list(options.limit));
+        writeJson((await memoryStore.list(options.limit)).map(formatMemoryEntryForOutput));
+      });
+    });
+
+  memoryCommand
+    .command("remember")
+    .description("Save an explicit long-term memory")
+    .argument("<text...>", "Memory text")
+    .option("--title <title>", "Short memory title")
+    .action(async (textParts: string[], options: { title?: string }) => {
+      await runJsonAction(async () => {
+        writeJson(await new LongTermMemoryStore({ repoPath: process.cwd() }).remember({
+          text: textParts.join(" "),
+          ...(options.title ? { title: options.title } : {}),
+        }));
+      });
+    });
+
+  memoryCommand
+    .command("forget")
+    .description("Delete one long-term memory by id")
+    .argument("<id>", "Memory id")
+    .action(async (id: string) => {
+      await runJsonAction(async () => {
+        const removed = await new LongTermMemoryStore({ repoPath: process.cwd() }).remove(id);
+        writeJson({ id, removed });
+      });
+    });
+
+  memoryCommand
+    .command("stats")
+    .description("Show long-term memory statistics")
+    .action(async () => {
+      await runJsonAction(async () => {
+        writeJson(await new LongTermMemoryStore({ repoPath: process.cwd() }).stats());
+      });
+    });
+
+  memoryCommand
+    .command("clear")
+    .description("Delete all local long-term memories")
+    .option("--yes", "Confirm destructive deletion")
+    .action(async (options: { yes?: boolean }) => {
+      await runJsonAction(async () => {
+        if (options.yes !== true) {
+          throw new Error("memory clear requires --yes");
+        }
+        writeJson({ removed: await new LongTermMemoryStore({ repoPath: process.cwd() }).clear() });
       });
     });
 
@@ -853,7 +924,8 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
 
   try {
     while (true) {
-      const answer = (await rl.question("> ")).trim();
+      const meta = await stores.sessionStore.getSessionMeta(currentSessionId);
+      const answer = (await rl.question(meta.operatingMode === "PLAN" ? "plan> " : "> ")).trim();
 
       if (answer.length === 0) {
         continue;
@@ -879,6 +951,7 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
         session: currentSessionId,
         nonInteractive: false,
         keepSessionActive: true,
+        ...(meta.operatingMode === "PLAN" ? { agentLoop: true, operatingMode: "PLAN" as const } : {}),
       }, async (message) => await rl.question(message));
     }
   } finally {
@@ -934,10 +1007,77 @@ async function handleInteractiveSlashCommand(input: {
         return { sessionId: input.currentSessionId, exit: false };
       }
 
-      await runCodeReviewTask(input.repoPath, reviewTarget, {
+      await runAgentTask(input.repoPath, reviewTarget, {
         session: input.currentSessionId,
         keepSessionActive: true,
+      }, input.prompt);
+      return { sessionId: input.currentSessionId, exit: false };
+    }
+
+    case "/plan": {
+      const argument = args.join(" ").trim();
+      if (argument === "status") {
+        const meta = await input.stores.sessionStore.getSessionMeta(input.currentSessionId);
+        process.stdout.write(`[plan] Mode: ${meta.operatingMode ?? "EXECUTE"}\n`);
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+      if (argument === "off") {
+        await input.stores.sessionStore.updateOperatingMode(input.currentSessionId, "EXECUTE");
+        await input.stores.eventStore.appendEvent(input.currentSessionId, {
+          type: "PLAN_MODE_EXITED",
+          payload: { mode: "EXECUTE" },
+        });
+        process.stdout.write("[plan] Plan mode disabled.\n");
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+
+      await input.stores.sessionStore.updateOperatingMode(input.currentSessionId, "PLAN");
+      await input.stores.eventStore.appendEvent(input.currentSessionId, {
+        type: "PLAN_MODE_ENTERED",
+        payload: { mode: "PLAN" },
       });
+      process.stdout.write("[plan] Read-only plan mode enabled. Use /execute to run the latest plan or /plan off to exit.\n");
+      if (argument) {
+        await runAgentTask(input.repoPath, argument, {
+          session: input.currentSessionId,
+          agentLoop: true,
+          operatingMode: "PLAN",
+          keepSessionActive: true,
+          nonInteractive: false,
+        }, input.prompt);
+      }
+      return { sessionId: input.currentSessionId, exit: false };
+    }
+
+    case "/execute": {
+      const latestPlan = await findLatestSuccessfulPlan(input.stores.sessionStore, input.currentSessionId);
+      if (!latestPlan) {
+        process.stdout.write("[execute] No successful plan found. Create one with /plan <task>.\n");
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+
+      const notes = args.join(" ").trim();
+      await input.stores.sessionStore.updateOperatingMode(input.currentSessionId, "EXECUTE");
+      await input.stores.eventStore.appendEvent(input.currentSessionId, {
+        type: "PLAN_EXECUTION_STARTED",
+        payload: { goal: latestPlan.goal },
+      });
+      const executionGoal = [
+        `Execute the approved plan for this goal: ${latestPlan.goal}`,
+        "",
+        "Approved plan:",
+        latestPlan.summary,
+        notes ? `\nAdditional user notes:\n${notes}` : "",
+        "",
+        "Re-check the current repository state before each change. The plan is guidance, not permission to bypass normal tools, validation, or safety checks.",
+      ].join("\n");
+      await runAgentTask(input.repoPath, executionGoal, {
+        session: input.currentSessionId,
+        agentLoop: true,
+        operatingMode: "EXECUTE",
+        keepSessionActive: true,
+        nonInteractive: false,
+      }, input.prompt);
       return { sessionId: input.currentSessionId, exit: false };
     }
 
@@ -1034,13 +1174,53 @@ async function handleInteractiveSlashCommand(input: {
       const query = args.join(" ").trim();
       const memoryStore = new LongTermMemoryStore({ repoPath: input.repoPath });
       if (query.length === 0) {
-        const entries = await memoryStore.list(10);
+        const entries = (await memoryStore.list(10)).map(formatMemoryEntryForOutput);
         process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
         return { sessionId: input.currentSessionId, exit: false };
       }
 
       const results = await memoryStore.search(query, { limit: 5 });
       process.stdout.write(`[memory]\n${formatLongTermMemoryResults(results)}\n`);
+      return { sessionId: input.currentSessionId, exit: false };
+    }
+
+    case "/remember": {
+      const text = args.join(" ").trim();
+      if (!text) {
+        process.stdout.write("[memory] Usage: /remember <text>\n");
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+      const entry = await new LongTermMemoryStore({ repoPath: input.repoPath }).remember({
+        text,
+        sessionId: input.currentSessionId,
+      });
+      process.stdout.write(`[memory] Remembered ${entry.id}\n`);
+      return { sessionId: input.currentSessionId, exit: false };
+    }
+
+    case "/forget": {
+      const id = args[0]?.trim();
+      if (!id) {
+        process.stdout.write("[memory] Usage: /forget <id>\n");
+        return { sessionId: input.currentSessionId, exit: false };
+      }
+      const removed = await new LongTermMemoryStore({ repoPath: input.repoPath }).remove(id);
+      process.stdout.write(`[memory] ${removed ? "Forgot" : "Not found"}: ${id}\n`);
+      return { sessionId: input.currentSessionId, exit: false };
+    }
+
+    case "/skills": {
+      const skillStore = new SkillStore({ repoPath: input.repoPath });
+      const name = args[0]?.trim();
+      if (name) {
+        const skill = await skillStore.get(name);
+        process.stdout.write(skill ? `${JSON.stringify(skill, null, 2)}\n` : `[skills] Skill not found: ${name}\n`);
+      } else {
+        const skills = await skillStore.list();
+        process.stdout.write(skills.length > 0
+          ? `[skills]\n${skills.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`).join("\n")}\n`
+          : "[skills] No valid skills discovered.\n");
+      }
       return { sessionId: input.currentSessionId, exit: false };
     }
 
@@ -1062,6 +1242,25 @@ function printInteractiveHelp(): void {
     "Tip: press Tab to complete slash commands.",
     "",
   ].join("\n"));
+}
+
+async function findLatestSuccessfulPlan(
+  sessionStore: SessionStore,
+  sessionId: string,
+): Promise<{ goal: string; summary: string } | undefined> {
+  const records = await sessionStore.readRecords(sessionId);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record?.type !== "TASK_SUMMARY" || record.payload.mode !== "PLAN" || record.payload.success !== true) {
+      continue;
+    }
+    const goal = typeof record.payload.goal === "string" ? record.payload.goal.trim() : "";
+    const summary = typeof record.payload.summary === "string" ? record.payload.summary.trim() : "";
+    if (goal && summary) {
+      return { goal, summary };
+    }
+  }
+  return undefined;
 }
 
 async function printInteractiveResumeList(sessionStore: SessionStore): Promise<void> {
@@ -1168,7 +1367,7 @@ async function readLastTaskMode(sessionStore: SessionStore, sessionId: string): 
     }
 
     const mode = record.payload.mode;
-    if (mode === "DIRECT_ANSWER" || mode === "WEB_ANSWER" || mode === "CODE_REVIEW" || mode === "AGENT_LOOP") {
+    if (mode === "DIRECT_ANSWER" || mode === "WEB_ANSWER" || mode === "CODE_REVIEW" || mode === "AGENT_LOOP" || mode === "PLAN") {
       return mode;
     }
   }
@@ -1270,6 +1469,7 @@ async function buildSessionAgentStatus(
     repoPath: meta.repoPath,
     title: meta.title,
     sessionStatus: meta.status,
+    operatingMode: meta.operatingMode ?? "EXECUTE",
     createdAt: meta.createdAt,
     updatedAt: meta.updatedAt,
     messageCount: meta.messageCount,
@@ -1392,6 +1592,7 @@ function formatSessionAgentStatus(status: SessionAgentStatusOutput): string {
     `- title: ${status.title}`,
     `- repo: ${status.repoPath}`,
     `- status: ${status.sessionStatus}`,
+    `- operating mode: ${status.operatingMode}`,
     `- created: ${formatLocalMinute(status.createdAt)}`,
     `- updated: ${formatLocalMinute(status.updatedAt)}`,
     `- messages: ${String(status.messageCount)}`,
@@ -1513,7 +1714,9 @@ async function runAgentTask(
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
   const route = await resolveTaskRoute(repoPath, userGoal, options.session);
-  const mode: TaskChangeMode = options.agentLoop === true ? "AGENT_LOOP" : route.intent;
+  const mode: TaskChangeMode = options.operatingMode === "PLAN"
+    ? "PLAN"
+    : options.agentLoop === true ? "AGENT_LOOP" : route.intent;
   const logger = createRuntimeLogger(repoPath);
   const beforeSnapshot = await readGitSnapshot(repoPath);
   let taskResult: CliTaskResult;
@@ -1526,7 +1729,9 @@ async function runAgentTask(
   }).catch(() => undefined);
 
   try {
-    if (route.intent === "DIRECT_ANSWER" && options.agentLoop !== true) {
+    if (options.operatingMode === "PLAN") {
+      taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt);
+    } else if (route.intent === "DIRECT_ANSWER" && options.agentLoop !== true) {
       taskResult = await runDirectAnswerTask(repoPath, userGoal, options);
     } else if (route.intent === "WEB_ANSWER" && options.agentLoop !== true) {
       taskResult = await runWebAnswerTask(repoPath, userGoal, options);
@@ -1647,1925 +1852,12 @@ async function resolveTaskRoute(
   return baseRoute;
 }
 
-async function runAgentLoopTask(
-  repoPath: string,
-  userGoal: string,
-  options: AgentCliOptions & { nonInteractive?: boolean },
-  prompt?: (message: string) => Promise<string>,
-): Promise<CliTaskResult> {
-  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
-  const resolvedUserGoal = options.session
-    ? await sessionStore.readRecords(options.session)
-      .then((records) => resolveRepositoryFollowUpTask(userGoal, records)?.resolvedGoal)
-      .catch(() => undefined)
-    : undefined;
-  const permissionManager = new PermissionManager(prompt ? { prompt } : {});
-  const llmClient = await createOpenAICompatibleClient(repoPath, options);
-  const loop = new AgentLoop({
-    repoPath,
-    llmClient,
-    toolRegistry: createDefaultToolRegistry(),
-    sessionStore,
-    eventStore,
-    commandRunner: new CommandRunner({ repoPath }),
-    permissionManager,
-    patchManager: new PatchManager({ repoPath }),
-    contextBuilder: new ContextBuilder({ repoPath }),
-    onProgress: writeAgentProgress,
-    ...(prompt ? { askUser: prompt } : {}),
-  });
-
-  const result = await loop.run({
-    userGoal: resolvedUserGoal ?? userGoal,
-    ...(resolvedUserGoal ? { originalUserGoal: userGoal } : {}),
-    ...(options.session ? { sessionId: options.session } : {}),
-    ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
-    autoApprove: true,
-    nonInteractive: options.nonInteractive === true,
-    keepSessionActive: options.keepSessionActive === true,
-  });
-
-  return {
-    success: result.success,
-    sessionId: result.sessionId,
-    mode: "AGENT_LOOP",
-    summary: result.summary,
-    ...(result.error ? { error: result.error } : {}),
-  };
-}
-
-async function runRepositoryAnalysisTask(
-  repoPath: string,
-  userGoal: string,
-  options: AgentCliOptions,
-): Promise<CliTaskResult> {
-  const logger = createRuntimeLogger(repoPath);
-  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
-  let sessionId = options.session;
-
-  if (sessionId) {
-    await sessionStore.ensureSession(sessionId);
-    await eventStore.init();
-  } else {
-    const created = await sessionStore.createSession({ title: userGoal.slice(0, 80) });
-    sessionId = created.sessionId;
-    await eventStore.appendEvent(sessionId, {
-      type: "SESSION_CREATED",
-      payload: {
-        title: created.title,
-        repoPath: created.repoPath,
-        baseCommit: created.baseCommit,
-        mode: "AGENT_LOOP",
-        subMode: "REPOSITORY_ANALYSIS",
-      },
-    });
-  }
-
-  process.stdout.write(`[session] ${sessionId}\n`);
-
-  const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
-    .catch(() => "(none)");
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-
-  const evidenceResult = await gatherRepositoryAnalysisEvidence({
-    repoPath,
-    sessionId,
-    sessionStore,
-    eventStore,
-    logger,
-  });
-
-  if (!evidenceResult.success) {
-    const error = evidenceResult.error;
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: {
-        error,
-        mode: "AGENT_LOOP",
-        subMode: "REPOSITORY_ANALYSIS",
-      },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-
-    return {
-      success: false,
-      sessionId,
-      mode: "AGENT_LOOP",
-      summary: error,
-      error,
-      metadata: toJsonObject({
-        subMode: "REPOSITORY_ANALYSIS",
-      }),
-    };
-  }
-
-  const evidence = evidenceResult.evidence;
-  await logger.info("analysis", "Repository analysis evidence gathered", {
-    listedItems: evidence.listedItems.length,
-    readFiles: evidence.readFiles.map((file) => ({
-      path: file.path,
-      role: file.role,
-      endLine: file.endLine,
-    })),
-  }, sessionId).catch(() => undefined);
-
-  const client = await createOpenAICompatibleClient(repoPath, options);
-  const analysisContext = buildRepositoryAnalysisContext({
-    userGoal,
-    sessionMemory,
-    evidence,
-  });
-
-  let result = await client.completeText({
-    userGoal,
-    context: analysisContext,
-    mode: "direct",
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "repository_analysis");
-
-  if (result.success && result.text && shouldRepairRepositoryAnalysis(result.text, evidence)) {
-    await logger.info("analysis", "Repository analysis answer was too shallow; requesting grounded rewrite", {
-      summaryLength: result.text.length,
-    }, sessionId).catch(() => undefined);
-
-    const repairContext = [
-      analysisContext,
-      "",
-      "Previous repository analysis answer was too shallow or did not cite enough evidence files.",
-      `Previous answer preview:\n${limitText(result.text, 1_200)}`,
-      "",
-      "Rewrite requirements:",
-      "- Mention at least 3 supporting file paths from the loaded evidence.",
-      "- Separate confirmed repository facts from any inference.",
-      "- Do not omit major loaded modules or currently supported modes that appear in the evidence.",
-      "- Prefer a fuller structured analysis over a short summary.",
-    ].join("\n");
-
-    const repaired = await client.completeText({
-      userGoal,
-      context: repairContext,
-      mode: "direct",
-    });
-    await recordLlmUsageFromClient(sessionStore, sessionId, client, "repository_analysis_rewrite");
-
-    if (repaired.success && repaired.text) {
-      result = repaired;
-    }
-  }
-
-  if (!result.success || !result.text) {
-    const error = result.error ?? "Repository analysis failed";
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: {
-        error,
-        mode: "AGENT_LOOP",
-        subMode: "REPOSITORY_ANALYSIS",
-      },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-
-    return {
-      success: false,
-      sessionId,
-      mode: "AGENT_LOOP",
-      summary: error,
-      error,
-      metadata: toJsonObject({
-        subMode: "REPOSITORY_ANALYSIS",
-        evidenceFiles: evidence.readFiles.map((file) => file.path),
-      }),
-    };
-  }
-
-  process.stdout.write(`[summary]\n${result.text}\n`);
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: result.text },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: result.text },
-  });
-  await sessionStore.appendRecord(sessionId, {
-    type: "TASK_SUMMARY",
-    payload: {
-      summary: result.text,
-      success: true,
-      mode: "AGENT_LOOP",
-      subMode: "REPOSITORY_ANALYSIS",
-      evidenceFiles: evidence.readFiles.map((file) => file.path),
-      evidenceFileCount: evidence.readFiles.length,
-    },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "TASK_FINISHED",
-    payload: {
-      success: true,
-      mode: "AGENT_LOOP",
-      subMode: "REPOSITORY_ANALYSIS",
-      evidenceFileCount: evidence.readFiles.length,
-    },
-  });
-  if (options.keepSessionActive !== true) {
-    await sessionStore.updateSessionStatus(sessionId, "FINISHED");
-  }
-
-  return {
-    success: true,
-    sessionId,
-    mode: "AGENT_LOOP",
-    summary: result.text,
-    metadata: toJsonObject({
-      subMode: "REPOSITORY_ANALYSIS",
-      evidenceFiles: evidence.readFiles.map((file) => file.path),
-      evidenceFileCount: evidence.readFiles.length,
-      listedItemCount: evidence.listedItems.length,
-    }),
-  };
-}
-
-async function createOpenAICompatibleClient(repoPath: string, options: AgentCliOptions): Promise<OpenAICompatibleClient> {
-  const resolvedConfig = resolveLlmConfig(await loadAgentConfig(repoPath), {
-    baseUrl: options.baseUrl,
-    model: options.model,
-  });
-
-  return new OpenAICompatibleClient(resolvedConfig.openai);
-}
-
-async function recordLlmUsageFromClient(
-  sessionStore: SessionStore,
-  sessionId: string,
-  client: OpenAICompatibleClient,
-  mode: string,
-): Promise<void> {
-  const metrics = client.drainCallMetrics();
-  if (metrics.length === 0) {
-    return;
-  }
-
-  for (const metric of metrics) {
-    await sessionStore.appendRecord(sessionId, {
-      type: "LLM_USAGE",
-      payload: toJsonObject({
-        mode,
-        ...(metric.model ? { model: metric.model } : {}),
-        ...(metric.finishReason ? { finishReason: metric.finishReason } : {}),
-        usageAvailable: metric.usage !== undefined,
-        promptTokens: metric.usage?.promptTokens ?? null,
-        completionTokens: metric.usage?.completionTokens ?? null,
-        totalTokens: metric.usage?.totalTokens ?? null,
-        cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
-        reasoningTokens: metric.usage?.reasoningTokens ?? null,
-      }),
-    });
-  }
-}
-
-async function gatherRepositoryAnalysisEvidence(input: {
-  repoPath: string;
-  sessionId: string;
-  sessionStore: SessionStore;
-  eventStore: EventStore;
-  logger: ReturnType<typeof createRuntimeLogger>;
-}): Promise<
-  | { success: true; evidence: RepositoryAnalysisEvidence }
-  | { success: false; error: string }
-> {
-  const registry = createDefaultToolRegistry();
-  const toolContext: ToolContext = {
-    repoPath: input.repoPath,
-    sessionId: input.sessionId,
-    sessionStore: input.sessionStore,
-    eventStore: input.eventStore,
-    maxOutputChars: 20_000,
-    autoApprove: true,
-    nonInteractive: true,
-  };
-
-  const rootList = await runRepositoryAnalysisTool(registry, "list_files", {
-    path: ".",
-    maxDepth: 2,
-    maxResults: 220,
-  }, toolContext);
-  if (!rootList.success || !isListFilesData(rootList.data)) {
-    return {
-      success: false,
-      error: rootList.error?.message ?? "Failed to inspect repository tree",
-    };
-  }
-
-  let listedItems = [...rootList.data.items];
-  for (const directoryPath of findPreferredAnalysisDirectories(listedItems).slice(0, 4)) {
-    const nestedList = await runRepositoryAnalysisTool(registry, "list_files", {
-      path: directoryPath,
-      maxDepth: 4,
-      maxResults: 180,
-    }, toolContext);
-    if (!nestedList.success || !isListFilesData(nestedList.data)) {
-      continue;
-    }
-
-    listedItems = mergeRepositoryListItems(listedItems, nestedList.data.items);
-  }
-
-  const readFiles: RepositoryAnalysisFileEvidence[] = [];
-  for (const candidate of selectRepositoryProjectFiles(listedItems)) {
-    const file = await readRepositoryAnalysisFile(registry, candidate.path, candidate.role, toolContext);
-    if (file) {
-      readFiles.push(file);
-    }
-  }
-
-  for (const sourcePath of selectRepresentativeSourceFiles(listedItems).slice(0, 4)) {
-    if (readFiles.some((file) => file.path === sourcePath)) {
-      continue;
-    }
-
-    const file = await readRepositoryAnalysisFile(registry, sourcePath, "source", toolContext);
-    if (file) {
-      readFiles.push(file);
-    }
-  }
-
-  const sourceFileCount = readFiles.filter((file) => file.role === "source").length;
-  if (sourceFileCount === 0) {
-    await input.logger.warn("analysis", "Repository analysis aborted because no source file could be read", {
-      listedItems: listedItems.length,
-    }, input.sessionId).catch(() => undefined);
-    return {
-      success: false,
-      error: "Repository analysis requires reading at least one source file, but no representative source file could be loaded.",
-    };
-  }
-
-  const gitStatusResult = await runRepositoryAnalysisTool(registry, "git_status", {}, toolContext);
-  const gitDiffResult = await runRepositoryAnalysisTool(registry, "git_diff", {}, toolContext);
-  const gitStatus = gitStatusResult.success && isGitStatusData(gitStatusResult.data)
-    ? gitStatusResult.data.status
-    : gitStatusResult.error?.message ?? "(git status unavailable)";
-  const gitDiff = gitDiffResult.success && isGitDiffData(gitDiffResult.data)
-    ? gitDiffResult.data.diff
-    : gitDiffResult.error?.message ?? "(git diff unavailable)";
-
-  return {
-    success: true,
-    evidence: {
-      listedItems,
-      readFiles,
-      gitStatus,
-      gitDiff,
-    },
-  };
-}
-
-async function runRepositoryAnalysisTool(
-  registry: ToolRegistry,
-  toolName: string,
-  input: unknown,
-  context: ToolContext,
-): Promise<ToolResult<unknown>> {
-  process.stdout.write(`[tool] ${toolName}\n`);
-  return await registry.execute(toolName, input, context);
-}
-
-async function readRepositoryAnalysisFile(
-  registry: ToolRegistry,
-  filePath: string,
-  role: RepositoryAnalysisFileEvidence["role"],
-  context: ToolContext,
-): Promise<RepositoryAnalysisFileEvidence | undefined> {
-  const maxLines = role === "source" ? 220 : 180;
-  const result = await runRepositoryAnalysisTool(registry, "read_file", {
-    path: filePath,
-    startLine: 1,
-    maxLines,
-  }, context);
-
-  if (!result.success || !isReadFileData(result.data) || result.data.content.trim().length === 0) {
-    return undefined;
-  }
-
-  return {
-    path: result.data.path,
-    role,
-    startLine: result.data.startLine,
-    endLine: result.data.endLine,
-    totalLines: result.data.totalLines,
-    content: result.data.content,
-  };
-}
-
-function buildRepositoryAnalysisContext(input: {
-  userGoal: string;
-  sessionMemory: string;
-  evidence: RepositoryAnalysisEvidence;
-}): string {
-  const projectFiles = input.evidence.readFiles.filter((file) => file.role !== "source");
-  const sourceFiles = input.evidence.readFiles.filter((file) => file.role === "source");
-
-  return [
-    "Repository analysis instructions:",
-    "- Analyze the repository only from the evidence below.",
-    "- Do not claim that a module, workflow, mode, command, or capability exists unless the loaded file evidence supports it.",
-    "- Mention supporting file paths inline for every major claim.",
-    "- If the evidence is insufficient for some point, say that clearly instead of guessing.",
-    "- Prefer a fuller structured analysis over a short summary.",
-    "- Structure the answer with these sections when possible: 项目定位, 关键模块, 运行方式, 当前状态, 风险/下一步.",
-    "",
-    "Conversation memory:",
-    input.sessionMemory,
-    "",
-    `User task: ${input.userGoal}`,
-    "",
-    "Evidence coverage:",
-    `- listed repository items: ${String(input.evidence.listedItems.length)}`,
-    `- loaded project files: ${projectFiles.length > 0 ? projectFiles.map((file) => file.path).join(", ") : "(none)"}`,
-    `- loaded source files: ${sourceFiles.length > 0 ? sourceFiles.map((file) => file.path).join(", ") : "(none)"}`,
-    "",
-    "Repository tree excerpt:",
-    ...input.evidence.listedItems.slice(0, 160).map((item) => `- [${item.type}] ${item.path}`),
-    "",
-    "Git status:",
-    input.evidence.gitStatus || "(clean or unavailable)",
-    "",
-    "Git diff preview:",
-    limitText(input.evidence.gitDiff || "(none)", 2_000),
-    "",
-    "Loaded file evidence:",
-    ...input.evidence.readFiles.flatMap((file) => ["", formatRepositoryAnalysisFileForPrompt(file)]),
-  ].join("\n");
-}
-
-function formatRepositoryAnalysisFileForPrompt(file: RepositoryAnalysisFileEvidence): string {
-  return [
-    `File: ${file.path}`,
-    `Role: ${file.role}`,
-    `Lines: ${String(file.startLine)}-${String(file.endLine)} / ${String(file.totalLines)}`,
-    file.content,
-  ].join("\n");
-}
-
-function shouldRepairRepositoryAnalysis(text: string, evidence: RepositoryAnalysisEvidence): boolean {
-  if (text.trim().length < 320) {
-    return true;
-  }
-
-  return !evidence.readFiles.some((file) => text.includes(file.path));
-}
-
-function findPreferredAnalysisDirectories(
-  items: Array<{ path: string; type: "file" | "directory" }>,
-): string[] {
-  const preferred = ["src", "app", "lib", "cmd", "server", "backend", "packages"];
-  return preferred.filter((candidate) => items.some((item) => item.type === "directory" && item.path === candidate));
-}
-
-function mergeRepositoryListItems(
-  left: Array<{ path: string; type: "file" | "directory" }>,
-  right: Array<{ path: string; type: "file" | "directory" }>,
-): Array<{ path: string; type: "file" | "directory" }> {
-  const seen = new Set(left.map((item) => `${item.type}:${item.path}`));
-  const merged = [...left];
-
-  for (const item of right) {
-    const key = `${item.type}:${item.path}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(item);
-    }
-  }
-
-  return merged;
-}
-
-function selectRepositoryProjectFiles(
-  items: Array<{ path: string; type: "file" | "directory" }>,
-): Array<{ path: string; role: RepositoryAnalysisFileEvidence["role"] }> {
-  const candidates: Array<{ path: string; role: RepositoryAnalysisFileEvidence["role"] }> = [
-    { path: "README.md", role: "readme" },
-    { path: "README.txt", role: "readme" },
-    { path: "README", role: "readme" },
-    { path: "package.json", role: "build" },
-    { path: "pnpm-lock.yaml", role: "build" },
-    { path: "pom.xml", role: "build" },
-    { path: "go.mod", role: "build" },
-    { path: "CMakeLists.txt", role: "build" },
-    { path: "build.gradle", role: "build" },
-    { path: "settings.gradle", role: "build" },
-    { path: "tsconfig.json", role: "config" },
-  ];
-
-  return candidates.filter((candidate) => items.some((item) => item.type === "file" && item.path === candidate.path));
-}
-
-function selectRepresentativeSourceFiles(
-  items: Array<{ path: string; type: "file" | "directory" }>,
-): string[] {
-  return items
-    .filter((item) => item.type === "file" && isRepositorySourceFile(item.path))
-    .sort((left, right) => {
-      const score = scoreRepositorySourceFile(right.path) - scoreRepositorySourceFile(left.path);
-      return score !== 0 ? score : left.path.localeCompare(right.path);
-    })
-    .map((item) => item.path);
-}
-
-function isRepositorySourceFile(filePath: string): boolean {
-  if (/\/?(?:__tests__|tests?|specs?|fixtures?|dist|build|coverage|docs)\//i.test(filePath)) {
-    return false;
-  }
-
-  return /\.(?:ts|tsx|js|jsx|mjs|cjs|java|go|py|rb|rs|php|kt|kts|swift|c|cc|cpp|h|hpp)$/i.test(filePath);
-}
-
-function scoreRepositorySourceFile(filePath: string): number {
-  let score = 0;
-  const normalized = filePath.replace(/\\/g, "/");
-
-  if (normalized.startsWith("src/")) {
-    score += 40;
-  }
-  if (/\/?(?:cli|agent|core|app|server|backend|frontend|cmd|lib)\//i.test(normalized)) {
-    score += 24;
-  }
-  if (/(?:AgentLoop|TaskRouter|ToolRegistry|SessionStore|ContextBuilder|PatchManager|CommandRunner|main|app|server|cli|router|controller|service|store|manager|core)/i.test(normalized)) {
-    score += 36;
-  }
-  if (/(?:^|\/)(?:index|main|app|server|cli|bootstrap)\.(?:ts|tsx|js|jsx|mjs|cjs|java|go|py|rb|rs|php|kt|kts|swift|c|cc|cpp)$/i.test(normalized)) {
-    score += 48;
-  }
-  if (/\.d\.ts$/i.test(normalized)) {
-    score -= 30;
-  }
-  if (/\/?(?:test|tests|spec|specs)\//i.test(normalized)) {
-    score -= 40;
-  }
-
-  score -= Math.min(normalized.split("/").length * 2, 14);
-  return score;
-}
-
-async function runDirectAnswerTask(
-  repoPath: string,
-  userGoal: string,
-  options: AgentCliOptions,
-): Promise<CliTaskResult> {
-  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
-  let sessionId = options.session;
-
-  if (sessionId) {
-    await sessionStore.ensureSession(sessionId);
-    await eventStore.init();
-  } else {
-    const created = await sessionStore.createSession({ title: userGoal.slice(0, 80) });
-    sessionId = created.sessionId;
-    await eventStore.appendEvent(sessionId, {
-      type: "SESSION_CREATED",
-      payload: {
-        title: created.title,
-        repoPath: created.repoPath,
-        baseCommit: created.baseCommit,
-      },
-    });
-  }
-
-  process.stdout.write(`[session] ${sessionId}\n`);
-
-  const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
-    .catch(() => "(none)");
-  const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-
-  const recordsAfterUser = await sessionStore.readRecords(sessionId).catch(() => []);
-  const localSessionReply = resolveLocalSessionReply(userGoal, recordsAfterUser);
-  if (localSessionReply) {
-    return await finalizeDirectAnswerSuccess(
-      sessionStore,
-      eventStore,
-      sessionId,
-      options,
-      localSessionReply,
-    );
-  }
-
-  const localReply = resolveLocalDirectReply(repoPath, userGoal);
-  if (localReply) {
-    return await finalizeDirectAnswerSuccess(
-      sessionStore,
-      eventStore,
-      sessionId,
-      options,
-      localReply,
-    );
-  }
-
-  const client = await createOpenAICompatibleClient(repoPath, options);
-  const directContext = resolvedFollowUpGoal && resolvedFollowUpGoal !== userGoal
-    ? [
-      sessionMemory,
-      "",
-      `Original short follow-up: ${userGoal}`,
-      `Resolved follow-up question: ${resolvedFollowUpGoal}`,
-    ].join("\n")
-    : sessionMemory;
-  const result = await client.completeText({
-    userGoal: resolvedFollowUpGoal ?? userGoal,
-    context: directContext,
-    mode: "direct",
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "direct");
-
-  if (!result.success || !result.text) {
-    const error = result.error ?? "Direct answer failed";
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: { error, mode: "DIRECT_ANSWER" },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-    return {
-      success: false,
-      sessionId,
-      mode: "DIRECT_ANSWER",
-      summary: error,
-      error,
-    };
-  }
-
-  return await finalizeDirectAnswerSuccess(
-    sessionStore,
-    eventStore,
-    sessionId,
-    options,
-    result.text,
-  );
-}
-
-async function runWebAnswerTask(
-  repoPath: string,
-  userGoal: string,
-  options: AgentCliOptions,
-): Promise<CliTaskResult> {
-  const logger = createRuntimeLogger(repoPath);
-  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
-  let sessionId = options.session;
-
-  if (sessionId) {
-    await sessionStore.ensureSession(sessionId);
-    await eventStore.init();
-  } else {
-    const created = await sessionStore.createSession({ title: userGoal.slice(0, 80) });
-    sessionId = created.sessionId;
-    await eventStore.appendEvent(sessionId, {
-      type: "SESSION_CREATED",
-      payload: {
-        title: created.title,
-        repoPath: created.repoPath,
-        baseCommit: created.baseCommit,
-        mode: "WEB_ANSWER",
-      },
-    });
-  }
-
-  process.stdout.write(`[session] ${sessionId}\n`);
-
-  const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
-    .catch(() => "(none)");
-  const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-
-  const client = await createOpenAICompatibleClient(repoPath, options);
-  const webPlan = await planWebQuestion({
-    userGoal: resolvedFollowUpGoal ?? userGoal,
-    sessionMemory,
-    client,
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "web_rewrite");
-  await logger.info("web", "Web plan prepared", {
-    searchQueries: webPlan.searchQueries,
-    sourceHints: webPlan.sourceHints,
-    needsLiveData: webPlan.needsLiveData,
-    plannerError: webPlan.plannerError ?? null,
-  }, sessionId).catch(() => undefined);
-
-  const registry = createDefaultToolRegistry();
-  const toolContext: ToolContext = {
-    repoPath,
-    sessionId,
-    sessionStore,
-    eventStore,
-    maxOutputChars: 12_000,
-    autoApprove: true,
-    nonInteractive: true,
-  };
-
-  const searchQueries = webPlan.searchQueries;
-  const searchResults: Array<{ query: string; result: ToolResult<unknown> }> = [];
-  let sources: WebAnswerSource[] = [];
-
-  for (const query of searchQueries) {
-    process.stdout.write("[tool] web_search\n");
-    const result = await registry.execute("web_search", {
-      query,
-      maxResults: 6,
-    }, toolContext);
-    searchResults.push({ query, result });
-    sources = mergeWebSources(sources, extractWebSources(result, query));
-    await logger.info("web", "Web search attempt finished", {
-      query,
-      success: result.success,
-      resultCount: extractWebSources(result, query).length,
-      error: result.error?.message ?? null,
-    }, sessionId).catch(() => undefined);
-
-    if (sources.length >= 8) {
-      break;
-    }
-  }
-
-  sources = rankWebSources(sources, webPlan.sourceHints, searchQueries).slice(0, 8);
-
-  const fetchCandidates = selectWebSourcesForFetching(sources, webPlan.needsLiveData ? 5 : 4);
-  const targetFetchedSources = webPlan.needsLiveData ? 2 : 1;
-  let successfulFetches = 0;
-
-  for (const source of fetchCandidates) {
-    process.stdout.write("[tool] fetch_url\n");
-    const fetchResult = await registry.execute("fetch_url", {
-      url: source.url,
-      maxBytes: 120_000,
-      extractText: true,
-    }, {
-      ...toolContext,
-      maxOutputChars: 8_000,
-    });
-    const fetchedSource = extractFetchedSource(fetchResult);
-    if (fetchedSource) {
-      source.fetch = fetchedSource;
-      successfulFetches += 1;
-    } else if (fetchResult.error) {
-      source.fetchError = fetchResult.error.message;
-    }
-
-    await logger.info("web", "Source fetch finished", {
-      url: source.url,
-      success: Boolean(fetchedSource),
-      error: fetchResult.error?.message ?? null,
-    }, sessionId).catch(() => undefined);
-
-    if (successfulFetches >= targetFetchedSources) {
-      break;
-    }
-  }
-
-  const result = await client.completeText({
-    userGoal: webPlan.standaloneQuestion,
-    context: buildWebAnswerContext({
-      userGoal,
-      webPlan,
-      sessionMemory,
-      searchQueries,
-      searchResults,
-      sources,
-    }),
-    mode: "web",
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "web");
-
-  if (!result.success || !result.text) {
-    const error = result.error ?? "Web answer failed";
-    await logger.error("web", "Web answer generation failed", {
-      searchQueryCount: searchQueries.length,
-      sourceCount: sources.length,
-      fetchedSourceCount: successfulFetches,
-      error,
-    }, sessionId).catch(() => undefined);
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: { error, mode: "WEB_ANSWER" },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-    return {
-      success: false,
-      sessionId,
-      mode: "WEB_ANSWER",
-      summary: error,
-      error,
-    };
-  }
-
-  let answerText = result.text;
-  if (containsInvalidWebCapabilityDenial(answerText)) {
-    await logger.warn("web", "Web answer contradicted executed web tools; requesting repair", {
-      searchQueryCount: searchQueries.length,
-      sourceCount: sources.length,
-      fetchedSourceCount: successfulFetches,
-      answerPreview: answerText.slice(0, 500),
-    }, sessionId).catch(() => undefined);
-
-    const repaired = await client.completeText({
-      userGoal: webPlan.standaloneQuestion,
-      context: buildWebAnswerRepairContext({
-        originalContext: buildWebAnswerContext({
-          userGoal,
-          webPlan,
-          sessionMemory,
-          searchQueries,
-          searchResults,
-          sources,
-        }),
-        invalidAnswer: answerText,
-      }),
-      mode: "web",
-    });
-    await recordLlmUsageFromClient(sessionStore, sessionId, client, "web_repair");
-
-    answerText = repaired.success && repaired.text && !containsInvalidWebCapabilityDenial(repaired.text)
-      ? repaired.text
-      : buildLocalWebCapabilityCorrection({
-        searchQueryCount: searchQueries.length,
-        sourceCount: sources.length,
-        fetchedSourceCount: successfulFetches,
-        sources,
-      });
-  }
-
-  process.stdout.write(`[answer]\n${answerText}\n`);
-  await logger.info("web", "Web answer generated", {
-    searchQueryCount: searchQueries.length,
-    sourceCount: sources.length,
-    fetchedSourceCount: successfulFetches,
-  }, sessionId).catch(() => undefined);
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: answerText },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: answerText },
-  });
-  await sessionStore.appendRecord(sessionId, {
-    type: "TASK_SUMMARY",
-    payload: {
-      summary: answerText,
-      success: true,
-      mode: "WEB_ANSWER",
-    },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "TASK_FINISHED",
-    payload: {
-      success: true,
-      mode: "WEB_ANSWER",
-    },
-  });
-  if (options.keepSessionActive !== true) {
-    await sessionStore.updateSessionStatus(sessionId, "FINISHED");
-  }
-
-  return {
-    success: true,
-    sessionId,
-    mode: "WEB_ANSWER",
-    summary: answerText,
-    metadata: toJsonObject({
-      searchQueryCount: searchQueries.length,
-      sourceCount: sources.length,
-      fetchedSourceCount: successfulFetches,
-      fetchedSources: sources.filter((source) => source.fetch).map((source) => source.url),
-      searchProviders: searchResults
-        .map((entry) => isWebSearchData(entry.result.data) ? entry.result.data.provider : null)
-        .filter((provider): provider is string => typeof provider === "string"),
-    }),
-  };
-}
-
-async function runCodeReviewTask(
-  repoPath: string,
-  userGoal: string,
-  options: AgentCliOptions,
-): Promise<CliTaskResult> {
-  const logger = createRuntimeLogger(repoPath);
-  const { sessionStore, eventStore } = createStores(repoPath, options.eventStream === true);
-  let sessionId = options.session;
-
-  if (sessionId) {
-    await sessionStore.ensureSession(sessionId);
-    await eventStore.init();
-  } else {
-    const created = await sessionStore.createSession({ title: userGoal.slice(0, 80) });
-    sessionId = created.sessionId;
-    await eventStore.appendEvent(sessionId, {
-      type: "SESSION_CREATED",
-      payload: {
-        title: created.title,
-        repoPath: created.repoPath,
-        baseCommit: created.baseCommit,
-        mode: "CODE_REVIEW",
-      },
-    });
-  }
-
-  process.stdout.write(`[session] ${sessionId}\n`);
-
-  const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
-    .catch(() => "(none)");
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "USER_MESSAGE",
-    payload: { content: userGoal },
-  });
-
-  const reviewTargetPath = extractLikelyReviewFilePath(userGoal);
-  if (!reviewTargetPath) {
-    const message = "Please provide a repository file path to review, for example src/tools/WebSearchTool.ts.";
-    await logger.warn("review", "Review target path missing", {
-      task: userGoal,
-    }, sessionId).catch(() => undefined);
-    process.stdout.write(`[ask] ${message}\n`);
-    process.stdout.write(`${message}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ASSISTANT_MESSAGE",
-      payload: { content: message },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "ASSISTANT_MESSAGE",
-      payload: { content: message },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-    return {
-      success: false,
-      sessionId,
-      mode: "CODE_REVIEW",
-      summary: message,
-      error: message,
-    };
-  }
-
-  await logger.info("review", "Review target resolved", {
-    reviewTargetPath,
-  }, sessionId).catch(() => undefined);
-
-  const loadedFile = await loadReviewFile(repoPath, reviewTargetPath, {
-    sessionId,
-    sessionStore,
-    eventStore,
-  });
-  if (!loadedFile.success) {
-    const error = loadedFile.error ?? "Failed to load review target";
-    await logger.error("review", "Review target load failed", {
-      reviewTargetPath,
-      error,
-    }, sessionId).catch(() => undefined);
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: { error, mode: "CODE_REVIEW" },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-    return {
-      success: false,
-      sessionId,
-      mode: "CODE_REVIEW",
-      summary: error,
-      error,
-    };
-  }
-
-  await logger.info("review", "Review file loaded", {
-    file: loadedFile.file.path,
-    includedEndLine: loadedFile.file.includedEndLine,
-    totalLines: loadedFile.file.totalLines,
-    truncated: loadedFile.file.truncated,
-  }, sessionId).catch(() => undefined);
-
-  const supplementalFiles = await loadSupplementalReviewFiles(repoPath, loadedFile.file, {
-    sessionId,
-    sessionStore,
-    eventStore,
-  });
-
-  await logger.info("review", "Review supplemental files loaded", {
-    file: loadedFile.file.path,
-    supplementalFileCount: supplementalFiles.length,
-    supplementalFiles: supplementalFiles.map((file) => file.path),
-  }, sessionId).catch(() => undefined);
-
-  const client = await createOpenAICompatibleClient(repoPath, options);
-  const reviewResult = await client.completeReview({
-    userGoal,
-    context: buildCodeReviewContext({
-      userGoal,
-      sessionMemory,
-      reviewFile: loadedFile.file,
-      supplementalFiles,
-    }),
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "review_json");
-
-  if (!reviewResult.success || !reviewResult.review) {
-    const error = reviewResult.error ?? "Code review failed";
-    await logger.error("review", "Review draft generation failed", {
-      file: loadedFile.file.path,
-      error,
-    }, sessionId).catch(() => undefined);
-    process.stdout.write(`[error] ${error}\n`);
-    await sessionStore.appendRecord(sessionId, {
-      type: "ERROR",
-      payload: { message: error },
-    });
-    await eventStore.appendEvent(sessionId, {
-      type: "TASK_FAILED",
-      payload: { error, mode: "CODE_REVIEW" },
-    });
-    if (options.keepSessionActive !== true) {
-      await sessionStore.updateSessionStatus(sessionId, "FAILED");
-    }
-    return {
-      success: false,
-      sessionId,
-      mode: "CODE_REVIEW",
-      summary: error,
-      error,
-    };
-  }
-
-  let groundedReview = groundCodeReviewResponse(reviewResult.review, loadedFile.file);
-  await logger.info("review", "Review draft grounded", {
-    file: loadedFile.file.path,
-    groundedFindings: groundedReview.findings.length,
-    rejectedByGrounding: groundedReview.rejectedFindings.length,
-    overallVerdict: groundedReview.overallVerdict,
-  }, sessionId).catch(() => undefined);
-
-  let verificationApplied = false;
-  if (groundedReview.findings.length > 0) {
-    const verificationResult = await client.verifyReview({
-      userGoal,
-      context: buildCodeReviewVerificationContext({
-        userGoal,
-        reviewFile: loadedFile.file,
-        supplementalFiles,
-        findings: groundedReview.findings,
-      }),
-    });
-    await recordLlmUsageFromClient(sessionStore, sessionId, client, "review_verify_json");
-
-    if (verificationResult.success && verificationResult.verification) {
-      verificationApplied = true;
-      const findingsBeforeVerification = groundedReview.findings.length;
-      groundedReview = applyReviewVerification(groundedReview, verificationResult.verification);
-      await logger.info("review", "Review verification applied", {
-        file: loadedFile.file.path,
-        findingsBeforeVerification,
-        finalFindings: groundedReview.findings.length,
-        rejectedTotal: groundedReview.rejectedFindings.length,
-      }, sessionId).catch(() => undefined);
-    } else {
-      await logger.warn("review", "Review verification failed", {
-        file: loadedFile.file.path,
-        error: verificationResult.error ?? null,
-      }, sessionId).catch(() => undefined);
-    }
-  } else {
-    await logger.info("review", "Review verification skipped because no grounded findings remained", {
-      file: loadedFile.file.path,
-    }, sessionId).catch(() => undefined);
-  }
-
-  const renderedReview = renderCodeReviewOutput(groundedReview, loadedFile.file, supplementalFiles);
-  process.stdout.write(`${renderedReview}\n`);
-
-  await logger.info("review", "Review task finished", {
-    file: loadedFile.file.path,
-    findings: groundedReview.findings.length,
-    rejectedFindings: groundedReview.rejectedFindings.length,
-    overallVerdict: groundedReview.overallVerdict,
-  }, sessionId).catch(() => undefined);
-
-  const summary = groundedReview.summary;
-  await sessionStore.appendRecord(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: renderedReview },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: renderedReview },
-  });
-  await sessionStore.appendRecord(sessionId, {
-    type: "TASK_SUMMARY",
-    payload: {
-      summary,
-      success: true,
-      mode: "CODE_REVIEW",
-      file: loadedFile.file.path,
-      findings: groundedReview.findings.length,
-      rejectedFindings: groundedReview.rejectedFindings.length,
-      overallVerdict: groundedReview.overallVerdict,
-    },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "TASK_FINISHED",
-    payload: {
-      success: true,
-      mode: "CODE_REVIEW",
-      file: loadedFile.file.path,
-      findings: groundedReview.findings.length,
-      rejectedFindings: groundedReview.rejectedFindings.length,
-      overallVerdict: groundedReview.overallVerdict,
-    },
-  });
-  if (options.keepSessionActive !== true) {
-    await sessionStore.updateSessionStatus(sessionId, "FINISHED");
-  }
-
-  return {
-    success: true,
-    sessionId,
-    mode: "CODE_REVIEW",
-    summary,
-    metadata: toJsonObject({
-      reviewFile: loadedFile.file.path,
-      includedEndLine: loadedFile.file.includedEndLine,
-      totalLines: loadedFile.file.totalLines,
-      truncated: loadedFile.file.truncated,
-      supplementalFileCount: supplementalFiles.length,
-      supplementalFiles: supplementalFiles.map((file) => file.path),
-      findings: groundedReview.findings.length,
-      rejectedFindings: groundedReview.rejectedFindings.length,
-      overallVerdict: groundedReview.overallVerdict,
-      verificationApplied,
-    }),
-  };
-}
-
-interface WebAnswerSource {
-  title: string;
-  url: string;
-  snippet: string;
-  query?: string;
-  fetch?: FetchedWebSource;
-  fetchError?: string;
-}
-
-interface FetchedWebSource {
-  finalUrl: string;
-  status: number;
-  contentType: string;
-  text: string;
-  truncated: boolean;
-  outputTruncated: boolean;
-}
-
-function extractWebSources(searchResult: ToolResult<unknown>, query?: string): WebAnswerSource[] {
-  if (!searchResult.success || !isWebSearchData(searchResult.data)) {
-    return [];
-  }
-
-  return searchResult.data.results.map((result) => ({
-    title: result.title,
-    url: result.url,
-    snippet: result.snippet,
-    ...(query ? { query } : {}),
-  }));
-}
-
-function extractFetchedSource(fetchResult: ToolResult<unknown>): FetchedWebSource | undefined {
-  if (!fetchResult.success || !isFetchUrlData(fetchResult.data)) {
-    return undefined;
-  }
-
-  return {
-    finalUrl: fetchResult.data.finalUrl,
-    status: fetchResult.data.status,
-    contentType: fetchResult.data.contentType,
-    text: fetchResult.data.text,
-    truncated: fetchResult.data.truncated,
-    outputTruncated: fetchResult.data.outputTruncated,
-  };
-}
-
-async function finalizeDirectAnswerSuccess(
-  sessionStore: SessionStore,
-  eventStore: EventStore,
-  sessionId: string,
-  options: AgentCliOptions,
-  text: string,
-): Promise<CliTaskResult> {
-  process.stdout.write(`[answer]\n${text}\n`);
-
-  await sessionStore.appendRecord(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: text },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "ASSISTANT_MESSAGE",
-    payload: { content: text },
-  });
-  await sessionStore.appendRecord(sessionId, {
-    type: "TASK_SUMMARY",
-    payload: {
-      summary: text,
-      success: true,
-      mode: "DIRECT_ANSWER",
-    },
-  });
-  await eventStore.appendEvent(sessionId, {
-    type: "TASK_FINISHED",
-    payload: {
-      success: true,
-      mode: "DIRECT_ANSWER",
-    },
-  });
-  if (options.keepSessionActive !== true) {
-    await sessionStore.updateSessionStatus(sessionId, "FINISHED");
-  }
-
-  return {
-    success: true,
-    sessionId,
-    mode: "DIRECT_ANSWER",
-    summary: text,
-  };
-}
-
-function resolveLocalDirectReply(repoPath: string, userGoal: string): string | undefined {
-  const normalized = userGoal
-    .trim()
-    .replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】]/g, "");
-  if (normalized.length === 0) {
-    return undefined;
-  }
-
-  const diagnosticReply = resolveLocalDiagnosticReply(repoPath, userGoal);
-  if (diagnosticReply) {
-    return diagnosticReply;
-  }
-
-  if (looksLikeWebCapabilityQuestion(userGoal.trim().toLowerCase())) {
-    return [
-      "我有受控联网能力，不是完全离线。",
-      "",
-      "当前 CLI 可以通过 `web_search` 搜索公开网页结果，也可以通过 `fetch_url` 抓取公网 HTTP(S) 页面文本。它不是浏览器式常驻联网，也没有“联网按钮”；而是当任务被路由到 `WEB_ANSWER` 时，由本地工具按需发起网络请求。",
-      "",
-      "所以像“今天股市收盘情况”“最新版本”“赛事比分”这类问题，正常应该看到 `[tool] web_search`，必要时还会看到 `[tool] fetch_url`。如果资料源抓不到，我应该说“来源不足以核验”，而不是否认这个项目的联网能力。",
-    ].join("\n");
-  }
-
-  if (matchesAnyPhrase(normalized, [
-    "没事我按错了",
-    "没事按错了",
-    "按错了",
-    "点错了",
-    "不小心点错了",
-    "误触了",
-    "我按错了",
-    "我点错了",
-  ])) {
-    return "好的，没事，你继续说就行。";
-  }
-
-  if (matchesAnyPhrase(normalized, [
-    "算了",
-    "不用了",
-    "先这样",
-    "先这样吧",
-    "当我没说",
-    "没事了",
-  ])) {
-    return "好，先放这儿，需要我时再叫我。";
-  }
-
-  return undefined;
-}
-
-function resolveLocalDiagnosticReply(repoPath: string, userGoal: string): string | undefined {
-  const diagnostic = classifyErrorText({ text: userGoal, repoPath });
-  return diagnostic ? renderDiagnosticReply(diagnostic) : undefined;
-}
-
-function renderDiagnosticReply(diagnostic: DiagnosticResult): string {
-  const lines = [
-    `诊断：${formatDiagnosticCategory(diagnostic.category)}`,
-    "",
-    diagnostic.explanation,
-  ];
-
-  if (diagnostic.evidence.length > 0) {
-    lines.push(
-      "",
-      "证据：",
-      ...diagnostic.evidence.map((item) => `- ${item}`),
-    );
-  }
-
-  if (diagnostic.suggestedCommands.length > 0) {
-    lines.push(
-      "",
-      "建议你这样试：",
-      "",
-      "```bash",
-      ...diagnostic.suggestedCommands,
-      "```",
-    );
-  }
-
-  return lines.join("\n");
-}
-
-function formatDiagnosticCategory(category: DiagnosticResult["category"]): string {
-  switch (category) {
-    case "WRONG_WORKING_DIRECTORY":
-      return "运行目录问题";
-    case "COMMAND_NOT_FOUND":
-      return "命令不存在";
-    case "PORT_IN_USE":
-      return "端口占用";
-    case "CONNECTION_REFUSED":
-      return "连接被拒绝";
-    case "PERMISSION_DENIED":
-      return "权限不足";
-  }
-}
-
-function resolveLocalSessionReply(userGoal: string, records: SessionRecord[]): string | undefined {
-  if (looksLikeFileWriteConfirmation(userGoal)) {
-    return buildFileWriteConfirmationReply(records);
-  }
-
-  return undefined;
-}
-
-function buildFileWriteConfirmationReply(records: SessionRecord[]): string {
-  const currentUserIndex = findLastRecordIndex(records, (record) => record.type === "USER_MESSAGE");
-  const previousUserIndex = findLastRecordIndex(
-    records,
-    (record) => record.type === "USER_MESSAGE",
-    currentUserIndex - 1,
-  );
-  const latestChangeAfterPreviousUser = previousUserIndex >= 0
-    ? findLastRecordIndex(
-      records,
-      (record) => record.type === "FILE_CHANGE",
-      currentUserIndex - 1,
-      previousUserIndex + 1,
-    )
-    : -1;
-
-  if (latestChangeAfterPreviousUser >= 0) {
-    const files = formatFileChangeFiles(records[latestChangeAfterPreviousUser]?.payload);
-    return files.length > 0
-      ? `是的，上一轮已经产生文件变更记录：${files.join("、")}。你可以用 /diff 查看具体修改。`
-      : "是的，上一轮已经产生文件变更记录。你可以用 /diff 查看具体修改。";
-  }
-
-  const latestAnyChange = findLastRecordIndex(
-    records,
-    (record) => record.type === "FILE_CHANGE",
-    currentUserIndex - 1,
-  );
-  if (latestAnyChange >= 0) {
-    const files = formatFileChangeFiles(records[latestAnyChange]?.payload);
-    const suffix = files.length > 0 ? `最近一次文件变更是：${files.join("、")}。` : "之前有过文件变更记录。";
-    return `没有查到上一轮请求对应的新文件写入记录，刚才那次可能只是回答了内容，没有真正落盘。${suffix}`;
-  }
-
-  return "没有查到文件写入记录。刚才可能只是回答了代码或说明，没有真正写入仓库文件。";
-}
-
-function findLastRecordIndex(
-  records: SessionRecord[],
-  predicate: (record: SessionRecord) => boolean,
-  startIndex = records.length - 1,
-  stopIndex = 0,
-): number {
-  for (let index = Math.min(startIndex, records.length - 1); index >= stopIndex; index -= 1) {
-    const record = records[index];
-    if (record && predicate(record)) {
-      return index;
-    }
-  }
-
-  return -1;
-}
-
-function formatFileChangeFiles(payload: JsonObject | undefined): string[] {
-  const files = payload?.files;
-  if (!Array.isArray(files)) {
-    return [];
-  }
-
-  return files
-    .map((file) => {
-      if (!isRecord(file) || typeof file.path !== "string") {
-        return undefined;
-      }
-
-      const changeType = typeof file.changeType === "string" ? file.changeType : "MODIFIED";
-      return `${file.path} (${changeType})`;
-    })
-    .filter((file): file is string => file !== undefined);
-}
-
-function matchesAnyPhrase(value: string, phrases: string[]): boolean {
-  return phrases.includes(value);
-}
-
-function buildWebAnswerContext(input: {
-  userGoal: string;
-  webPlan: WebQuestionPlan;
-  sessionMemory: string;
-  searchQueries: string[];
-  searchResults: Array<{ query: string; result: ToolResult<unknown> }>;
-  sources: WebAnswerSource[];
-}): string {
-  const fetchedSourceCount = input.sources.filter((source) => source.fetch).length;
-  const failedFetchCount = input.sources.filter((source) => source.fetchError).length;
-  const lines = [
-    "Runtime context:",
-    formatRuntimeContext(),
-    "",
-    "Conversation context:",
-    input.sessionMemory,
-    "",
-    `Original web question: ${input.userGoal}`,
-    `Standalone web question: ${input.webPlan.standaloneQuestion}`,
-    `Answer scope: ${input.webPlan.answerScope}`,
-    `Needs live/current data: ${input.webPlan.needsLiveData}`,
-    input.webPlan.plannerError ? `Planner fallback reason: ${input.webPlan.plannerError}` : undefined,
-    "",
-    "Source hints:",
-    ...(input.webPlan.sourceHints.length > 0 ? input.webPlan.sourceHints.map((hint) => `- ${hint}`) : ["- (none)"]),
-    "",
-    "Resolved search queries:",
-    ...input.searchQueries.map((query, index) => `${index + 1}. ${query}`),
-    "",
-    "Answering rules:",
-    ...(input.webPlan.answerInstructions.length > 0
-      ? input.webPlan.answerInstructions.map((instruction) => `- ${instruction}`)
-      : ["- Only answer facts supported by the gathered sources."]),
-    "",
-    "Evidence quality:",
-    `- search queries attempted: ${String(input.searchQueries.length)}`,
-    `- source candidates gathered: ${String(input.sources.length)}`,
-    `- fetched sources: ${String(fetchedSourceCount)}`,
-    `- fetch failures: ${String(failedFetchCount)}`,
-    fetchedSourceCount === 0
-      ? "- no fetch_url call produced readable page text; rely only on snippets and be explicit about uncertainty."
-      : "- prefer fetched page text over snippets when they conflict.",
-    "",
-    "Web tool results:",
-  ].filter((line): line is string => line !== undefined);
-
-  const failedSearches = input.searchResults.filter((entry) => !entry.result.success);
-  if (input.searchResults.length > 0 && failedSearches.length === input.searchResults.length) {
-    for (const entry of failedSearches) {
-      lines.push(`web_search failed for "${entry.query}": ${entry.result.error?.message ?? "unknown error"}`);
-    }
-  } else if (input.sources.length === 0) {
-    lines.push("web_search returned no results.");
-  } else {
-    input.sources.forEach((source, index) => {
-      lines.push("");
-      lines.push(`[source ${index + 1}] ${source.title}`);
-      if (source.query) {
-        lines.push(`searchQuery: ${source.query}`);
-      }
-      lines.push(`url: ${source.url}`);
-      if (source.snippet) {
-        lines.push(`snippet: ${source.snippet}`);
-      }
-
-      if (source.fetch) {
-        lines.push(`fetchedUrl: ${source.fetch.finalUrl}`);
-        lines.push(`status: ${source.fetch.status}`);
-        lines.push(`contentType: ${source.fetch.contentType}`);
-        lines.push(`truncated: ${source.fetch.truncated || source.fetch.outputTruncated}`);
-        lines.push("text:");
-        lines.push(limitText(source.fetch.text, 4_000));
-      } else if (source.fetchError) {
-        lines.push(`fetch_url failed: ${source.fetchError}`);
-      }
-    });
-  }
-
-  return lines.join("\n");
-}
-
-function buildWebAnswerRepairContext(input: {
-  originalContext: string;
-  invalidAnswer: string;
-}): string {
-  return [
-    input.originalContext,
-    "",
-    "Previous answer was invalid because it contradicted the local tool execution.",
-    "The CLI has controlled web capability and already attempted web_search/fetch_url for this turn.",
-    "Rewrite the answer using the evidence above. Do not mention browser buttons, manual web switches, training-only knowledge, or that the CLI cannot network.",
-    "If the gathered sources are insufficient, say the sources are insufficient to verify the requested current data.",
-    "",
-    "Invalid previous answer:",
-    input.invalidAnswer,
-  ].join("\n");
-}
-
-function containsInvalidWebCapabilityDenial(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return containsAnyText(normalized, [
-    "没有联网能力",
-    "不能联网",
-    "无法联网",
-    "不能自动联网",
-    "没有实时联网",
-    "默认是离线",
-    "默认离线",
-    "联网按钮",
-    "联网开关",
-    "开启联网",
-    "手动开启联网",
-    "插上网线",
-    "只依赖训练",
-    "training data only",
-    "cannot browse",
-    "cannot access the internet",
-    "no internet access",
-    "enable web browsing",
-    "turn on web",
-  ]);
-}
-
-function buildLocalWebCapabilityCorrection(input: {
-  searchQueryCount: number;
-  sourceCount: number;
-  fetchedSourceCount: number;
-  sources: WebAnswerSource[];
-}): string {
-  const sourceLines = input.sources.slice(0, 4).map((source, index) => {
-    return `${index + 1}. ${source.title} - ${source.url}`;
-  });
-
-  return [
-    "刚才的模型回答和工具记录冲突，已被本地 CLI 拦截。",
-    "",
-    "这个项目具备受控联网能力：本轮已经尝试调用 `web_search`，并按需调用 `fetch_url` 抓取公网页面。它不是浏览器式常驻联网，也没有需要手动点击的联网开关。",
-    "",
-    `本轮联网记录：搜索 ${String(input.searchQueryCount)} 次，获得候选来源 ${String(input.sourceCount)} 个，成功抓取页面 ${String(input.fetchedSourceCount)} 个。`,
-    sourceLines.length > 0 ? `候选来源：\n${sourceLines.join("\n")}` : "没有拿到可用候选来源。",
-    "",
-    input.fetchedSourceCount > 0
-      ? "请重新提问一次原问题，我会基于已修复的联网回答约束重新整理结果。"
-      : "当前来源不足以核验具体实时数据，请换一个更明确的数据源或稍后重试。",
-  ].join("\n");
-}
-
-function mergeWebSources(left: WebAnswerSource[], right: WebAnswerSource[]): WebAnswerSource[] {
-  const seen = new Set(left.map((source) => normalizeUrlForDedupe(source.url)));
-  const merged = [...left];
-
-  for (const source of right) {
-    const key = normalizeUrlForDedupe(source.url);
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(source);
-    }
-  }
-
-  return merged;
-}
-
-function rankWebSources(
-  sources: WebAnswerSource[],
-  sourceHints: string[] = [],
-  searchQueries: string[] = [],
-): WebAnswerSource[] {
-  return [...sources].sort((left, right) => scoreWebSource(right, sourceHints, searchQueries) - scoreWebSource(left, sourceHints, searchQueries));
-}
-
-function scoreWebSource(source: WebAnswerSource, sourceHints: string[], searchQueries: string[]): number {
-  const host = safeHostname(source.url) ?? "";
-  const pathname = safePathname(source.url);
-  const value = `${source.title} ${source.url} ${source.snippet}`.toLowerCase();
-  const terms = buildWebSearchTerms(searchQueries);
-  let score = 0;
-
-  if (containsAnyText(value, ["fifa.com", "the-afc.com", "jfa.jp"])) {
-    score += 10;
-  }
-  if (containsAnyText(value, ["espn", "bbc", "reuters", "apnews", "sofascore", "flashscore", "fotmob"])) {
-    score += 5;
-  }
-  if (containsAnyText(host, ["github.com", "typescriptlang.org", "nodejs.org", "developer.mozilla.org", "npmjs.com"])) {
-    score += 7;
-  }
-  if (host.endsWith(".gov") || host.endsWith(".edu")) {
-    score += 6;
-  }
-  if (containsAnyText(value, ["score", "scores", "result", "results", "比分", "赛果", "赛程"])) {
-    score += 3;
-  }
-  if (containsAnyText(value, ["official", "官网", "官方"])) {
-    score += 2;
-  }
-  if (containsAnyText(`${host} ${pathname}`, ["docs", "developer", "support", "release", "releases", "changelog", "news", "blog", "announcement"])) {
-    score += 3;
-  }
-  if (sourceHints.some((hint) => value.includes(hint.toLowerCase()))) {
-    score += 2;
-  }
-  if (hasOfficialSourceHint(sourceHints) && containsAnyText(`${host} ${value}`, ["official", "官网", "官方", "docs", "developer", "support", "release", "changelog", ".gov", ".edu"])) {
-    score += 4;
-  }
-  if (hasLiveScoreHint(sourceHints) && containsAnyText(value, ["sofascore", "flashscore", "fotmob", "espn", "score", "scores", "result", "results", "fixture", "fixtures"])) {
-    score += 4;
-  }
-  if (hasReleaseHint(sourceHints) && containsAnyText(`${host} ${pathname} ${value}`, ["release", "releases", "changelog", "version", "update", "announcement", "blog", "docs"])) {
-    score += 3;
-  }
-  score += Math.min(6, countMatchingTerms(value, terms));
-  if (containsAnyText(host, ["reddit.com", "quora.com", "zhihu.com", "tieba.baidu.com", "weibo.com", "x.com", "twitter.com"])) {
-    score -= 4;
-  }
-  if (containsAnyText(value, ["forum", "bbs", "贴吧", "社区讨论"])) {
-    score -= 2;
-  }
-  if (source.fetch) {
-    score += 4;
-  }
-
-  return score;
-}
-
-function selectWebSourcesForFetching(sources: WebAnswerSource[], limit: number): WebAnswerSource[] {
-  const selected: WebAnswerSource[] = [];
-  const deferred: WebAnswerSource[] = [];
-  const seenHosts = new Set<string>();
-
-  for (const source of sources) {
-    const host = safeHostname(source.url);
-    if (host && !seenHosts.has(host)) {
-      seenHosts.add(host);
-      selected.push(source);
-    } else {
-      deferred.push(source);
-    }
-  }
-
-  return [...selected, ...deferred].slice(0, Math.max(0, limit));
-}
-
-function buildWebSearchTerms(searchQueries: string[]): string[] {
-  const stopWords = new Set([
-    "the",
-    "and",
-    "for",
-    "with",
-    "from",
-    "that",
-    "this",
-    "what",
-    "when",
-    "where",
-    "which",
-    "latest",
-    "current",
-    "official",
-    "site",
-    "www",
-    "com",
-    "org",
-    "net",
-  ]);
-
-  const tokens = searchQueries
-    .flatMap((query) => query
-      .toLowerCase()
-      .split(/[^a-z0-9\u4e00-\u9fff]+/i)
-      .map((part) => part.trim())
-      .filter((part) => part.length >= 2 && !stopWords.has(part)));
-
-  return [...new Set(tokens)];
-}
-
-function countMatchingTerms(value: string, terms: string[]): number {
-  let count = 0;
-  for (const term of terms) {
-    if (value.includes(term)) {
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
-function hasOfficialSourceHint(sourceHints: string[]): boolean {
-  return sourceHints.some((hint) => /official|官网|官方/i.test(hint));
-}
-
-function hasLiveScoreHint(sourceHints: string[]): boolean {
-  return sourceHints.some((hint) => /live score|fixture|results|scores?/i.test(hint));
-}
-
-function hasReleaseHint(sourceHints: string[]): boolean {
-  return sourceHints.some((hint) => /release|changelog|update|公告|发布/i.test(hint));
-}
-
-function containsAnyText(value: string, needles: string[]): boolean {
-  return needles.some((needle) => value.includes(needle.toLowerCase()));
-}
-
-function normalizeUrlForDedupe(url: string): string {
-  try {
-    const parsed = new URL(url);
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-function safeHostname(url: string): string | undefined {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
-}
-
-function safePathname(url: string): string {
-  try {
-    return new URL(url).pathname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function isWebSearchData(value: unknown): value is {
-  query: string;
-  provider: string;
-  results: Array<{ title: string; url: string; snippet: string }>;
-} {
-  if (!isRecord(value) || typeof value.provider !== "string" || !Array.isArray(value.results)) {
-    return false;
-  }
-
-  return value.results.every((item) => isRecord(item)
-    && typeof item.title === "string"
-    && typeof item.url === "string"
-    && typeof item.snippet === "string");
-}
-
-function isFetchUrlData(value: unknown): value is {
-  finalUrl: string;
-  status: number;
-  contentType: string;
-  text: string;
-  truncated: boolean;
-  outputTruncated: boolean;
-} {
-  return isRecord(value)
-    && typeof value.finalUrl === "string"
-    && typeof value.status === "number"
-    && typeof value.contentType === "string"
-    && typeof value.text === "string"
-    && typeof value.truncated === "boolean"
-    && typeof value.outputTruncated === "boolean";
-}
-
-function isListFilesData(value: unknown): value is {
-  items: Array<{ path: string; type: "file" | "directory" }>;
-} {
-  return isRecord(value)
-    && Array.isArray(value.items)
-    && value.items.every((item) => isRecord(item)
-      && typeof item.path === "string"
-      && (item.type === "file" || item.type === "directory"));
-}
-
-function isGitStatusData(value: unknown): value is { status: string } {
-  return isRecord(value)
-    && typeof value.status === "string";
-}
-
-function isReadFileData(value: unknown): value is {
-  path: string;
-  startLine: number;
-  endLine: number;
-  totalLines: number;
-  content: string;
-} {
-  return isRecord(value)
-    && typeof value.path === "string"
-    && typeof value.startLine === "number"
-    && typeof value.endLine === "number"
-    && typeof value.totalLines === "number"
-    && typeof value.content === "string";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function limitText(value: string, maxChars: number): string {
   return value.length > maxChars ? `${value.slice(0, maxChars)}\n...[truncated]` : value;
-}
-
-function writeAgentProgress(event: AgentProgressEvent): void {
-  switch (event.type) {
-    case "session":
-      process.stdout.write(`[session] ${event.sessionId}\n`);
-      break;
-    case "plan":
-      process.stdout.write(`[plan] ${event.message}\n`);
-      break;
-    case "tool":
-      process.stdout.write(`[tool] ${event.toolName}\n`);
-      break;
-    case "patch":
-      process.stdout.write(`[patch] ${event.description}\n`);
-      break;
-    case "command":
-      process.stdout.write(`[command] ${event.command}\n`);
-      break;
-    case "ask_user":
-      process.stdout.write(`[ask] ${event.message}\n`);
-      break;
-    case "diff":
-      process.stdout.write("[diff] generated\n");
-      break;
-    case "summary":
-      process.stdout.write(`[summary] ${event.summary}\n`);
-      break;
-    case "error":
-      process.stdout.write(`[error] ${event.message}\n`);
-      break;
-  }
 }
 
 async function readGitDiff(repoPath: string): Promise<string> {
@@ -3601,215 +1893,6 @@ async function readGitSnapshot(repoPath: string): Promise<GitSnapshot> {
     changedFiles,
     diffStat: diffSummary?.stat || null,
   };
-}
-
-async function loadReviewFile(
-  repoPath: string,
-  reviewTargetPath: string,
-  stores: {
-    sessionId: string;
-    sessionStore: SessionStore;
-    eventStore: EventStore;
-  },
-  options?: {
-    maxReviewLines?: number;
-    chunkSize?: number;
-  },
-): Promise<
-  | { success: true; file: LoadedReviewFile }
-  | { success: false; error: string }
-> {
-  const registry = createDefaultToolRegistry();
-  const toolContext: ToolContext = {
-    repoPath,
-    sessionId: stores.sessionId,
-    sessionStore: stores.sessionStore,
-    eventStore: stores.eventStore,
-    maxOutputChars: 20_000,
-    autoApprove: true,
-    nonInteractive: true,
-  };
-
-  const chunks: ReviewFileChunk[] = [];
-  let startLine = 1;
-  let loadedLines = 0;
-  const maxReviewLines = options?.maxReviewLines ?? 900;
-  const chunkSize = options?.chunkSize ?? 220;
-
-  while (loadedLines < maxReviewLines) {
-    process.stdout.write("[tool] read_file\n");
-    const result = await registry.execute("read_file", {
-      path: reviewTargetPath,
-      startLine,
-      maxLines: chunkSize,
-    }, toolContext);
-
-    if (!result.success || !isReadFileData(result.data)) {
-      return {
-        success: false,
-        error: result.error?.message ?? `Failed to read file for review: ${reviewTargetPath}`,
-      };
-    }
-
-    chunks.push({
-      path: result.data.path,
-      startLine: result.data.startLine,
-      endLine: result.data.endLine,
-      totalLines: result.data.totalLines,
-      content: result.data.content,
-    });
-
-    const linesInChunk = result.data.content.length > 0 ? result.data.content.split("\n").length : 0;
-    loadedLines += linesInChunk;
-
-    if (result.data.endLine >= result.data.totalLines || linesInChunk === 0) {
-      break;
-    }
-
-    startLine = result.data.endLine + 1;
-  }
-
-  return {
-    success: true,
-    file: buildLoadedReviewFile(chunks),
-  };
-}
-
-async function loadSupplementalReviewFiles(
-  repoPath: string,
-  reviewFile: LoadedReviewFile,
-  stores: {
-    sessionId: string;
-    sessionStore: SessionStore;
-    eventStore: EventStore;
-  },
-): Promise<LoadedReviewFile[]> {
-  const relatedPaths = await extractRelatedReviewFilePaths(repoPath, reviewFile, 3);
-  const files: LoadedReviewFile[] = [];
-
-  for (const relatedPath of relatedPaths) {
-    const result = await loadReviewFile(repoPath, relatedPath, stores, {
-      maxReviewLines: 180,
-      chunkSize: 180,
-    });
-
-    if (result.success) {
-      files.push(result.file);
-    }
-  }
-
-  return files;
-}
-
-function buildCodeReviewContext(input: {
-  userGoal: string;
-  sessionMemory: string;
-  reviewFile: LoadedReviewFile;
-  supplementalFiles: LoadedReviewFile[];
-}): string {
-  return [
-    "Review task:",
-    input.userGoal,
-    "",
-    "Conversation memory:",
-    input.sessionMemory,
-    "",
-    "Runtime context:",
-    formatRuntimeContext(),
-    "",
-    "Instructions:",
-    "- Review the primary repository file first, and use supplemental related files only as supporting context.",
-    "- Report only findings grounded in the provided code.",
-    "- Every finding should quote code from the primary file. Use supplemental files only to support or weaken the reasoning.",
-    "- If a finding still needs more surrounding code to be proven, mark it as possible instead of confirmed.",
-    "- Use the file path exactly as provided in the file sections.",
-    "- Keep the findings array short and high-signal.",
-    "",
-    "Primary file content:",
-    formatReviewFileForPrompt(input.reviewFile),
-    "",
-    "Supplemental related files:",
-    ...(input.supplementalFiles.length > 0
-      ? input.supplementalFiles.flatMap((file) => ["", formatReviewFileForPrompt(file)])
-      : ["(none)"]),
-  ].join("\n");
-}
-
-function renderCodeReviewOutput(
-  result: GroundedCodeReviewResult,
-  file: LoadedReviewFile,
-  supplementalFiles: LoadedReviewFile[],
-): string {
-  const lines = [
-    `[review] ${result.summary}`,
-    `[review] File: ${file.path} (lines 1-${String(file.includedEndLine)} / ${String(file.totalLines)}${file.truncated ? ", truncated" : ""})`,
-  ];
-
-  if (supplementalFiles.length > 0) {
-    lines.push(`[review] Supplemental context: ${supplementalFiles.map((item) => item.path).join(", ")}`);
-  }
-
-  if (result.findings.length === 0) {
-    lines.push("[review] No grounded findings were confirmed in the loaded file content.");
-  } else {
-    result.findings.forEach((finding, index) => {
-      lines.push(`${index + 1}. [${finding.certainty}/${finding.severity}] ${finding.file}:${String(finding.line)} ${finding.title}`);
-      lines.push(`Quote: ${finding.codeQuote}`);
-      lines.push(`Reason: ${finding.reasoning}`);
-      if (finding.suggestedFix) {
-        lines.push(`Fix: ${finding.suggestedFix}`);
-      }
-    });
-  }
-
-  if (result.rejectedFindings.length > 0) {
-    lines.push(`[review] Filtered ${String(result.rejectedFindings.length)} unsupported finding(s) that were not grounded in the file.`);
-  }
-
-  if (result.followUp.length > 0) {
-    lines.push(`[review] Follow-up: ${result.followUp.join(" | ")}`);
-  }
-
-  return lines.join("\n");
-}
-
-function buildCodeReviewVerificationContext(input: {
-  userGoal: string;
-  reviewFile: LoadedReviewFile;
-  supplementalFiles: LoadedReviewFile[];
-  findings: GroundedCodeReviewFinding[];
-}): string {
-  return [
-    "Original review request:",
-    input.userGoal,
-    "",
-    "Verification instructions:",
-    "- Decide whether each preliminary finding is truly supported by the file content.",
-    "- The primary file remains the source of truth for each finding quote; use supplemental files only as surrounding context.",
-    "- Drop findings whose reasoning is too speculative for the quoted code.",
-    "- Keep certainty=confirmed only when the code directly supports the claim.",
-    "",
-    "Primary file content:",
-    formatReviewFileForPrompt(input.reviewFile),
-    "",
-    "Supplemental related files:",
-    ...(input.supplementalFiles.length > 0
-      ? input.supplementalFiles.flatMap((file) => ["", formatReviewFileForPrompt(file)])
-      : ["(none)"]),
-    "",
-    "Preliminary findings JSON:",
-    JSON.stringify(input.findings.map((finding, index) => ({
-      index,
-      severity: finding.severity,
-      certainty: finding.certainty,
-      file: finding.file,
-      line: finding.line,
-      title: finding.title,
-      codeQuote: finding.codeQuote,
-      reasoning: finding.reasoning,
-      suggestedFix: finding.suggestedFix,
-    })), null, 2),
-  ].join("\n");
 }
 
 async function appendTaskChangeLog(
@@ -4016,20 +2099,6 @@ async function runJsonAction(action: () => Promise<void>): Promise<void> {
   }
 }
 
-function createStores(repoPath: string, eventStream = false): { sessionStore: SessionStore; eventStore: EventStore } {
-  return {
-    sessionStore: new SessionStore({ repoPath }),
-    eventStore: new EventStore({
-      repoPath,
-      ...(eventStream ? { onEvent: writeStructuredEvent } : {}),
-    }),
-  };
-}
-
-function writeStructuredEvent(event: unknown): void {
-  process.stdout.write(`MINI_AGENT_EVENT ${JSON.stringify(event)}\n`);
-}
-
 function parseOptionalLimit(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -4224,6 +2293,11 @@ function readPayloadString(payload: JsonObject, key: string): string | undefined
 function readPayloadNumber(payload: JsonObject, key: string): number | undefined {
   const value = payload[key];
   return typeof value === "number" ? value : undefined;
+}
+
+function formatMemoryEntryForOutput(entry: Awaited<ReturnType<LongTermMemoryStore["list"]>>[number]): Omit<typeof entry, "vector"> {
+  const { vector: _vector, ...visible } = entry;
+  return visible;
 }
 
 function formatLocalMinute(isoTimestamp: string): string {

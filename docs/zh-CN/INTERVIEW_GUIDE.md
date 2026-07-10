@@ -20,6 +20,8 @@
 
 第五层是本地记录和记忆。`.mini-agent/sessions` 保存会话状态，`.mini-agent/events` 保存事件时间线，`.mini-agent/logs` 和 `change-log.jsonl` 用于排障和复盘，`.mini-agent/memory/index.jsonl` 保存长期记忆索引。
 
+第六层是可复用工作流和规划安全。声明式 `SKILL.md` 会按任务选择并注入上下文，但只能指导现有受控工具；Plan 模式只暴露只读工具，并在 AgentLoop 运行时硬拦 patch、命令和非只读工具调用，再通过 `/execute` 显式进入正常执行模式。
+
 第六层是评测和扩展。`AgentHarness` 用脚本化 LLM 在临时仓库中跑多步 AgentLoop 场景；`src/mcp` 则把本地工具导出为 MCP 风格 descriptor，为后续真实 MCP runtime 接入预留边界。
 
 另外，现在代码生成类任务不是只会把代码吐在聊天窗口里。路由层会优先把“写代码、做 demo、写游戏”识别为仓库任务，`ContextBuilder` 还会额外提供一段新文件放置建议，帮助模型把新文件落到更符合项目结构的位置。

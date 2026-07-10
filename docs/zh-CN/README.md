@@ -60,6 +60,9 @@
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
 - `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
 - `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
+- 长期记忆已经覆盖 Direct、Web、Review、RepositoryAnalysis 和普通 AgentLoop；支持 `memory remember/forget/stats/clear`、`/remember`、`/forget`，默认排除失败任务并对常见密钥做脱敏。
+- 声明式 Skill：从版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md` 发现、校验、自动选择并注入所有执行模式；Skill 只能指导现有受控工具，不能执行任意脚本或绕过权限。
+- 真正的只读 Plan 模式：`mini-agent plan`、`/plan`、`/plan off`、`/execute`。Plan 状态会随 Session 保存，只向模型暴露只读工具，并在运行时硬拦 patch、命令和伪装成工具调用的写操作。
 - Tool manifest 和 MCP 风格工具描述，标注只读、破坏性、幂等性、是否访问外部世界等能力边界。
 - `AgentHarness` 和 `ScriptedLlmClient`，用于把多步 AgentLoop 场景变成可重复评测。
 - `mini-agent config` 管理本地模型配置。
@@ -95,7 +98,7 @@ npm run test:regression
 npm run verify:regression
 ```
 
-当前全量回归结果：32 个测试文件、230 个测试用例通过；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+当前正常环境回归基线：34 个测试文件、247 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
 
 ## 快速验证
 
@@ -138,6 +141,12 @@ cp mini-agent.config.example.json mini-agent.config.json
 /changes [n]  查看任务变更日志
 /compact      写入一条本地压缩记忆
 /memory <q>   检索本地长期记忆
+/remember <t> 显式保存长期记忆
+/forget <id>  删除一条长期记忆
+/skills [n]   列出 Skill 或查看指定 Skill
+/plan [task]  进入只读规划模式，可立即规划任务
+/plan off     退出规划模式但不自动执行
+/execute      执行当前 Session 最近一份成功计划
 /status       查看当前会话状态与已记录的 LLM token 用量
 /repo         查看仓库状态摘要
 /diff         查看 git diff

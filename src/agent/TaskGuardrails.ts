@@ -67,6 +67,9 @@ export function validateAgentDecisionGuardrails(
   state: AgentState,
   decision: AgentDecision,
 ): AgentDecisionGuardrailViolation | undefined {
+  if (state.operatingMode === "PLAN") {
+    return undefined;
+  }
   if (decision.type === "FINAL") {
     return validateFinalDecision(state, decision);
   }

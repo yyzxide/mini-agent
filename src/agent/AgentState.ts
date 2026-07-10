@@ -2,6 +2,7 @@ import type { CommandResult } from "../command/CommandRunner.js";
 import type { JsonObject } from "../session/SessionTypes.js";
 import type { ToolResult } from "../tools/Tool.js";
 import type { AgentDecision } from "./AgentDecision.js";
+import type { AgentOperatingMode } from "./AgentOperatingMode.js";
 
 export type AgentStatus = "RUNNING" | "WAITING_USER" | "FINISHED" | "FAILED";
 
@@ -37,6 +38,7 @@ export interface AgentStateSnapshot {
   patchResults: AgentPatchExecutionResult[];
   lastError: string | null;
   finalDiff: string | null;
+  operatingMode: AgentOperatingMode;
 }
 
 export interface AgentStateOptions {
@@ -44,6 +46,7 @@ export interface AgentStateOptions {
   repoPath: string;
   userGoal: string;
   maxSteps?: number;
+  operatingMode?: AgentOperatingMode;
 }
 
 export class AgentState {
@@ -60,12 +63,14 @@ export class AgentState {
   patchResults: AgentPatchExecutionResult[] = [];
   lastError: string | null = null;
   finalDiff: string | null = null;
+  readonly operatingMode: AgentOperatingMode;
 
   constructor(options: AgentStateOptions) {
     this.sessionId = options.sessionId;
     this.repoPath = options.repoPath;
     this.userGoal = options.userGoal;
     this.maxSteps = options.maxSteps ?? 20;
+    this.operatingMode = options.operatingMode ?? "EXECUTE";
   }
 
   addUserMessage(content: string): void {
@@ -131,6 +136,7 @@ export class AgentState {
       patchResults: [...this.patchResults],
       lastError: this.lastError,
       finalDiff: this.finalDiff,
+      operatingMode: this.operatingMode,
     };
   }
 }

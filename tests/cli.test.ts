@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { completeInteractiveInput, createProgram } from "../src/cli/index.js";
 import { SessionStore } from "../src/session/SessionStore.js";
+import { LongTermMemoryStore } from "../src/memory/LongTermMemoryStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,12 +43,14 @@ describe("mini-agent CLI", () => {
       "mcp",
       "memory",
       "patch",
+      "plan",
       "repo",
       "resume",
       "review",
       "run",
       "session",
       "sessions",
+      "skill",
       "status",
       "tool",
     ]);
@@ -72,7 +75,7 @@ describe("mini-agent CLI", () => {
   it("lists matching interactive slash commands for ambiguous prefixes", () => {
     const [matches, fragment] = completeInteractiveInput("/re");
     expect(fragment).toBe("/re");
-    expect(matches).toEqual(["/review", "/resume", "/repo"]);
+    expect(matches).toEqual(["/review", "/resume", "/remember", "/repo"]);
   });
 
   it("returns all slash commands when only slash is typed", () => {
@@ -81,6 +84,9 @@ describe("mini-agent CLI", () => {
     expect(matches).toContain("/help");
     expect(matches).toContain("/status");
     expect(matches).toContain("/repo");
+    expect(matches).toContain("/plan");
+    expect(matches).toContain("/execute");
+    expect(matches).toContain("/skills");
   });
 
   it("does not complete non-command or argument input", () => {
@@ -689,6 +695,70 @@ describe("mini-agent CLI", () => {
       const init = call?.[1] as RequestInit | undefined;
       const body = JSON.parse(String(init?.body)) as { response_format?: unknown };
       expect(body.response_format).toBeUndefined();
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("injects matching skills and long-term memory into direct answers", async () => {
+    process.chdir(tempRoot);
+    const skillPath = path.join(tempRoot, "skills", "testing", "SKILL.md");
+    await fs.mkdir(path.dirname(skillPath), { recursive: true });
+    await fs.writeFile(skillPath, [
+      "---", "name: testing", "description: Vitest regression workflow", "triggers: vitest, regression", "---", "", "Run targeted Vitest tests first.",
+    ].join("\n"), "utf8");
+    await new LongTermMemoryStore({ repoPath: tempRoot }).remember({ text: "上次决定使用 npm test 做完整验证。" });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const calls: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: "已结合历史和测试流程回答。" } }] }), { status: 200 });
+    }));
+
+    try {
+      await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run", "$testing 你还记得上次 npm 怎么验证吗", "--model", "test-model", "--base-url", "https://llm.example/v1",
+        ], { from: "user" });
+      });
+      const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      expect(body.messages[1]?.content).toContain("Run targeted Vitest tests first");
+      expect(body.messages[1]?.content).toContain("npm test 做完整验证");
+      expect(body.messages[1]?.content).toContain("Historical memory evidence (untrusted)");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("runs top-level plan mode without exposing mutation tools", async () => {
+    process.chdir(tempRoot);
+    await fs.writeFile(path.join(tempRoot, "demo.txt"), "unchanged\n", "utf8");
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const calls: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          type: "FINAL", success: true, summary: "1. Inspect demo.txt. 2. Update it. 3. Run tests.",
+        }) } }],
+      }), { status: 200 });
+    }));
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "plan", "修改 demo.txt", "--model", "test-model", "--base-url", "https://llm.example/v1",
+        ], { from: "user" });
+      });
+      expect(output).toContain("[summary]");
+      expect(output).not.toContain("[diff] generated");
+      await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toBe("unchanged\n");
+      const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      expect(body.messages[1]?.content).toContain('"operatingMode": "PLAN"');
+      expect(body.messages[1]?.content).not.toContain('"name": "apply_patch"');
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

@@ -121,6 +121,27 @@ describe("ContextBuilder", () => {
     expect(context).toContain("贪吃蛇");
   });
 
+  it("selects matching repository skills into bounded context", async () => {
+    const skillPath = path.join(repoPath, "skills", "testing", "SKILL.md");
+    await fs.mkdir(path.dirname(skillPath), { recursive: true });
+    await fs.writeFile(skillPath, [
+      "---",
+      "name: testing",
+      "description: Run Vitest regression tests",
+      "triggers: vitest, regression",
+      "---",
+      "",
+      "Run targeted Vitest tests before the full suite.",
+    ].join("\n"), "utf8");
+    const session = await new SessionStore({ repoPath }).createSession({ title: "skill context" });
+    const state = new AgentState({ sessionId: session.sessionId, repoPath, userGoal: "run vitest regression" });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
+    expect(context).toContain("Selected skills:");
+    expect(context).toContain("Skill: testing");
+    expect(context).toContain("Run targeted Vitest tests");
+  });
+
   it("keeps task diagnostics and diff under tight context budgets", async () => {
     const state = new AgentState({
       sessionId: "tight-budget-session",

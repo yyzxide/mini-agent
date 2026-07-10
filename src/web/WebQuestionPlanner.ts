@@ -73,13 +73,18 @@ export async function planWebQuestion(input: PlanWebQuestionInput): Promise<WebQ
 export function buildFallbackWebQuestionPlan(userGoal: string, sessionMemory: string): WebQuestionPlan {
   const originalQuestion = normalizeSpaces(userGoal);
   const previousUserMessage = extractLastUserMessage(sessionMemory);
+  const confirmedWebSwitch = previousUserMessage && isWebSwitchConfirmation(originalQuestion)
+    ? previousUserMessage
+    : undefined;
   const expandedFollowUp = previousUserMessage
     ? expandShortFollowUpQuestion(originalQuestion, previousUserMessage)
     : undefined;
   const shouldUsePreviousScope = previousUserMessage
     ? shouldCarryPreviousScope(originalQuestion, previousUserMessage)
     : false;
-  const standaloneQuestion = expandedFollowUp
+  const standaloneQuestion = confirmedWebSwitch
+    ? confirmedWebSwitch
+    : expandedFollowUp
     ? expandedFollowUp
     : shouldUsePreviousScope
     ? normalizeSpaces(`${previousUserMessage}；追问：${originalQuestion}`)
@@ -99,8 +104,25 @@ export function buildFallbackWebQuestionPlan(userGoal: string, sessionMemory: st
     sourceHints,
     answerInstructions,
     needsLiveData,
-    confidence: shouldUsePreviousScope ? "medium" : "low",
+    confidence: shouldUsePreviousScope || confirmedWebSwitch ? "medium" : "low",
   };
+}
+
+function isWebSwitchConfirmation(value: string): boolean {
+  const compact = normalizeSpaces(value).toLowerCase().replace(/[\s,，。.!！？?;；:："“”'‘’、\-—()（）[\]【】]/g, "");
+  return [
+    "切换吧",
+    "切到联网",
+    "切换到联网",
+    "联网查吧",
+    "联网搜吧",
+    "那就查吧",
+    "那就搜吧",
+    "用网页查吧",
+    "useweb",
+    "switchtoweb",
+    "searchonlinethen",
+  ].some((phrase) => compact.includes(phrase));
 }
 
 export function extractLastUserMessage(sessionMemory: string): string | undefined {

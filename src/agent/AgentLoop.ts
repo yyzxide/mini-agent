@@ -24,6 +24,8 @@ import { decisionToMessage } from "./AgentPlanner.js";
 import { AgentState } from "./AgentState.js";
 import { validateAgentDecisionGuardrails } from "./TaskGuardrails.js";
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
+import type { AgentOperatingMode } from "./AgentOperatingMode.js";
+import { isPlanModeReadOnlyTool, selectToolsForOperatingMode } from "./AgentOperatingMode.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -47,6 +49,7 @@ export interface AgentRunInput {
   autoApprove?: boolean;
   nonInteractive?: boolean;
   keepSessionActive?: boolean;
+  operatingMode?: AgentOperatingMode;
 }
 
 export interface AgentRunResult {
@@ -115,7 +118,8 @@ export class AgentLoop {
       throw new Error("User goal cannot be empty");
     }
 
-    const sessionId = await this.ensureSession(originalUserGoal, input.sessionId);
+    const operatingMode = input.operatingMode ?? "EXECUTE";
+    const sessionId = await this.ensureSession(originalUserGoal, input.sessionId, operatingMode);
     await this.emit({ type: "session", sessionId });
 
     const state = new AgentState({
@@ -123,6 +127,7 @@ export class AgentLoop {
       repoPath: this.repoPath,
       userGoal,
       ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
+      operatingMode,
     });
 
     await this.recordUserMessage(state, originalUserGoal);
@@ -131,8 +136,9 @@ export class AgentLoop {
     let repeatedDecisionCount = 0;
 
     while (!state.isStepLimitReached()) {
-      const context = await this.contextBuilder.build(state, this.availableTools);
-      const decision = await this.readDecision(state, userGoal, context);
+      const availableTools = selectToolsForOperatingMode(this.availableTools, state.operatingMode);
+      const context = await this.contextBuilder.build(state, availableTools);
+      const decision = await this.readDecision(state, userGoal, context, availableTools);
 
       state.addDecision(decision);
       await this.recordDecision(state.sessionId, decision);
@@ -177,6 +183,13 @@ export class AgentLoop {
     decision: AgentDecision,
     input: AgentRunInput,
   ): Promise<StepOutcome> {
+    const planViolation = this.validatePlanModeDecision(state, decision);
+    if (planViolation) {
+      state.setLastError(planViolation);
+      await this.recordError(state.sessionId, planViolation);
+      return { failed: true };
+    }
+
     switch (decision.type) {
       case "PLAN":
         await this.emit({ type: "plan", message: decision.message });
@@ -202,6 +215,25 @@ export class AgentLoop {
       case "FAILED":
         return { failed: true, result: await this.fail(state, decision.error, input) };
     }
+  }
+
+  private validatePlanModeDecision(state: AgentState, decision: AgentDecision): string | undefined {
+    if (state.operatingMode !== "PLAN") {
+      return undefined;
+    }
+
+    if (decision.type === "APPLY_PATCH" || decision.type === "RUN_COMMAND") {
+      return `PLAN_MODE_MUTATION_BLOCKED: ${decision.type} is not allowed in read-only plan mode`;
+    }
+
+    if (decision.type === "TOOL_CALL") {
+      const spec = this.availableTools.find((tool) => tool.name === decision.toolName);
+      if (!isPlanModeReadOnlyTool(spec)) {
+        return `PLAN_MODE_TOOL_BLOCKED: tool ${decision.toolName} is not read-only or is unavailable`;
+      }
+    }
+
+    return undefined;
   }
 
   private async guardDecisionThenContinue(
@@ -362,6 +394,29 @@ export class AgentLoop {
     success: boolean,
     input: AgentRunInput,
   ): Promise<AgentRunResult> {
+    if (state.operatingMode === "PLAN") {
+      state.markFinished("");
+      await this.sessionStore.appendRecord(state.sessionId, {
+        type: "TASK_SUMMARY",
+        payload: {
+          summary,
+          success,
+          mode: "PLAN",
+          goal: state.userGoal,
+          steps: state.step,
+        },
+      });
+      await this.eventStore.appendEvent(state.sessionId, {
+        type: "TASK_FINISHED",
+        payload: { summary, success, mode: "PLAN", steps: state.step },
+      });
+      if (input.keepSessionActive !== true) {
+        await this.sessionStore.updateSessionStatus(state.sessionId, success ? "FINISHED" : "FAILED");
+      }
+      await this.emit({ type: "summary", summary, success });
+      return { sessionId: state.sessionId, success, summary, finalDiff: "", steps: state.step };
+    }
+
     const finalDiff = await this.readFinalDiff();
     state.markFinished(finalDiff);
     await this.sessionStore.appendRecord(state.sessionId, {
@@ -413,22 +468,21 @@ export class AgentLoop {
 
   private async fail(state: AgentState, error: string, input?: AgentRunInput): Promise<AgentRunResult> {
     state.markFailed(error);
-    const finalDiff = await this.readFinalDiff();
+    const finalDiff = state.operatingMode === "PLAN" ? "" : await this.readFinalDiff();
     state.finalDiff = finalDiff;
 
-    await this.sessionStore.appendRecord(state.sessionId, {
-      type: "DIFF_SUMMARY",
-      payload: {
-        diff: finalDiff,
-        failed: true,
-      },
-    });
+    if (state.operatingMode !== "PLAN") {
+      await this.sessionStore.appendRecord(state.sessionId, {
+        type: "DIFF_SUMMARY",
+        payload: { diff: finalDiff, failed: true },
+      });
+    }
     await this.sessionStore.appendRecord(state.sessionId, {
       type: "TASK_SUMMARY",
       payload: {
         summary: error,
         success: false,
-        mode: "AGENT_LOOP",
+        mode: state.operatingMode === "PLAN" ? "PLAN" : "AGENT_LOOP",
         finalDiff,
         steps: state.step,
       },
@@ -468,14 +522,19 @@ export class AgentLoop {
     };
   }
 
-  private async ensureSession(userGoal: string, sessionId?: string): Promise<string> {
+  private async ensureSession(
+    userGoal: string,
+    sessionId: string | undefined,
+    operatingMode: AgentOperatingMode,
+  ): Promise<string> {
     if (sessionId) {
       await this.sessionStore.ensureSession(sessionId);
+      await this.sessionStore.updateOperatingMode(sessionId, operatingMode);
       await this.eventStore.init();
       return sessionId;
     }
 
-    const created = await this.sessionStore.createSession({ title: userGoal.slice(0, 80) });
+    const created = await this.sessionStore.createSession({ title: userGoal.slice(0, 80), operatingMode });
     await this.eventStore.appendEvent(created.sessionId, {
       type: "SESSION_CREATED",
       payload: {
@@ -488,13 +547,18 @@ export class AgentLoop {
     return created.sessionId;
   }
 
-  private async readDecision(state: AgentState, userGoal: string, context: string): Promise<AgentDecision> {
+  private async readDecision(
+    state: AgentState,
+    userGoal: string,
+    context: string,
+    availableTools: ToolSpec[],
+  ): Promise<AgentDecision> {
     try {
       const decision = await this.llmClient.chat({
         userGoal,
         context,
         state: state.toSnapshot(),
-        availableTools: this.availableTools,
+        availableTools,
       });
       await this.recordLlmUsage(state.sessionId, drainLlmCallMetrics(this.llmClient), "agent_decision");
       return decision;

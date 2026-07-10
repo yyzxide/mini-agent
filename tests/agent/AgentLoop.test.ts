@@ -372,6 +372,64 @@ describe("AgentLoop", () => {
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toContain("TASK_FAILED");
   });
+
+  it("uses only read-only tools and completes a write-task plan without changing files", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const client = new ScriptedLlmClient([
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "demo.txt", maxLines: 20 } },
+      { type: "FINAL", success: true, summary: "1. Update demo.txt. 2. Run tests. Risk: verify current content." },
+    ]);
+    const loop = createLoop({ sessionStore, llmClient: client });
+    const before = await fs.readFile(path.join(repoPath, "demo.txt"), "utf8");
+
+    const result = await loop.run({
+      userGoal: "修改 demo.txt 并测试",
+      operatingMode: "PLAN",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.finalDiff).toBe("");
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe(before);
+    expect(client.getCallInputs()[0]?.state.operatingMode).toBe("PLAN");
+    expect(client.getCallInputs()[0]?.availableTools.map((tool) => tool.name)).not.toContain("apply_patch");
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.find((record) => record.type === "TASK_SUMMARY")?.payload.mode).toBe("PLAN");
+    expect(records.some((record) => record.type === "DIFF_SUMMARY")).toBe(false);
+  });
+
+  it("hard-blocks patch and command decisions in plan mode", async () => {
+    const eventStore = new EventStore({ repoPath });
+    const markerPath = path.join(repoPath, "plan-marker.txt");
+    const loop = createLoop({
+      eventStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "apply_patch", input: { patch: "invalid" } },
+        {
+          type: "APPLY_PATCH",
+          description: "must be blocked",
+          patch: "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1,2 @@\n demo file\n+blocked\n",
+        },
+        { type: "RUN_COMMAND", executable: process.execPath, args: [markerPath], description: "must be blocked" },
+        { type: "RUN_COMMAND", executable: "echo", args: ["blocked"], description: "blocked again" },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "plan a dangerous change",
+      operatingMode: "PLAN",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe("demo file\n");
+    await expect(fs.access(markerPath)).rejects.toBeDefined();
+    const events = await eventStore.readEvents(result.sessionId);
+    expect(eventTypes(events)).not.toContain("PATCH_APPLY_STARTED");
+    expect(eventTypes(events)).not.toContain("COMMAND_STARTED");
+  });
 });
 
 function createLoop(options: {

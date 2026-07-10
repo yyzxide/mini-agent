@@ -101,6 +101,12 @@ describe("TaskRouter", () => {
     expect(routeTask("A股三大指数今天收盘涨跌情况")).toMatchObject({
       intent: "WEB_ANSWER",
     });
+    expect(routeTask("YouTube现在最热门的视频是什么")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("嗯切换吧")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
   });
 
   it("routes questions about web capability to direct local answers", () => {

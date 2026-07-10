@@ -35,7 +35,7 @@ npm run verify
 - TypeScript 编译通过。
 - 未使用符号检查通过。
 - 对话级回归测试通过。
-- Vitest 全部通过，当前基线是 32 个测试文件、230 个测试用例。
+- Vitest 正常环境基线是 34 个测试文件、247 个测试用例。
 - `verify` 只验证 CLI 项目。
 
 ## 3. 全局命令
@@ -45,6 +45,9 @@ npm link
 mini-agent --help
 mini-agent tool list
 mini-agent doctor
+mini-agent skill list
+mini-agent memory stats
+mini-agent plan "分析一个修改任务但不要改文件"
 ```
 
 期望：
@@ -52,6 +55,8 @@ mini-agent doctor
 - `mini-agent --help` 输出命令列表。
 - `tool list` 输出工具 JSON。
 - `doctor` 输出 Node、git、rg、配置和本地记录状态。
+- `skill list` 能发现有效 Skill，`memory stats` 能展示本地记忆数量。
+- `plan` 只输出计划，工作区文件保持不变。
 
 如果 `mini-agent: command not found`，说明没有 link 或 PATH 没包含 Node 全局 bin。
 

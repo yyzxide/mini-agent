@@ -292,6 +292,9 @@ const WEB_RESEARCH_KEYWORDS = [
   "资料",
   "最新",
   "最近",
+  "热门",
+  "热榜",
+  "趋势榜",
   "新闻",
   "网址",
   "网页",
@@ -337,6 +340,8 @@ const WEB_RESEARCH_KEYWORDS = [
   "browse",
   "latest",
   "recent",
+  "trending",
+  "most popular",
   "news",
   "source",
   "score",
@@ -356,6 +361,20 @@ const WEB_RESEARCH_KEYWORDS = [
   "market close",
   "exchange rate",
   "price",
+];
+
+const WEB_SWITCH_CONFIRMATION_PHRASES = [
+  "切换吧",
+  "切到联网",
+  "切换到联网",
+  "联网查吧",
+  "联网搜吧",
+  "那就查吧",
+  "那就搜吧",
+  "用网页查吧",
+  "use web",
+  "switch to web",
+  "search online then",
 ];
 
 const CODE_REVIEW_KEYWORDS = [
@@ -468,6 +487,13 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
+  if (looksLikeWebSwitchConfirmation(normalized)) {
+    return {
+      intent: "WEB_ANSWER",
+      reason: "Task confirms switching the current question to the web-answer flow.",
+    };
+  }
+
   if (looksLikeSaveToFileFollowUp(userGoal)) {
     return {
       intent: "AGENT_LOOP",
@@ -549,6 +575,10 @@ export function routeTask(userGoal: string): TaskRoute {
     intent: "AGENT_LOOP",
     reason: "Defaulting to repository agent loop for ambiguous coding tasks.",
   };
+}
+
+export function looksLikeWebSwitchConfirmation(normalized: string): boolean {
+  return containsAny(normalized, WEB_SWITCH_CONFIRMATION_PHRASES);
 }
 
 export function looksLikeRepositoryAnalysisTask(userGoal: string): boolean {
