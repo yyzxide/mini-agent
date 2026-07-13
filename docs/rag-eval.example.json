@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "id": "rag-design",
+      "query": "RAG 检索结果如何处理证据不足？",
+      "relevantSources": ["docs/zh-CN/RAG_GUIDE.md"],
+      "topK": 5
+    },
+    {
+      "id": "unknown-business-data",
+      "query": "火星基地的氧气循环设备编号是什么？",
+      "expectNoAnswer": true
+    }
+  ]
+}

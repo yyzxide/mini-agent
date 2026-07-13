@@ -20,6 +20,47 @@ export interface FetchedWebSource {
   outputTruncated: boolean;
 }
 
+export interface WebEvidenceAssessment {
+  sufficient: boolean;
+  level: "STRONG" | "LIMITED" | "INSUFFICIENT";
+  fetchedSources: number;
+  independentDomains: number;
+  reasons: string[];
+}
+
+export function assessWebEvidence(sources: WebAnswerSource[], needsLiveData: boolean): WebEvidenceAssessment {
+  const fetchedSources = sources.filter((source) => source.fetch && source.fetch.text.trim().length > 0).length;
+  const independentDomains = new Set(sources.map((source) => {
+    try { return new URL(source.fetch?.finalUrl ?? source.url).hostname.replace(/^www\./, ""); } catch { return ""; }
+  }).filter(Boolean)).size;
+  const candidateCount = sources.filter((source) => source.snippet.trim().length > 0 || source.fetch).length;
+  const requiredFetched = 1;
+  const sufficient = fetchedSources >= requiredFetched;
+  const strong = needsLiveData
+    ? fetchedSources >= 2 && independentDomains >= 2
+    : fetchedSources >= 1 && independentDomains >= 1;
+  const reasons: string[] = [];
+  if (candidateCount === 0) reasons.push("no usable search result");
+  if (fetchedSources < requiredFetched) reasons.push(`only ${fetchedSources} fetched source(s), need ${requiredFetched}`);
+  if (independentDomains === 0) reasons.push("no identifiable source domain");
+  return {
+    sufficient,
+    level: sufficient ? (strong ? "STRONG" : "LIMITED") : "INSUFFICIENT",
+    fetchedSources,
+    independentDomains,
+    reasons,
+  };
+}
+
+export function buildInsufficientEvidenceAnswer(input: { question: string; assessment: WebEvidenceAssessment }): string {
+  return [
+    `当前检索到的证据不足以可靠核验这个问题：${input.question}`,
+    `已抓取有效正文 ${input.assessment.fetchedSources} 个，独立来源域名 ${input.assessment.independentDomains} 个。`,
+    `原因：${input.assessment.reasons.join("；") || "来源质量未达到回答阈值"}。`,
+    "因此本轮不对实时事实或具体数字作确定性结论，建议补充权威来源或稍后重试。",
+  ].join("\n");
+}
+
 export function buildWebAnswerContext(input: {
   userGoal: string;
   webPlan: WebQuestionPlan;
@@ -28,6 +69,7 @@ export function buildWebAnswerContext(input: {
   searchResults: Array<{ query: string; result: ToolResult<unknown> }>;
   sources: WebAnswerSource[];
 }): string {
+  const assessment = assessWebEvidence(input.sources, input.webPlan.needsLiveData);
   const fetchedSourceCount = input.sources.filter((source) => source.fetch).length;
   const failedFetchCount = input.sources.filter((source) => source.fetchError).length;
   const lines = [
@@ -55,6 +97,8 @@ export function buildWebAnswerContext(input: {
       : ["- Only answer facts supported by the gathered sources."]),
     "",
     "Evidence quality:",
+    `- evidence level: ${assessment.level}`,
+    `- independent domains: ${String(assessment.independentDomains)}`,
     `- search queries attempted: ${String(input.searchQueries.length)}`,
     `- source candidates gathered: ${String(input.sources.length)}`,
     `- fetched sources: ${String(fetchedSourceCount)}`,
@@ -62,6 +106,9 @@ export function buildWebAnswerContext(input: {
     fetchedSourceCount === 0
       ? "- no fetch_url call produced readable page text; rely only on snippets and be explicit about uncertainty."
       : "- prefer fetched page text over snippets when they conflict.",
+    assessment.sufficient
+      ? "- evidence threshold passed; keep every factual claim traceable to the listed sources."
+      : "- evidence threshold failed; do not provide definite current facts, numbers, rankings, or status claims.",
     "",
     "Web tool results:",
   ].filter((line): line is string => line !== undefined);

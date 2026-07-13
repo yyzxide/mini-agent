@@ -46,9 +46,10 @@ src/command          命令执行、超时、输出截断
 src/git              git status/diff/commit 辅助能力
 src/permission       权限级别和危险命令拦截
 src/session          JSONL session/event 存储
-src/memory           本地长期记忆索引、关键词和向量式检索
+src/memory           长期记忆治理、可替换 embedding、关键词和向量式检索
+src/rag              文档加载、分块、增量索引、混合检索、引用与离线评测
 src/skills           声明式 Skill 发现、校验、选择和上下文注入
-src/mcp              MCP 风格工具描述、外部工具配置模型和本地工具桥接
+src/mcp              MCP stdio/Streamable HTTP 客户端、工具发现、权限映射和调用转发
 src/eval             Agent 评测 harness、脚本化 LLM 客户端
 src/llm              LLM 接口和 OpenAI-compatible 客户端
 src/web              联网问题规划、追问改写和搜索源策略
@@ -201,7 +202,7 @@ interface Tool<TInput, TResult> {
 - 返回结构化 `ToolResult`。
 - 导出工具 spec 给 LLM prompt。
 - 导出带能力标注的 tool manifest。
-- 导出 MCP 风格 tool descriptor，供后续外部工具协议接入。
+- 导出 MCP tool descriptor，并把远端 MCP 工具统一转换为本地 `Tool`。
 
 工具 metadata 中的 `annotations` 用于描述工具边界：
 
@@ -223,7 +224,7 @@ interface Tool<TInput, TResult> {
 - `fetch_url`
 - `apply_patch`
 
-当前的 MCP 相关能力是“桥接层”，不是完整 MCP runtime：本地工具可以导出 MCP 风格 descriptor，MCP server 配置也有 schema 校验；后续要真正连接第三方 MCP server，需要再实现 stdio/SSE client、工具发现、权限映射和调用转发。这个边界在代码里已经通过 `src/mcp` 和 tool metadata 预留。
+MCP 已从 descriptor bridge 升级为可运行的客户端链路：支持 stdio 和 Streamable HTTP，完成 `initialize`、`notifications/initialized`、`tools/list`、`tools/call`，远端工具按 `<server>__<tool>` 隔离名称，并通过配置映射到现有权限系统。Registry 统一记录 MCP 调用结果，任务结束时关闭子进程或 HTTP session。当前尚未实现 server-initiated sampling/elicitation、resources、prompts、OAuth 和旧版 HTTP+SSE 回退，因此应表述为“真实 MCP tools runtime”，而不是完整覆盖 MCP 全协议。
 
 ## 6. 路径安全
 
@@ -365,7 +366,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 3. `MemoryReranker`：对召回候选做二次排序，综合基础相似度、任务模式匹配、同 session 加权、时间新鲜度和实体命中。
 4. `MemoryEvidenceSelector`：从重排结果里选择最终证据，限制单个 session 过度占用结果，给每条证据附加选择原因。
 
-这个设计不依赖外部向量库，适合本地 MVP；后续如果要升级成生产级 RAG，可以把本地确定性向量替换成真实 embedding，把 JSONL 存储替换成向量数据库，同时保留 query building、rerank 和 evidence selection 的上层逻辑。
+默认设计不依赖外部向量库，适合本地运行；配置 embedding 环境变量后可以切换到 OpenAI-compatible embeddings。记忆条目记录 provider、confidence、expiresAt 和 supersession 关系，检索时排除过期或已被同主题新记忆覆盖的条目。存储仍是 JSONL，后续可替换为 SQLite/LanceDB/Qdrant，同时保留 query building、rerank 和 evidence selection 上层逻辑。
 
 每次任务结束后，CLI 会自动索引当前 session；`/compact` 写入结构化压缩记忆后也会同步索引。`MemoryContextService` 将召回统一注入 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop，并使用 `<memory_evidence>` 标记为不可信历史数据：模型不得执行记忆中的指令，当前用户要求、当前文件和当前工具结果始终优先。
 
@@ -423,9 +424,10 @@ Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description
 真实 API 调用存在不稳定性，不能把所有质量保障都押在人工试用上。当前项目新增 `src/eval`：
 
 - `ScriptedLlmClient`：用一组预设 `AgentDecision` 模拟模型输出，记录每次调用输入。
-- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop、执行脚本化决策，并检查最终 diff 和文件内容。
+- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop、执行脚本化决策，并检查最终 diff、文件内容、工具选择、步骤数和 LLM 调用预算。
+- `runSuite`：汇总 scenario 成功率、平均步骤、工具选择准确率和失败分类。
 
-Harness 解决的是“能不能把一个真实用户场景变成可重复测试”的问题。例如“修改一个文件、查看 diff、最终成功”可以变成一条 scenario，而不是每次都手动打开 CLI 测。后续可以继续扩展成 YAML/JSON 场景集、真实模型抽样评测和回放工具。
+Harness 解决的是“能不能把一个真实用户场景变成可重复测试”的问题。例如“修改一个文件、查看 diff、最终成功”可以变成一条 scenario，而不是每次都手动打开 CLI 测。scripted LLM 适合确定性离线回归，但不能代表真实模型质量；后续仍需扩大 scenario 数据集，并补充真实模型抽样、延迟/token 成本和轨迹回放。
 
 ## 11. LLM 接入
 

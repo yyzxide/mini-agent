@@ -46,6 +46,9 @@ describe("AgentHarness", () => {
       ],
       expected: {
         success: true,
+        toolsCalled: ["git_diff"],
+        maxSteps: 4,
+        maxLlmCalls: 4,
         diffContains: ["+hello from harness"],
         filesContain: {
           "demo.txt": "hello from harness",
@@ -55,6 +58,32 @@ describe("AgentHarness", () => {
     createdRepos.push(result.repoPath);
 
     expect(result.run.success).toBe(true);
+    expect(result.passed).toBe(true);
+    expect(result.metrics.toolCalls).toContain("git_diff");
     expect(result.llmCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("aggregates suite metrics and failure categories", async () => {
+    const harness = new AgentHarness();
+    const suite = await harness.runSuite([
+      {
+        name: "successful answer",
+        userGoal: "finish",
+        decisions: [{ type: "FINAL", success: true, summary: "done" }],
+        expected: { success: true, maxSteps: 1 },
+      },
+      {
+        name: "model failure",
+        userGoal: "fail",
+        decisions: [{ type: "FAILED", error: "LLM provider unavailable" }],
+        expected: { success: true },
+      },
+    ]);
+    createdRepos.push(...suite.scenarios.map((scenario) => scenario.repoPath));
+
+    expect(suite.total).toBe(2);
+    expect(suite.passed).toBe(1);
+    expect(suite.successRate).toBe(0.5);
+    expect(suite.failuresByCategory.EXPECTATION).toBe(1);
   });
 });

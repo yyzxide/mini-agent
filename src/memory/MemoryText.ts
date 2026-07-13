@@ -22,6 +22,10 @@ const STOP_WORDS = new Set([
   "可以",
   "需要",
   "什么",
+  "如何",
+  "是否",
+  "怎么",
+  "为什么",
 ]);
 
 export function extractKeywords(value: string): string[] {

@@ -132,4 +132,31 @@ describe("LongTermMemoryStore", () => {
     const entry = await store.remember({ text: "token=very-secret-token keep this decision" });
     expect(entry.text).not.toContain("very-secret-token");
   });
+
+  it("supersedes same-topic manual memory and excludes expired entries", async () => {
+    const store = new LongTermMemoryStore({ repoPath });
+    const oldEntry = await store.remember({ title: "test command", text: "Use npm test", confidence: 0.6 });
+    const newEntry = await store.remember({ title: "test command", text: "Use pnpm test", confidence: 0.95 });
+    await store.remember({ title: "temporary token", text: "short lived", ttlDays: 0.00000001 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const listed = await store.list();
+    const results = await store.search("test command", { minScore: 0 });
+    const stats = await store.stats();
+    expect(listed.find((entry) => entry.id === oldEntry.id)?.metadata.supersededBy).toBe(newEntry.id);
+    expect(results.map((result) => result.entry.id)).toContain(newEntry.id);
+    expect(results.map((result) => result.entry.id)).not.toContain(oldEntry.id);
+    expect(stats).toMatchObject({ total: 3, active: 1, expired: 1, superseded: 1 });
+  });
+
+  it("supports a pluggable embedding provider", async () => {
+    const store = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "fixture-embedding", embed: async () => [1, 0, 0] },
+    });
+    const entry = await store.remember({ text: "provider test" });
+    expect(entry.embeddingProvider).toBe("fixture-embedding");
+    expect(entry.vector).toEqual([1, 0, 0]);
+    await expect(store.stats()).resolves.toMatchObject({ embeddingProvider: "fixture-embedding" });
+  });
 });

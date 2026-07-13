@@ -8,7 +8,8 @@ import { selectMemoryEvidence } from "./MemoryEvidenceSelector.js";
 import { buildMemoryQuery, type MemoryQuery } from "./MemoryQueryBuilder.js";
 import type { MemoryRetrievalOptions, MemoryRetriever } from "./MemoryRetriever.js";
 import { rerankMemoryResults } from "./MemoryReranker.js";
-import { cosineSimilarity, embedText, extractKeywords, unique } from "./MemoryText.js";
+import { cosineSimilarity, extractKeywords, unique } from "./MemoryText.js";
+import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from "./EmbeddingProvider.js";
 
 export type LongTermMemorySource = "TASK_SUMMARY" | "MEMORY_COMPACTION" | "MANUAL";
 type IndexedSessionMemorySource = Exclude<LongTermMemorySource, "MANUAL">;
@@ -22,6 +23,9 @@ export interface LongTermMemoryEntry {
   text: string;
   keywords: string[];
   vector: number[];
+  embeddingProvider?: string;
+  confidence?: number;
+  expiresAt?: string;
   createdAt: string;
   updatedAt: string;
   metadata: JsonObject;
@@ -55,6 +59,10 @@ export interface LongTermMemoryStats {
   bySource: Record<LongTermMemorySource, number>;
   sessions: number;
   indexPath: string;
+  active: number;
+  expired: number;
+  superseded: number;
+  embeddingProvider: string;
 }
 
 const MEMORY_DIR = "memory";
@@ -67,10 +75,12 @@ const MAX_INDEXED_TEXT_CHARS = 6000;
 export class LongTermMemoryStore implements MemoryRetriever {
   private readonly repoPath: string;
   private readonly indexPath: string;
+  private readonly embeddingProvider: EmbeddingProvider;
 
-  constructor(options: { repoPath: string }) {
+  constructor(options: { repoPath: string; embeddingProvider?: EmbeddingProvider }) {
     this.repoPath = options.repoPath;
     this.indexPath = resolveMiniAgentPath(this.repoPath, MEMORY_DIR, MEMORY_INDEX_FILE);
+    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment();
   }
 
   async init(): Promise<void> {
@@ -86,8 +96,17 @@ export class LongTermMemoryStore implements MemoryRetriever {
       .slice(0, Math.max(0, limit));
   }
 
-  async remember(input: { text: string; title?: string; sessionId?: string }): Promise<LongTermMemoryEntry> {
+  async remember(input: {
+    text: string;
+    title?: string;
+    sessionId?: string;
+    confidence?: number;
+    ttlDays?: number;
+  }): Promise<LongTermMemoryEntry> {
     await this.init();
+    if (input.ttlDays !== undefined && (!Number.isFinite(input.ttlDays) || input.ttlDays <= 0)) {
+      throw new Error("Memory ttlDays must be a positive number");
+    }
     const text = redactMemoryText(input.text.trim());
     if (!text) {
       throw new Error("Memory text cannot be empty");
@@ -104,13 +123,23 @@ export class LongTermMemoryStore implements MemoryRetriever {
       title,
       text: indexedText,
       keywords: extractKeywords(`${title}\n${indexedText}`).slice(0, 160),
-      vector: embedText(`${title}\n${indexedText}`),
+      vector: await this.embeddingProvider.embed(`${title}\n${indexedText}`),
+      embeddingProvider: this.embeddingProvider.id,
+      confidence: clampConfidence(input.confidence ?? 1),
+      ...(input.ttlDays !== undefined ? { expiresAt: new Date(Date.now() + input.ttlDays * 86_400_000).toISOString() } : {}),
       createdAt: timestamp,
       updatedAt: timestamp,
       metadata: { source: "manual" },
     };
 
     const entries = await this.readAll();
+    const topicKey = normalizeMemoryTopic(title);
+    for (const existing of entries) {
+      if (existing.source === "MANUAL" && !existing.metadata.supersededBy && normalizeMemoryTopic(existing.title) === topicKey) {
+        existing.metadata.supersededBy = entry.id;
+        entry.metadata.supersedes = existing.id;
+      }
+    }
     entries.push(entry);
     await this.writeAll(entries);
     return entry;
@@ -137,6 +166,7 @@ export class LongTermMemoryStore implements MemoryRetriever {
   async stats(): Promise<LongTermMemoryStats> {
     await this.init();
     const entries = await this.readAll();
+    const now = Date.now();
     const bySource: Record<LongTermMemorySource, number> = {
       TASK_SUMMARY: 0,
       MEMORY_COMPACTION: 0,
@@ -150,6 +180,10 @@ export class LongTermMemoryStore implements MemoryRetriever {
       bySource,
       sessions: new Set(entries.map((entry) => entry.sessionId)).size,
       indexPath: this.indexPath,
+      active: entries.filter((entry) => isMemoryActive(entry, now)).length,
+      expired: entries.filter((entry) => isMemoryExpired(entry, now)).length,
+      superseded: entries.filter((entry) => typeof entry.metadata.supersededBy === "string").length,
+      embeddingProvider: this.embeddingProvider.id,
     };
   }
 
@@ -157,12 +191,12 @@ export class LongTermMemoryStore implements MemoryRetriever {
     await this.init();
     const meta = await sessionStore.getSessionMeta(sessionId);
     const records = await sessionStore.readRecords(sessionId);
-    const entries = extractMemoryEntries({
+    const entries = await extractMemoryEntries({
       records,
       sessionId,
       repoPath: meta.repoPath,
       title: meta.title,
-    });
+    }, this.embeddingProvider);
 
     if (entries.length === 0) {
       return { sessionId, indexed: 0, total: (await this.readAll()).length };
@@ -206,8 +240,9 @@ export class LongTermMemoryStore implements MemoryRetriever {
     const limit = options.limit ?? DEFAULT_SEARCH_LIMIT;
     const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
     const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
-    const queryVector = embedText(query.expandedQuery);
-    const entries = (await this.readAll()).filter((entry) => entry.metadata.success !== false);
+    const queryVector = await this.embeddingProvider.embed(query.expandedQuery);
+    const now = Date.now();
+    const entries = (await this.readAll()).filter((entry) => entry.metadata.success !== false && isMemoryActive(entry, now));
 
     const candidates = entries
       .map((entry) => scoreMemoryEntry(entry, query, queryVector))
@@ -249,12 +284,12 @@ export function formatLongTermMemoryResults(results: LongTermMemorySearchResult[
   }).join("\n\n");
 }
 
-function extractMemoryEntries(input: {
+async function extractMemoryEntries(input: {
   records: SessionRecord[];
   sessionId: string;
   repoPath: string;
   title: string;
-}): LongTermMemoryEntry[] {
+}, embeddingProvider: EmbeddingProvider): Promise<LongTermMemoryEntry[]> {
   const entries: LongTermMemoryEntry[] = [];
   let latestUserMessage = "";
 
@@ -290,7 +325,9 @@ function extractMemoryEntries(input: {
       title,
       text: indexedText,
       keywords: extractKeywords(`${title}\n${indexedText}`).slice(0, 160),
-      vector: embedText(`${title}\n${indexedText}`),
+      vector: await embeddingProvider.embed(`${title}\n${indexedText}`),
+      embeddingProvider: embeddingProvider.id,
+      confidence: record.type === "MEMORY_COMPACTION" ? 0.85 : 0.75,
       createdAt: record.timestamp,
       updatedAt: record.timestamp,
       metadata: pickMemoryMetadata(record.payload),
@@ -335,7 +372,8 @@ function scoreMemoryEntry(
     ? 0
     : matchedKeywords.length / Math.max(1, Math.min(query.keywords.length, 12));
   const vectorScore = cosineSimilarity(queryVector, entry.vector);
-  const score = Math.max(0, vectorScore * 0.65 + keywordScore * 0.35);
+  const confidence = clampConfidence(entry.confidence ?? 0.7);
+  const score = Math.max(0, (vectorScore * 0.65 + keywordScore * 0.35) * (0.7 + confidence * 0.3));
 
   return {
     entry,
@@ -345,6 +383,23 @@ function scoreMemoryEntry(
     vectorScore,
     matchedKeywords,
   };
+}
+
+function isMemoryExpired(entry: LongTermMemoryEntry, now: number): boolean {
+  return Boolean(entry.expiresAt && Date.parse(entry.expiresAt) <= now);
+}
+
+function isMemoryActive(entry: LongTermMemoryEntry, now: number): boolean {
+  return !isMemoryExpired(entry, now) && typeof entry.metadata.supersededBy !== "string";
+}
+
+function clampConfidence(value: number): number {
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.max(0, Math.min(1, value));
+}
+
+function normalizeMemoryTopic(value: string): string {
+  return extractKeywords(value).slice(0, 12).sort().join("|") || value.trim().toLowerCase();
 }
 
 export { extractKeywords } from "./MemoryText.js";

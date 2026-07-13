@@ -18,17 +18,17 @@
 
 ## 100 分制评分
 
-### 结论分数：91 / 100
+### 结论分数：93 / 100
 
 | 维度 | 分值 | 当前评分 | 说明 |
 | --- | --- | --- | --- |
 | CLI 可用性 | 15 | 15 | 除常规 run/review/session 外，现已具备 Skill 管理、长期记忆控制和 `/plan`→`/execute` 交互闭环。 |
-| 工具系统 | 15 | 15 | 本地读写、搜索、patch、命令、git、联网检索链路已打通，并补充 tool manifest、能力标注、MCP 风格 descriptor、内部路径保护和跨平台路径规范化。 |
-| Session、日志与记忆 | 15 | 15 | 长期记忆覆盖所有执行模式，支持显式记忆/遗忘、失败过滤、密钥脱敏、结构化压缩和 Session 级 Plan 状态。 |
+| 工具系统 | 15 | 15 | 本地工具与 MCP stdio/Streamable HTTP 远端工具统一注册，具备工具发现、名称隔离、权限映射、调用转发、审计和生命周期关闭。 |
+| Session、日志与记忆 | 15 | 15 | 长期记忆覆盖所有模式，支持真实 embedding provider、TTL、置信度、同主题替代、失败过滤、密钥脱敏和结构化压缩。 |
 | Agent Loop 设计 | 15 | 13 | 除原有决策循环和质量闸门外，新增运行时硬约束的只读 Plan 模式；通用决策策略仍偏启发式。 |
 | 问答与上下文体验 | 15 | 12 | 已支持 direct/web/review/agent 四模式，且代码生成默认落文件；但追问理解和事实可靠性仍有限。 |
-| 代码结构 | 10 | 7 | 四种任务执行链和公共 Session/LLM Runtime 已从 CLI 入口拆出；`index.ts` 仍可继续拆交互命令与状态展示。 |
-| 测试与可回归性 | 10 | 10 | 当前正常环境回归基线为 34 个测试文件、247 个测试用例，并覆盖 Skill、Memory、Plan 安全边界和原有核心链路。 |
+| 代码结构 | 10 | 8 | 四种任务链、公共 Runtime、Tool 命令和 MCP 命令已拆出；`index.ts` 仍可继续拆交互命令与状态展示。 |
+| 测试与可回归性 | 10 | 10 | 当前正常环境回归基线为 36 个测试文件、262 个测试用例，覆盖 MCP 双 transport、Web 证据闸门、Memory 治理、文档 RAG 和 Eval 指标。 |
 | 产品化程度 | 5 | 4 | CLI、配置、日志、文档和演示材料比较完整；但仍缺少更强的评测体系、配置 profile、插件化、TUI/编辑器集成。 |
 
 ## 为什么说它已经“合格”
@@ -37,9 +37,10 @@
 
 - 有**任务路由**，不是所有输入都硬塞进代码编辑循环。
 - 有**工具系统**，并且是结构化参数校验，不是随手拼命令。
-- 有**工具能力标注和 MCP 风格 descriptor**，开始具备外部工具协议扩展能力。
+- 有**真实 MCP tools runtime**，支持 stdio/Streamable HTTP 工具发现、权限映射、调用转发和生命周期关闭。
 - 有**权限边界**，补丁和命令执行不是裸奔。
 - 有**短期会话记忆和本地长期记忆检索**，不是每次都完全失忆。
+- 有**独立文档 RAG**，支持增量分块索引、混合检索、元数据过滤、行号引用、证据不足拒答和离线评测。
 - 有**本地审计记录**，出了问题能回放。
 - 有**代码审查模式**，说明项目开始从“只会改代码”往“会分析代码”走。
 - 有**联网资料模式**，说明它不是只能在 repo 里打转。
@@ -54,7 +55,7 @@
 - `read_file` 和 `search_code` 会拒绝读取或搜索 `.git`、`.mini-agent` 等内部元数据路径。
 - `search_code` 统一返回 POSIX 风格路径，并跳过异常的 ripgrep JSON 行，避免一个坏行拖垮整个搜索结果。
 - `CommandRunner` 和 `AgentLoop` 相关测试去掉了 `printf`、`sh`、`false`、`sleep` 等 Unix-only 假设，Windows / Linux 下更稳定。
-- 当前通过 `tsc --noEmit`、`tsc --noUnusedLocals --noUnusedParameters`；正常环境 Vitest 基线为 34 个测试文件、247 个测试用例。
+- 当前通过 `tsc --noEmit`、`tsc --noUnusedLocals --noUnusedParameters`；正常环境 Vitest 基线为 36 个测试文件、262 个测试用例。
 
 ## 为什么还不能算“优秀 Agent 产品”
 
@@ -87,8 +88,8 @@
 
 - 按任务阶段动态裁剪上下文
 - 更细地区分长期记忆 / 短期记忆 / 工具证据的优先级
-- 使用真实 embedding 和向量数据库替换本地向量表示
-- 对长期记忆做过期、冲突、置信度管理
+- 使用 SQLite/LanceDB/Qdrant 替换 JSONL 存储并提供 embedding 批量迁移
+- 对语义相近但标题不同的长期记忆增加更强冲突检测
 
 ### 3. 联网能力还不够强
 
@@ -108,7 +109,7 @@
 
 ### 4. CLI 入口已完成第一轮结构拆分
 
-`src/cli/index.ts` 已从约 4270 行降到约 2350 行；新增 Skill/Memory/Plan 命令后仍主要承担：
+`src/cli/index.ts` 已从约 4270 行降到约 2250 行，Tool/MCP 命令也已拆出；入口仍主要承担：
 
 - 命令注册
 - 交互模式
@@ -143,9 +144,9 @@
 
 1. `TaskRouter` 仍是规则驱动，泛化能力一般。
 2. `WebQuestionPlanner` 和联网回答仍会受到数据源质量限制。
-3. 长期记忆已经可用且可控制，但仍是 repo-local 轻量向量，不会自动跨 Windows/Linux 同步，也缺少 TTL/冲突合并。
-4. 已有 Agent Harness，但系统化 eval 数据集还不够多。
-5. 已有 MCP descriptor bridge，但还没有真正连接第三方 MCP server runtime。
+3. 长期记忆已有真实 embedding、TTL、置信度和同主题替代，但存储仍是 repo-local JSONL，不会自动跨机器同步。
+4. Agent Harness 已有 suite 指标与失败分类，但真实任务 scenario 数量还不够多。
+5. MCP 已支持 tools runtime，但尚未覆盖 resources/prompts、server-initiated request、OAuth 和旧 SSE 回退。
 6. CLI 命令注册与交互状态展示仍集中在入口文件，后续扩展 TUI 或更多命令前需要继续拆分。
 
 ## 后续优化优先级
@@ -154,17 +155,17 @@
 
 1. 把 `src/cli/index.ts` 中的交互命令注册和状态展示继续拆为独立模块
 2. 给 task routing、follow-up rewrite、web answer 增加更多回归测试
-3. 给联网回答增加“证据不足时禁止强答”的更严格约束
+3. 为联网回答增加 claim-source 对齐和多来源冲突检测
 4. 为 direct/web/review/agent 四种模式增加统一的响应渲染层
-5. 扩展 Agent Harness 场景集，形成可复用 eval suite
+5. 扩展 Agent Harness 的真实任务 scenario 数据集
 
 ### P1：强烈建议做
 
-1. 把长期记忆的本地向量替换为真实 embedding，并评估 SQLite/LanceDB/Qdrant 等存储
+1. 评估 SQLite/LanceDB/Qdrant 等存储并实现 embedding 迁移
 2. 引入更细的 session memory 分层和过期策略
 3. 给现有“计划 -> 执行”闭环增加执行后复盘和计划偏差分析
 4. 为 web answer 增加来源引用摘要
-5. 实现真实 MCP stdio/SSE client、server lifecycle 和 tools/call 转发
+5. 扩展 MCP resources/prompts、server-initiated request 与认证
 
 ### P2：有余力再做
 

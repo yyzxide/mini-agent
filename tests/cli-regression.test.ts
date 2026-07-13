@@ -89,8 +89,8 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).toContain("运行目录问题");
     expect(output).toContain(wrongDirectory);
     expect(output).toContain(tempRoot);
-    expect(output).toContain(`cd ${tempRoot}`);
-    expect(output).toContain(`npm --prefix ${tempRoot} run guess`);
+    expect(output).toContain(`cd '${tempRoot}'`);
+    expect(output).toContain(`npm --prefix '${tempRoot}' run guess`);
   });
 
   it("repairs web answers that contradict already executed web tools", async () => {

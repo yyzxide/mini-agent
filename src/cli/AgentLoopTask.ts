@@ -5,7 +5,7 @@ import { CommandRunner } from "../command/CommandRunner.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
-import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
+import { createConfiguredToolRegistry } from "../mcp/McpRegistryLoader.js";
 import { createOpenAICompatibleClient, createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
 
@@ -23,10 +23,14 @@ export async function runAgentLoopTask(
     : undefined;
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
   const llmClient = await createOpenAICompatibleClient(repoPath, options);
+  const { registry: toolRegistry, diagnostics } = await createConfiguredToolRegistry(repoPath);
+  for (const diagnostic of diagnostics.filter((entry) => !entry.success)) {
+    process.stderr.write(`[mcp] ${diagnostic.server}: ${diagnostic.error ?? "failed to load"}\n`);
+  }
   const loop = new AgentLoop({
     repoPath,
     llmClient,
-    toolRegistry: createDefaultToolRegistry(),
+    toolRegistry,
     sessionStore,
     eventStore,
     commandRunner: new CommandRunner({ repoPath }),
@@ -46,7 +50,7 @@ export async function runAgentLoopTask(
     nonInteractive: options.nonInteractive === true,
     keepSessionActive: options.keepSessionActive === true,
     operatingMode: options.operatingMode ?? "EXECUTE",
-  });
+  }).finally(async () => await toolRegistry.dispose());
 
   return {
     success: result.success,

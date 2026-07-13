@@ -12,6 +12,7 @@ import {
 import { toJsonValue } from "../utils/json.js";
 import type { EventType, JsonObject, SessionRecordType } from "../session/SessionTypes.js";
 import { ApplyPatchTool } from "./ApplyPatchTool.js";
+import { KnowledgeSearchTool } from "../rag/KnowledgeSearchTool.js";
 import { FetchUrlTool } from "./FetchUrlTool.js";
 import { GitDiffTool } from "./GitDiffTool.js";
 import { GitStatusTool } from "./GitStatusTool.js";
@@ -41,6 +42,7 @@ export interface ToolManifestEntry extends ToolSummary {
 
 export class ToolRegistry {
   private readonly tools = new Map<string, Tool<unknown, unknown>>();
+  private readonly disposers: Array<() => Promise<void>> = [];
 
   register<TInput, TResult>(tool: Tool<TInput, TResult>): void {
     if (this.tools.has(tool.name)) {
@@ -48,6 +50,14 @@ export class ToolRegistry {
     }
 
     this.tools.set(tool.name, tool as Tool<unknown, unknown>);
+  }
+
+  addDisposer(disposer: () => Promise<void>): void {
+    this.disposers.push(disposer);
+  }
+
+  async dispose(): Promise<void> {
+    await Promise.allSettled(this.disposers.splice(0).map(async (dispose) => await dispose()));
   }
 
   get(name: string): Tool<unknown, unknown> | undefined {
@@ -69,7 +79,7 @@ export class ToolRegistry {
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
-        inputSchema: describeZodInputSchema(tool.inputSchema),
+        inputSchema: tool.inputJsonSchema ?? describeZodInputSchema(tool.inputSchema),
         permissionLevel: tool.permissionLevel,
         source: tool.metadata?.source ?? "local",
         annotations: resolveToolAnnotations(tool),
@@ -92,7 +102,7 @@ export class ToolRegistry {
 
   listMcpToolDescriptors(): McpToolDescriptor[] {
     return Array.from(this.tools.values())
-      .map((tool) => toMcpToolDescriptor(tool, describeZodInputSchema(tool.inputSchema)))
+      .map((tool) => toMcpToolDescriptor(tool, tool.inputJsonSchema ?? describeZodInputSchema(tool.inputSchema)))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
@@ -204,6 +214,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register(new FetchUrlTool());
   registry.register(new GitDiffTool());
   registry.register(new GitStatusTool());
+  registry.register(new KnowledgeSearchTool());
   registry.register(new ListFilesTool());
   registry.register(new ReadFileTool());
   registry.register(new SearchCodeTool());

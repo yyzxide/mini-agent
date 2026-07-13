@@ -30,12 +30,13 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
-- Maintains local long-term memory from task summaries and compaction records, then retrieves relevant memories into future prompts.
+- Maintains governed long-term memory with confidence, TTL, same-topic supersession, secret redaction, and pluggable local or OpenAI-compatible embeddings.
+- Provides repository-local document RAG for Markdown/TXT with safe ingestion, line-aware chunking, incremental source replacement, hybrid retrieval, metadata filters, grounded citations, insufficient-evidence refusal, and offline evaluation metrics.
 - Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory clear --yes`, `/remember`, and `/forget`; failed task summaries are excluded and common secrets are redacted.
 - Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into every answer/task mode without allowing skills to bypass tool permissions.
 - Provides a hard read-only plan mode through `mini-agent plan`, `/plan`, `/plan off`, and `/execute`; plan mode exposes only read-only tools and blocks patches and commands at runtime.
-- Exposes tool capability annotations and MCP-style local tool descriptors for future external-tool integration.
-- Provides a scripted Agent Harness for repeatable end-to-end agent-loop scenarios.
+- Connects configured MCP servers over stdio or Streamable HTTP, discovers remote tools, namespaces them, maps permissions, forwards `tools/call`, and closes server lifecycles.
+- Provides an Agent Harness suite with repeatable scenarios, step/LLM/tool metrics, tool-choice accuracy, and failure classification.
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
 - Reads files with repository path safety checks and refuses internal metadata paths such as `.git` and `.mini-agent`.
@@ -104,11 +105,18 @@ Edit `mini-agent.config.json`:
     "temperature": 0.2,
     "maxTokens": 4096,
     "timeoutMs": 60000
+  },
+  "rag": {
+    "topK": 5,
+    "minScore": 0.12,
+    "maxContextChars": 6000
   }
 }
 ```
 
 `mini-agent.config.json` is ignored by git, so your API key is not committed.
+
+Optional MCP servers are configured under `mcp.servers`. A server uses either `command` + `args` for stdio or `url` for Streamable HTTP. Remote tools are registered as `<server>__<tool>`; `defaultPermission` and `toolPermissions` map untrusted remote capabilities into the existing `SAFE` / `REVIEW` / `DANGEROUS` permission model. See `mini-agent.config.example.json` for a disabled filesystem example.
 
 You can also create or update it through the CLI:
 
@@ -139,6 +147,10 @@ mini-agent memory search "之前数据流中位数怎么实现的"
 mini-agent memory list
 mini-agent memory remember "Use npm test before pushing"
 mini-agent memory stats
+mini-agent rag ingest README.md docs --tag project
+mini-agent rag search "how does MCP permission mapping work?" --top-k 3
+mini-agent rag stats
+mini-agent rag eval docs/rag-eval.example.json
 mini-agent skill list
 mini-agent skill init testing --description "Use for Vitest regression work"
 mini-agent plan "refactor the CLI router"
@@ -147,7 +159,10 @@ mini-agent diff
 mini-agent tool list
 mini-agent tool manifest
 mini-agent tool run read_file '{"path":"README.md"}'
+mini-agent tool run knowledge_search '{"query":"how is RAG evaluated?","topK":3}'
 mini-agent mcp tools
+mini-agent mcp status
+mini-agent mcp call filesystem__read_file '{"path":"README.md"}'
 mini-agent tool run fetch_url '{"url":"https://example.com"}'
 mini-agent command run "echo hello"
 mini-agent patch preview < patch.diff
@@ -232,7 +247,7 @@ For a quick pre-demo gate:
 npm run verify:regression
 ```
 
-Current normal-environment gate: 34 Vitest files and 247 tests, along with TypeScript type checking and unused-symbol checks.
+Current normal-environment gate: 36 Vitest files and 262 tests, along with TypeScript type checking and unused-symbol checks.
 
 Interactive slash commands:
 
@@ -397,9 +412,9 @@ Session records include:
 
 The current session records are used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt.
 
-Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. After tasks finish, the CLI indexes `TASK_SUMMARY` and `MEMORY_COMPACTION` records with keywords and a deterministic local vector representation. Retrieval is split into query building, candidate retrieval, reranking, and evidence selection before `ContextBuilder` injects the final memories as `Long-term retrieved memory`.
+Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. After tasks finish, the CLI indexes `TASK_SUMMARY` and `MEMORY_COMPACTION` records with keywords, confidence, provider identity, and vectors. Retrieval excludes expired and superseded entries, then applies query building, candidate retrieval, reranking, and evidence selection before `ContextBuilder` injects the final memories as untrusted historical evidence.
 
-This is a local lightweight RAG layer. It is intentionally dependency-free for the MVP, so it is not the same as a production vector database or hosted embedding service. The design leaves an explicit extension point for replacing the deterministic local vector with real embeddings and a vector store later.
+The default provider remains a dependency-free deterministic local embedding. Set `MINI_AGENT_EMBEDDING_MODEL`, `MINI_AGENT_EMBEDDING_BASE_URL`, and `MINI_AGENT_EMBEDDING_API_KEY` to use a real OpenAI-compatible embedding endpoint. Storage is still repository-local JSONL rather than a production vector database.
 
 Runtime logs and task change logs serve different purposes:
 
@@ -485,4 +500,4 @@ Next useful steps:
 2. Add a dry-run mode that previews intended tools and patches.
 3. Add richer test-command detection per repository type.
 4. Improve session replay and terminal rendering.
-5. Add optional integration points for external systems without coupling them to this repo.
+5. Expand MCP compatibility for server-initiated requests, resources, prompts, and authentication profiles.

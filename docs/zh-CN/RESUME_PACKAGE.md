@@ -45,7 +45,7 @@
 
 你可以直接抄这个，再按版面裁剪：
 
-> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。支持普通问答、联网问答、代码审查与仓库任务四类模式分流，具备 `ToolRegistry`、`AgentLoop`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块，实现代码搜索、文件读取、受控公网文档抓取、补丁应用、命令执行、测试反馈、本地长期记忆检索与 JSONL 审计记录；补充 tool capability annotations、MCP 风格 tool descriptor 和 Agent Harness，并通过 Vitest 覆盖工具、patch、命令、CLI 回归和 AgentLoop 核心流程。
+> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。支持普通问答、联网问答、代码审查与仓库任务四类模式分流，具备 `ToolRegistry`、`AgentLoop`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块；实现 MCP stdio/Streamable HTTP 工具发现与调用、Web 证据闸门、可替换 embedding 的长期记忆治理、受控补丁与命令执行及 JSONL 审计，并通过 Vitest 覆盖核心链路。
 
 ## 4. 项目亮点怎么挑
 
@@ -64,7 +64,7 @@
    路径限制、`.git` / `.mini-agent` 内部路径拒绝、patch check、Git 换行配置隔离、命令超时、危险命令拦截、联网目标限制。
 
 5. **评测与扩展性**  
-   Agent Harness 支持脚本化多步场景；MCP 风格 descriptor 为未来外部工具协议接入预留边界；当前正常环境回归基线为 34 个测试文件、247 个测试用例。
+   Agent Harness 支持脚本化多步场景、步骤/工具选择指标与失败归因；MCP 支持真实 tools runtime；当前正常环境回归基线为 36 个测试文件、262 个测试用例。
 
 ## 5. 面试自我介绍怎么接这个项目
 
@@ -84,7 +84,7 @@
 2. 再说方案：我做了本地 CLI Agent，不依赖后端和页面，先把核心闭环跑通。
 3. 再说架构：CLI、TaskRouter、AgentLoop、ToolRegistry、CommandRunner、PatchManager、SessionStore。
 4. 再说难点：结构化决策、路径安全、命令安全、上下文压缩、联网回答质量。
-5. 再说结果：能完成本地代码任务闭环，当前正常环境回归基线为 34 个测试文件、247 个测试用例，可写入简历。
+5. 再说结果：能完成本地代码任务闭环，当前正常环境回归基线为 36 个测试文件、262 个测试用例，可写入简历。
 
 ## 6. 适合投哪些岗位
 
@@ -129,7 +129,7 @@
 - 不要说“完全对标 Claude Code / Codex”
 - 不要说“已经达到生产级”
 - 不要说“具备成熟生产级 RAG”
-- 不要说“完整接入 MCP runtime”
+- 不要说“完整覆盖 MCP 全协议”；准确说法是“实现 MCP stdio/Streamable HTTP tools runtime”
 - 不要说“具备高可靠实时联网搜索”
 - 不要说“可以稳定自主完成任意复杂任务”
 - 不要说“已经能替代真实 IDE Agent 或成熟商业 Coding Agent”

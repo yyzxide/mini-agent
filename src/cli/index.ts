@@ -34,7 +34,7 @@ import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
 import type { TaskChangeLogEntry, TaskChangeMode, TaskChangeTestResult } from "../session/TaskChangeLogStore.js";
 import type { EventRecord, JsonObject, SessionMeta, SessionRecord } from "../session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
-import type { ToolContext, ToolResult } from "../tools/Tool.js";
+import type { ToolContext } from "../tools/Tool.js";
 import {
   CommandBlockedError,
   CommandPermissionDeniedError,
@@ -55,6 +55,9 @@ import { runCodeReviewTask } from "./CodeReviewTask.js";
 import { runDirectAnswerTask } from "./DirectAnswerTask.js";
 import { runRepositoryAnalysisTask } from "./RepositoryAnalysisTask.js";
 import { runWebAnswerTask } from "./WebAnswerTask.js";
+import { registerMcpCommands } from "./McpCommands.js";
+import { registerRagCommands } from "./RagCommands.js";
+import { registerToolCommands } from "./ToolCommands.js";
 
 const VERSION = "0.1.0";
 const INTERACTIVE_RESUME_LIST_LIMIT = 10;
@@ -518,11 +521,15 @@ export function createProgram(): Command {
     .description("Save an explicit long-term memory")
     .argument("<text...>", "Memory text")
     .option("--title <title>", "Short memory title")
-    .action(async (textParts: string[], options: { title?: string }) => {
+    .option("--confidence <number>", "Confidence between 0 and 1", parseProbability)
+    .option("--ttl-days <number>", "Expire this memory after a positive number of days", parsePositiveNumber)
+    .action(async (textParts: string[], options: { title?: string; confidence?: number; ttlDays?: number }) => {
       await runJsonAction(async () => {
         writeJson(await new LongTermMemoryStore({ repoPath: process.cwd() }).remember({
           text: textParts.join(" "),
           ...(options.title ? { title: options.title } : {}),
+          ...(options.confidence === undefined ? {} : { confidence: options.confidence }),
+          ...(options.ttlDays === undefined ? {} : { ttlDays: options.ttlDays }),
         }));
       });
     });
@@ -797,91 +804,9 @@ export function createProgram(): Command {
       });
     });
 
-  const toolCommand = program
-    .command("tool")
-    .description("Run tool-system debug commands");
-
-  toolCommand
-    .command("list")
-    .description("List registered tools")
-    .action(() => {
-      const registry = createDefaultToolRegistry();
-      writeJson(registry.list());
-    });
-
-  toolCommand
-    .command("manifest")
-    .description("List registered tools with capability annotations")
-    .action(() => {
-      const registry = createDefaultToolRegistry();
-      writeJson(registry.listManifest());
-    });
-
-  toolCommand
-    .command("run")
-    .description("Run a registered tool with JSON input")
-    .argument("<name>", "Tool name")
-    .argument("[jsonInput]", "Tool input as JSON", "{}")
-    .option("--session <sessionId>", "Session id used for event and record logging")
-    .action(async (name: string, jsonInput: string, options: { session?: string }) => {
-      const parsedInput = parseJsonInput(jsonInput);
-
-      if (!parsedInput.success) {
-        writeJson(parsedInput);
-        process.exitCode = 1;
-        return;
-      }
-
-      await runJsonAction(async () => {
-        const registry = createDefaultToolRegistry();
-        const stores = options.session ? createStores(process.cwd()) : undefined;
-        const logger = createRuntimeLogger(process.cwd());
-
-        if (stores && options.session) {
-          await stores.sessionStore.ensureSession(options.session);
-          await stores.eventStore.init();
-        }
-
-        const toolContext: ToolContext = {
-          repoPath: process.cwd(),
-          permissionManager: new PermissionManager(),
-          autoApprove: true,
-          nonInteractive: true,
-        };
-
-        if (options.session && stores) {
-          toolContext.sessionId = options.session;
-          toolContext.sessionStore = stores.sessionStore;
-          toolContext.eventStore = stores.eventStore;
-        }
-
-        await logger.info("tool", "Tool requested", {
-          toolName: name,
-          input: parsedInput.data,
-        }, options.session).catch(() => undefined);
-
-        const result = await registry.execute(name, parsedInput.data, toolContext);
-        await logger[result.success ? "info" : "error"]("tool", "Tool finished", {
-          toolName: name,
-          success: result.success,
-          error: result.error ?? null,
-        }, options.session).catch(() => undefined);
-
-        writeJson(result);
-      });
-    });
-
-  const mcpCommand = program
-    .command("mcp")
-    .description("Inspect MCP-compatible local tool descriptors");
-
-  mcpCommand
-    .command("tools")
-    .description("Print local tools as MCP-style descriptors")
-    .action(() => {
-      const registry = createDefaultToolRegistry();
-      writeJson(registry.listMcpToolDescriptors());
-    });
+  registerToolCommands(program);
+  registerMcpCommands(program);
+  registerRagCommands(program);
 
   return program;
 }
@@ -2055,21 +1980,6 @@ function isTestEventRecord(
   return event.type === "TEST_PASSED" || event.type === "TEST_FAILED";
 }
 
-function parseJsonInput(value: string): ToolResult<unknown> {
-  try {
-    return { success: true, data: JSON.parse(value) as unknown };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      success: false,
-      error: {
-        code: "INVALID_JSON",
-        message: `Invalid JSON input: ${message}`,
-      },
-    };
-  }
-}
-
 function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -2118,6 +2028,18 @@ function parsePositiveInteger(value: string): number {
     throw new Error(`Expected a positive integer, got: ${value}`);
   }
 
+  return parsed;
+}
+
+function parsePositiveNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected a positive number, got: ${value}`);
+  return parsed;
+}
+
+function parseProbability(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new Error(`Expected a number between 0 and 1, got: ${value}`);
   return parsed;
 }
 

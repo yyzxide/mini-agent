@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { McpServerConfigSchema } from "../mcp/McpTypes.js";
+import type { McpServerConfig } from "../mcp/McpTypes.js";
 import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJsonFileAtomic } from "../utils/fs.js";
 
 export const USER_CONFIG_FILE = "mini-agent.config.json";
@@ -17,11 +19,19 @@ export interface LlmConfig {
   timeoutMs?: number | undefined;
 }
 
+export interface RagConfig {
+  topK?: number | undefined;
+  minScore?: number | undefined;
+  maxContextChars?: number | undefined;
+}
+
 export interface AgentConfig {
   version: 1;
   repoPath?: string | undefined;
   createdAt?: string | undefined;
   llm?: LlmConfig | undefined;
+  mcp?: { servers: McpServerConfig[] } | undefined;
+  rag?: RagConfig | undefined;
 }
 
 export interface InitAgentConfigInput {
@@ -61,6 +71,14 @@ const agentConfigSchema = z.object({
   repoPath: z.string().optional(),
   createdAt: z.string().optional(),
   llm: llmConfigSchema.optional(),
+  mcp: z.object({
+    servers: z.array(McpServerConfigSchema).default([]),
+  }).strict().optional(),
+  rag: z.object({
+    topK: z.number().int().min(1).max(20).optional(),
+    minScore: z.number().min(0).max(1).optional(),
+    maxContextChars: z.number().int().min(200).max(30_000).optional(),
+  }).strict().optional(),
 }).passthrough();
 
 export async function loadAgentConfig(repoPath: string): Promise<AgentConfig> {

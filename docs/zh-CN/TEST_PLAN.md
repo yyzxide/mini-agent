@@ -6,7 +6,7 @@
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 基线：34 个测试文件、247 个测试用例。
+- 正常环境全量 Vitest 基线：36 个测试文件、262 个测试用例。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -27,7 +27,7 @@
 - tool manifest 输出 source、category 和能力标注。
 - MCP 风格 tool descriptor 输出 inputSchema、annotations 和 permission metadata。
 
-### 1.1.1 MCP Bridge
+### 1.1.1 MCP Tools Runtime
 
 覆盖：
 
@@ -35,7 +35,10 @@
 - `fetch_url`、`web_search` 等外部世界工具带 `openWorldHint`。
 - `apply_patch` 等修改型工具带 `destructiveHint`。
 - MCP server config schema 校验 command/url、args、enabled。
-- `mini-agent mcp tools` 能输出结构化 JSON。
+- stdio fixture 能完成 initialize、tools/list 和 tools/call。
+- Streamable HTTP fixture 能处理 JSON response、session header 和 close。
+- 远端工具名称隔离、permission mapping、错误包装和 Registry dispose。
+- `mini-agent mcp tools/status/call` 能输出结构化结果。
 
 ### 1.2 CommandRunner
 
@@ -168,6 +171,10 @@
 - scripted LLM 能按预设 `AgentDecision` 驱动 AgentLoop。
 - Harness 能创建临时 git 仓库、写入初始文件、执行 patch、读取 diff。
 - Harness 能校验成功状态、diff 内容和文件内容。
+- Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
+- stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call。
+- Web 问题在没有任何可读正文证据时进入证据不足回答；多份独立来源用于提升证据等级。
+- 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
 - 后续真实场景可以沉淀成 scenario，不再完全依赖人工 CLI 试用。
 
 ### 1.9 Diagnostics

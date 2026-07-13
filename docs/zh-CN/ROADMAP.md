@@ -1,6 +1,6 @@
 # Roadmap
 
-当前路线：先把本地 CLI Coding Agent 的工程骨架打磨扎实，再考虑真实 MCP server、生产级向量检索、TUI/编辑器集成和外部平台化。
+当前路线：本地 CLI Coding Agent 工程骨架、MCP tools runtime 和记忆治理已落地，下一阶段扩展真实 eval 数据集、生产级向量存储、MCP 高级能力与 TUI/编辑器集成。
 
 ## 0. 已完成的核心能力
 
@@ -13,7 +13,7 @@
 - `ToolRegistry`、zod 输入校验和结构化 `ToolResult`。
 - 本地工具：读文件、列文件、代码搜索、git status/diff、web_search、fetch_url、apply_patch。
 - 工具能力标注：只读、破坏性、幂等性、是否访问外部世界。
-- MCP 风格本地 tool descriptor 导出：`mini-agent mcp tools`。
+- MCP stdio/Streamable HTTP 工具发现、权限映射与调用：`mini-agent mcp tools/status/call`。
 - patch check/apply 和命令执行保护。
 - patch 应用固定 `core.autocrlf=false`，降低跨机器换行配置影响。
 - `read_file` / `search_code` 对 `.git`、`.mini-agent` 等内部元数据路径做拒绝保护。
@@ -23,13 +23,13 @@
 - 声明式 Skill 发现、校验、自动/显式选择以及全模式上下文注入。
 - Session 持久化的只读 Plan 模式和 `/plan` -> `/execute` 闭环，带运行时写操作硬拦截。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
-- 当前正常环境回归基线为 34 个测试文件、247 个测试用例。
+- 当前正常环境回归基线为 36 个测试文件、262 个测试用例。
 
 ## 1. P0：继续提高稳定性
 
 ### 1.1 继续拆分 CLI 交互与命令注册
 
-第一轮拆分已经完成：`src/cli/index.ts` 从约 4270 行降到约 2350 行（包含新增 Skill/Memory/Plan 命令），Direct/Web/Review/AgentLoop/RepositoryAnalysis 执行链、公共 Session/LLM Runtime 和各模式支持逻辑均已独立。当前入口主要承担命令注册、交互循环、模式调度和状态展示。
+持续拆分后，`src/cli/index.ts` 从约 4270 行降到约 2250 行；Direct/Web/Review/AgentLoop/RepositoryAnalysis、公共 Runtime、ToolCommands 和 McpCommands 均已独立。当前入口主要承担剩余命令注册、交互循环、模式调度和状态展示。
 
 后续继续拆成：
 
@@ -50,37 +50,35 @@
 
 ### 1.3 扩展 Agent Harness 场景集
 
-当前 Harness 已能跑 scripted AgentLoop 场景。下一步：
+当前 Harness 已能跑 scripted AgentLoop 场景，并汇总成功率、步骤、工具选择准确率和失败分类。下一步：
 
 - 增加 JSON/YAML 场景文件。
 - 覆盖常见真实问题：写文件、修复失败测试、错误诊断、代码审查、联网答复纠偏、短追问落盘。
-- 输出场景报告：成功率、步数、失败原因、关键记录。
+- 增加 token、延迟和轨迹回放报告。
 - 增加少量真实 API 抽样评测，但不能让 CI 依赖真实 API。
 
 ## 2. P1：RAG 和 MCP 深化
 
 ### 2.1 长期记忆升级
 
-当前是本地 JSONL + 本地确定性向量，适合 MVP。后续可以：
+当前是本地 JSONL + 可替换 embedding provider，适合本地作品和演示。后续可以：
 
-- 抽象 `EmbeddingProvider`。
-- 接真实 embedding API。
+- 为现有真实 embedding provider 增加批量迁移与重建索引命令。
 - 将 `MemoryRetriever` 的存储层替换为 SQLite FTS、LanceDB、Qdrant 或 pgvector。
-- 增加 memory aging、冲突检测和置信度（手动遗忘已经具备）。
+- 将标题级同主题替代升级为语义冲突检测。
 - 对检索结果做 LLM rerank 或 cross-encoder rerank。
 
-### 2.2 真实 MCP runtime
+### 2.2 MCP 高级能力
 
-当前已经有 MCP 风格 tool descriptor 和 MCP server config schema，但还没有真正连接第三方 MCP server。
+当前已连接第三方 MCP server 并支持 tools runtime；后续扩展 resources/prompts、server-initiated request、OAuth、缓存和旧 SSE 回退。
 
-真正接入需要：
+已经完成的 tools runtime 包括：
 
-- MCP stdio/SSE client。
-- server lifecycle 管理。
-- tools/list 与 tools/call。
-- MCP tool 到本地 `Tool` 的权限映射。
-- 外部工具调用的 session/event/log 记录。
-- 对 MCP server 的超时、输出截断、失败隔离和安全配置。
+- stdio/Streamable HTTP client 和 server lifecycle。
+- tools/list、tools/call 和本地 `Tool` 权限映射。
+- 外部工具调用的 session/event/log 记录和超时失败隔离。
+
+下一步补 resources/prompts、server-initiated request、OAuth、通知和旧 SSE 回退。
 
 这一步要谨慎做，不能为了“有 MCP”而放开任意外部命令。
 

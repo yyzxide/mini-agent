@@ -58,6 +58,7 @@ export interface Tool<TInput = unknown, TResult = unknown> {
   name: string;
   description: string;
   inputSchema: z.ZodType<TInput>;
+  inputJsonSchema?: unknown;
   permissionLevel: PermissionLevel;
   metadata?: ToolMetadata;
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TResult>>;

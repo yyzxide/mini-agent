@@ -34,7 +34,8 @@
 
 - [架构设计说明](ARCHITECTURE.md)：解释 CLI Agent 的模块拆分、工具系统、权限、session 和 LLM 接入。
 - [项目现状评估](PROJECT_STATUS.md)：当前完成度、100 分制评分、与 Claude Code/Codex 的差距、后续优先级。
-- [AI 知识补习指南](AI_STUDY_GUIDE.md)：为了把这个项目讲清楚、继续做下去，需要优先补哪些 AI 知识。
+- [AI Agent 面试学习指南](AI_STUDY_GUIDE.md)：按优先级学习 LLM、Tool Calling、Agent Loop、Context、RAG、Eval、MCP、安全和 AI 后端工程。
+- [RAG 使用、设计与评测指南](RAG_GUIDE.md)：文档导入、混合检索、引用拒答、评测指标和生产化边界。
 - [简历包装与求职使用说明](RESUME_PACKAGE.md)：怎么写进简历、怎么讲项目、适合投什么岗位。
 - [演示脚本](DEMO_SCRIPT.md)：用于本地演示和录屏的操作步骤。
 - [面试讲解稿](INTERVIEW_GUIDE.md)：把项目讲成一个完整工程故事。
@@ -60,11 +61,12 @@
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
 - `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
 - `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
-- 长期记忆已经覆盖 Direct、Web、Review、RepositoryAnalysis 和普通 AgentLoop；支持 `memory remember/forget/stats/clear`、`/remember`、`/forget`，默认排除失败任务并对常见密钥做脱敏。
+- `.mini-agent/rag/index.jsonl` 文档知识索引，支持 Markdown/TXT 安全导入、按行分块、来源增量替换、关键词与向量混合检索、来源/标签过滤、行号引用和证据不足拒答。
+- 长期记忆覆盖 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop；支持离线或 OpenAI-compatible embedding、TTL、confidence、同主题 supersession、显式 remember/forget、失败过滤和密钥脱敏。
 - 声明式 Skill：从版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md` 发现、校验、自动选择并注入所有执行模式；Skill 只能指导现有受控工具，不能执行任意脚本或绕过权限。
 - 真正的只读 Plan 模式：`mini-agent plan`、`/plan`、`/plan off`、`/execute`。Plan 状态会随 Session 保存，只向模型暴露只读工具，并在运行时硬拦 patch、命令和伪装成工具调用的写操作。
-- Tool manifest 和 MCP 风格工具描述，标注只读、破坏性、幂等性、是否访问外部世界等能力边界。
-- `AgentHarness` 和 `ScriptedLlmClient`，用于把多步 AgentLoop 场景变成可重复评测。
+- MCP stdio/Streamable HTTP tools runtime，支持 initialize、工具发现、名称隔离、权限映射、调用转发和生命周期关闭。
+- `AgentHarness` 和 `ScriptedLlmClient`，用于把多步 AgentLoop 场景变成可重复评测，并统计步骤、LLM 调用、工具选择和失败类别。
 - `mini-agent config` 管理本地模型配置。
 - `mini-agent --help`、`mini-agent run`、`mini-agent review`、`mini-agent tool`、`mini-agent mcp`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes`、`mini-agent memory` 等调试命令。
 - `mini-agent session summary <sessionId>` 可以直接查看某个会话的压缩摘要。
@@ -98,7 +100,7 @@ npm run test:regression
 npm run verify:regression
 ```
 
-当前正常环境回归基线：34 个测试文件、247 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+当前正常环境回归基线：36 个测试文件、262 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
 
 ## 快速验证
 

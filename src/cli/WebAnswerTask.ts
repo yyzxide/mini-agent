@@ -15,6 +15,8 @@ import {
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
 import {
   buildLocalWebCapabilityCorrection,
+  assessWebEvidence,
+  buildInsufficientEvidenceAnswer,
   buildWebAnswerContext,
   buildWebAnswerRepairContext,
   containsInvalidWebCapabilityDenial,
@@ -138,19 +140,22 @@ export async function runWebAnswerTask(
     }
   }
 
-  const result = await client.completeText({
-    userGoal: webPlan.standaloneQuestion,
-    context: buildWebAnswerContext({
-      userGoal,
-      webPlan,
-      sessionMemory: answerContext,
-      searchQueries,
-      searchResults,
-      sources,
-    }),
-    mode: "web",
-  });
-  await recordLlmUsageFromClient(sessionStore, sessionId, client, "web");
+  const evidence = assessWebEvidence(sources, webPlan.needsLiveData);
+  const result = evidence.sufficient
+    ? await client.completeText({
+      userGoal: webPlan.standaloneQuestion,
+      context: buildWebAnswerContext({
+        userGoal,
+        webPlan,
+        sessionMemory: answerContext,
+        searchQueries,
+        searchResults,
+        sources,
+      }),
+      mode: "web",
+    })
+    : { success: true, text: buildInsufficientEvidenceAnswer({ question: webPlan.standaloneQuestion, assessment: evidence }) };
+  if (evidence.sufficient) await recordLlmUsageFromClient(sessionStore, sessionId, client, "web");
 
   if (!result.success || !result.text) {
     const error = result.error ?? "Web answer failed";

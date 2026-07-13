@@ -44,6 +44,7 @@ describe("mini-agent CLI", () => {
       "memory",
       "patch",
       "plan",
+      "rag",
       "repo",
       "resume",
       "review",

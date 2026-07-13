@@ -8,5 +8,25 @@
     "temperature": 0.2,
     "maxTokens": 4096,
     "timeoutMs": 60000
+  },
+  "rag": {
+    "topK": 5,
+    "minScore": 0.12,
+    "maxContextChars": 6000
+  },
+  "mcp": {
+    "servers": [
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "enabled": false,
+        "timeoutMs": 30000,
+        "defaultPermission": "REVIEW",
+        "toolPermissions": {
+          "read_file": "SAFE"
+        }
+      }
+    ]
   }
 }
