@@ -117,13 +117,15 @@ describe("AgentLoop", () => {
 
   it("records last error context when a command fails and continues", async () => {
     const failScriptPath = path.join(repoPath, "fail-test.mjs");
+    const passScriptPath = path.join(repoPath, "pass-test.mjs");
     await fs.writeFile(failScriptPath, "process.exit(1);\n", "utf8");
+    await fs.writeFile(passScriptPath, "process.exit(0);\n", "utf8");
     const sessionStore = new SessionStore({ repoPath });
     const eventStore = new EventStore({ repoPath });
     const loop = createLoop({
       sessionStore,
       eventStore,
-        llmClient: new ScriptedLlmClient([
+      llmClient: new ScriptedLlmClient([
         { type: "PLAN", message: "Run a failing test command." },
         {
           type: "RUN_COMMAND",
@@ -131,7 +133,13 @@ describe("AgentLoop", () => {
           args: [failScriptPath, "npm test"],
           description: "simulate test failure",
         },
-        { type: "FINAL", success: true, summary: "Finished after recording command failure." },
+        {
+          type: "RUN_COMMAND",
+          executable: process.execPath,
+          args: [passScriptPath, "npm test"],
+          description: "run replacement test",
+        },
+        { type: "FINAL", success: true, summary: "Recovered with a passing replacement test." },
       ]),
     });
 
@@ -149,7 +157,38 @@ describe("AgentLoop", () => {
 
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toContain("TEST_FAILED");
+    expect(eventTypes(events)).toContain("TEST_PASSED");
     expect(eventTypes(events)).toContain("TASK_FINISHED");
+  });
+
+  it("blocks successful completion while the latest test result is failing", async () => {
+    const failScriptPath = path.join(repoPath, "fail-verification.mjs");
+    await fs.writeFile(failScriptPath, "process.exit(1);\n", "utf8");
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        {
+          type: "RUN_COMMAND",
+          executable: process.execPath,
+          args: [failScriptPath, "pnpm test"],
+          description: "simulate failed verification",
+        },
+        { type: "FINAL", success: true, summary: "verification finished" },
+        { type: "FAILED", error: "The verification command did not pass." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "verify the current behavior",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("did not pass");
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_IGNORES_TEST_FAILURE"))).toBe(true);
   });
 
   it("fails in nonInteractive mode when patch approval is required", async () => {

@@ -1,6 +1,7 @@
 import type { AgentDecision } from "./AgentDecision.js";
 import type { AgentState } from "./AgentState.js";
 import { looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
+import { isTestCommand } from "../command/CommandClassification.js";
 
 export interface AgentDecisionGuardrailViolation {
   code: string;
@@ -108,23 +109,34 @@ function validateFinalDecision(
   state: AgentState,
   decision: Extract<AgentDecision, { type: "FINAL" }>,
 ): AgentDecisionGuardrailViolation | undefined {
-  if (!decision.success || !requiresRepositoryFileChange(state.userGoal)) {
+  if (!decision.success) {
     return undefined;
   }
 
-  if (hasSuccessfulPatch(state)) {
-    return undefined;
+  if (requiresRepositoryFileChange(state.userGoal) && !hasSuccessfulPatch(state)) {
+    return {
+      code: "FINAL_WITHOUT_REPOSITORY_CHANGE",
+      message: [
+        "Postcondition failed: this task asks for repository file changes,",
+        "but no successful APPLY_PATCH step was recorded.",
+        "Do not claim the file was written. Next decision should use APPLY_PATCH",
+        "or FAILED with a clear reason if a patch cannot be produced.",
+      ].join(" "),
+    };
   }
 
-  return {
-    code: "FINAL_WITHOUT_REPOSITORY_CHANGE",
-    message: [
-      "Postcondition failed: this task asks for repository file changes,",
-      "but no successful APPLY_PATCH step was recorded.",
-      "Do not claim the file was written. Next decision should use APPLY_PATCH",
-      "or FAILED with a clear reason if a patch cannot be produced.",
-    ].join(" "),
-  };
+  if (hasUnresolvedTestFailure(state)) {
+    return {
+      code: "FINAL_IGNORES_TEST_FAILURE",
+      message: [
+        "Postcondition failed: the latest test command failed and no later test command passed.",
+        "Do not claim testing or verification succeeded.",
+        "Run a successful replacement test, or finish with FINAL success=false / FAILED.",
+      ].join(" "),
+    };
+  }
+
+  return undefined;
 }
 
 function validateAskUserDecision(
@@ -155,6 +167,11 @@ function validateAskUserDecision(
 
 function hasSuccessfulPatch(state: AgentState): boolean {
   return state.patchResults.some((patchResult) => patchResult.result.success);
+}
+
+function hasUnresolvedTestFailure(state: AgentState): boolean {
+  const latestTestResult = state.commandResults.filter((result) => isTestCommand(result.command)).at(-1);
+  return latestTestResult !== undefined && !latestTestResult.success;
 }
 
 function hasEnoughContextForFileWrite(userGoal: string): boolean {

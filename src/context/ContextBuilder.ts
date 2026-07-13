@@ -1,4 +1,5 @@
 import { GitManager } from "../git/GitManager.js";
+import { isTestCommand } from "../command/CommandClassification.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
@@ -274,17 +275,4 @@ function summarizeTestFailures(state: AgentState): string {
     ].join("\n"));
 
   return failures.length > 0 ? failures.join("\n\n") : "(none)";
-}
-
-function isTestCommand(command: string): boolean {
-  const normalized = command.toLowerCase();
-  return [
-    "mvn test",
-    "npm test",
-    "pnpm test",
-    "yarn test",
-    "go test",
-    "pytest",
-    "gradle test",
-  ].some((keyword) => normalized.includes(keyword));
 }

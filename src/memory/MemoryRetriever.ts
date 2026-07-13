@@ -6,6 +6,7 @@ export interface MemoryRetrievalOptions {
   minScore?: number;
   maxCandidates?: number;
   maxPerSession?: number;
+  excludeSessionId?: string;
 }
 
 export interface MemoryRetriever {

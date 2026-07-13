@@ -8,10 +8,17 @@ export class MemoryContextService {
     this.store = new LongTermMemoryStore(options);
   }
 
-  async build(input: { query: string; sessionId?: string; limit?: number; maxChars?: number }): Promise<string> {
+  async build(input: {
+    query: string;
+    sessionId?: string;
+    excludeSessionId?: string;
+    limit?: number;
+    maxChars?: number;
+  }): Promise<string> {
     const results = await this.store.search(input.query, {
       limit: input.limit ?? 5,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.excludeSessionId ? { excludeSessionId: input.excludeSessionId } : {}),
     });
     const formatted = formatLongTermMemoryResults(results);
     if (formatted === "(none)") {

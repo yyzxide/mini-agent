@@ -45,6 +45,20 @@ describe("SessionMemory", () => {
     expect(memory).toContain("tool_19");
     expect(memory).not.toContain("tool_16");
   });
+
+  it("drops a task summary that duplicates the preceding assistant answer", () => {
+    const records: SessionRecord[] = [
+      record("1", "USER_MESSAGE", { content: "你好" }),
+      record("2", "ASSISTANT_MESSAGE", { content: "你好，有什么我可以帮你的？" }),
+      record("3", "TASK_SUMMARY", { summary: "你好，有什么我可以帮你的？" }),
+      record("4", "USER_MESSAGE", { content: "我们继续" }),
+    ];
+
+    const memory = buildSessionMemory(records, { maxRecords: 18, maxChars: 8_000 });
+
+    expect(memory.match(/你好，有什么我可以帮你的？/g)).toHaveLength(1);
+    expect(memory).not.toContain("[summary]");
+  });
 });
 
 function record(id: string, type: SessionRecordType, payload: JsonObject): SessionRecord {

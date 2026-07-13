@@ -36,13 +36,24 @@ export function buildSessionMemory(
     ...usefulRecords.filter(isAuxiliaryMemoryRecord).slice(-maxAuxiliaryRecords),
   ].map((record) => record.id));
 
-  const lines = usefulRecords
-    .filter((record) => selectedIds.has(record.id))
+  const selectedRecords = usefulRecords.filter((record) => selectedIds.has(record.id));
+  const lines = selectedRecords
+    .filter((record, index) => !isDuplicateTaskSummary(record, selectedRecords[index - 1]))
     .map(formatMemoryRecord)
     .filter((line) => line.length > 0);
 
   const memory = lines.length > 0 ? lines.join("\n") : "(none)";
   return truncateMiddle(memory, maxChars);
+}
+
+function isDuplicateTaskSummary(record: SessionRecord, previous: SessionRecord | undefined): boolean {
+  if (record.type !== "TASK_SUMMARY" || previous?.type !== "ASSISTANT_MESSAGE") {
+    return false;
+  }
+
+  const summary = payloadString(record.payload, "summary");
+  const previousAnswer = payloadString(previous.payload, "content");
+  return summary.length > 0 && summary === previousAnswer;
 }
 
 function isPrimaryMemoryRecord(record: SessionRecord): boolean {

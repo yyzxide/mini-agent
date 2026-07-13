@@ -148,6 +148,18 @@ describe("TaskRouter", () => {
     });
   });
 
+  it("routes test requests to the agent loop when no higher-level skill activation applies", () => {
+    expect(routeTask("test")).toMatchObject({
+      intent: "AGENT_LOOP",
+    });
+    expect(routeTask("test this project")).toMatchObject({
+      intent: "AGENT_LOOP",
+    });
+    expect(routeTask("测试当前项目")).toMatchObject({
+      intent: "AGENT_LOOP",
+    });
+  });
+
   it("routes casual no-op or cancellation messages to direct answer mode", () => {
     expect(routeTask("没事，我按错了")).toMatchObject({
       intent: "DIRECT_ANSWER",

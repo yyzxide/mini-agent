@@ -52,6 +52,7 @@ export interface LongTermMemorySearchOptions {
   limit?: number;
   minScore?: number;
   sessionId?: string;
+  excludeSessionId?: string;
 }
 
 export interface LongTermMemoryStats {
@@ -242,7 +243,12 @@ export class LongTermMemoryStore implements MemoryRetriever {
     const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
     const queryVector = await this.embeddingProvider.embed(query.expandedQuery);
     const now = Date.now();
-    const entries = (await this.readAll()).filter((entry) => entry.metadata.success !== false && isMemoryActive(entry, now));
+    const entries = (await this.readAll()).filter((entry) => (
+      entry.metadata.success !== false
+        && isMemoryActive(entry, now)
+        && !isTransientDirectAnswer(entry)
+        && entry.sessionId !== options.excludeSessionId
+    ));
 
     const candidates = entries
       .map((entry) => scoreMemoryEntry(entry, query, queryVector))
@@ -304,6 +310,9 @@ async function extractMemoryEntries(input: {
     }
 
     if (record.payload.success === false) {
+      continue;
+    }
+    if (record.type === "TASK_SUMMARY" && record.payload.mode === "DIRECT_ANSWER") {
       continue;
     }
 
@@ -391,6 +400,10 @@ function isMemoryExpired(entry: LongTermMemoryEntry, now: number): boolean {
 
 function isMemoryActive(entry: LongTermMemoryEntry, now: number): boolean {
   return !isMemoryExpired(entry, now) && typeof entry.metadata.supersededBy !== "string";
+}
+
+function isTransientDirectAnswer(entry: LongTermMemoryEntry): boolean {
+  return entry.source === "TASK_SUMMARY" && entry.metadata.mode === "DIRECT_ANSWER";
 }
 
 function clampConfidence(value: number): number {

@@ -40,6 +40,18 @@ describe("SkillStore", () => {
     await expect(store.select("use $docs for this", 1)).resolves.toMatchObject([{ name: "docs" }]);
   });
 
+  it("parses inline YAML-style trigger lists", async () => {
+    await writeSkill(path.join(repoPath, "skills", "demo", "SKILL.md"), [
+      "---", "name: demo", "description: Demo workflow", "triggers: [\"demo\", \"smoke\"]", "---", "", "Follow the demo workflow.",
+    ].join("\n"));
+
+    const store = new SkillStore({ repoPath });
+    await expect(store.select("run smoke check", 1)).resolves.toMatchObject([{ name: "demo" }]);
+    await expect(store.matchExactActivation("smoke")).resolves.toMatchObject({ name: "demo" });
+    await expect(store.matchExactActivation("$demo")).resolves.toMatchObject({ name: "demo" });
+    await expect(store.matchExactActivation("run smoke check")).resolves.toBeUndefined();
+  });
+
   it("reports invalid skills without breaking valid discovery", async () => {
     await writeSkill(path.join(repoPath, "skills", "broken", "SKILL.md"), "# no metadata\n");
     const results = await new SkillStore({ repoPath }).validateAll();

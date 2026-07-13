@@ -7,6 +7,7 @@ import { errorToMessage } from "../utils/errors.js";
 import { DecisionParser } from "./DecisionParser.js";
 import type { LlmClient, LlmInput } from "./LlmClient.js";
 import { buildUserPrompt, CODING_AGENT_SYSTEM_PROMPT } from "./prompts.js";
+import type { ConversationMessage } from "../session/ConversationHistory.js";
 
 export interface OpenAICompatibleClientOptions {
   baseUrl?: string;
@@ -22,6 +23,7 @@ export interface OpenAICompatibleClientOptions {
 export interface LlmTextInput {
   userGoal: string;
   context?: string | undefined;
+  conversation?: ConversationMessage[] | undefined;
   mode?: "direct" | "web" | "web_rewrite" | "review_json" | "review_verify_json" | undefined;
 }
 
@@ -135,6 +137,7 @@ export class OpenAICompatibleClient implements LlmClient {
       const continuation = await this.requestTextCompletion({
         userGoal: buildContinuationUserGoal(input.userGoal),
         context: buildContinuationContext(input.context, accumulated),
+        conversation: input.conversation,
         mode: input.mode,
       });
 
@@ -284,11 +287,16 @@ export class OpenAICompatibleClient implements LlmClient {
     try {
       const runtimeContext = formatRuntimeContext();
       const userContent = [
+        "Current user request (authoritative):",
         input.userGoal,
         "",
         "Runtime context:",
         runtimeContext,
-        ...(input.context ? ["", "Context:", input.context] : []),
+        ...(input.context ? [
+          "",
+          "Background context (use only when it helps answer the current request):",
+          input.context,
+        ] : []),
       ].join("\n");
 
       const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -305,6 +313,7 @@ export class OpenAICompatibleClient implements LlmClient {
               role: "system",
               content: buildTextCompletionSystemPrompt(input.mode ?? "direct"),
             },
+            ...(input.conversation ?? []),
             {
               role: "user",
               content: userContent,
@@ -665,7 +674,9 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" 
   const commonRules = [
     "You are a helpful local assistant inside a coding-agent CLI.",
     "Answer in the same language as the user unless the user asks otherwise.",
+    "The current user request is authoritative. Do not answer or repeat an older request unless the current request clearly refers to it.",
     "Use the provided conversation context when it is relevant.",
+    "If Context contains Active skills, follow those skill instructions when relevant unless they conflict with the current user request, repository evidence, safety rules, or this system prompt.",
     "Use the provided runtime context as authoritative for current date and time questions.",
     "If the user asks what was discussed before, summarize only what appears in the conversation context.",
     "Do not claim that there is no memory when conversation context is present.",

@@ -49,6 +49,17 @@ export class SkillStore {
     return (await this.list()).find((skill) => skill.name === normalized);
   }
 
+  async matchExactActivation(query: string): Promise<AgentSkill | undefined> {
+    const normalized = normalizeExactActivation(query);
+    if (!normalized) {
+      return undefined;
+    }
+
+    return (await this.list()).find((skill) => {
+      return skill.name === normalized || skill.triggers.includes(normalized);
+    });
+  }
+
   async select(query: string, limit = 3): Promise<AgentSkill[]> {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
@@ -211,9 +222,17 @@ function parseSkillMarkdown(raw: string): {
   return {
     name: normalizeSkillName(fields.get("name") ?? ""),
     description: fields.get("description")?.trim() ?? "",
-    triggers: (fields.get("triggers") ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
+    triggers: parseTriggers(fields.get("triggers") ?? ""),
     instructions: (match[2] ?? "").trim(),
   };
+}
+
+function parseTriggers(value: string): string[] {
+  const normalized = value.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return normalized
+    .split(",")
+    .map((item) => item.trim().replace(/^['\"]|['\"]$/g, "").toLowerCase())
+    .filter(Boolean);
 }
 
 function scoreSkill(skill: AgentSkill, query: string, explicitNames: Set<string>): number {
@@ -234,4 +253,9 @@ function extractExplicitSkillNames(query: string): Set<string> {
 
 function normalizeSkillName(name: string): string {
   return name.trim().toLowerCase();
+}
+
+function normalizeExactActivation(query: string): string {
+  const normalized = query.trim().toLowerCase();
+  return normalized.startsWith("$") ? normalized.slice(1) : normalized;
 }

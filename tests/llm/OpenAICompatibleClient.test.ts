@@ -88,8 +88,39 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[0]?.content).toContain("runtime context");
     expect(body.messages[1]?.content).toContain("Runtime context:");
     expect(body.messages[1]?.content).toContain("Current local date:");
-    expect(body.messages[1]?.content).toContain("Context:");
+    expect(body.messages[1]?.content).toContain("Current user request (authoritative):");
+    expect(body.messages[1]?.content).toContain("Background context (use only when it helps answer the current request):");
     expect(body.messages[1]?.content).toContain("[user] 之前聊过时间");
+  });
+
+  it("preserves recent conversation as role-separated messages", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({ choices: [{ message: { content: "五子棋本身不难。" } }] }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.completeText({
+      userGoal: "你觉得这个有难度吗",
+      conversation: [
+        { role: "user", content: "写个五子棋小游戏吧" },
+        { role: "assistant", content: "已创建 gobang.html。" },
+      ],
+      mode: "direct",
+    });
+
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(body.messages[1]?.content).toBe("写个五子棋小游戏吧");
+    expect(body.messages[2]?.content).toBe("已创建 gobang.html。");
+    expect(body.messages[3]?.content).toContain("你觉得这个有难度吗");
   });
 
   it("records usage metrics that can be drained later", async () => {

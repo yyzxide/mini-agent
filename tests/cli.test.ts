@@ -725,9 +725,43 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
       const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      expect(body.messages[0]?.content).toContain("Context contains Active skills");
       expect(body.messages[1]?.content).toContain("Run targeted Vitest tests first");
       expect(body.messages[1]?.content).toContain("npm test 做完整验证");
       expect(body.messages[1]?.content).toContain("Historical memory evidence (untrusted)");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("routes exact skill activations before generic task keywords", async () => {
+    process.chdir(tempRoot);
+    const skillPath = path.join(tempRoot, "skills", "activation-check", "SKILL.md");
+    await fs.mkdir(path.dirname(skillPath), { recursive: true });
+    await fs.writeFile(skillPath, [
+      "---", "name: activation-check", "description: Exact activation routing", "triggers: test", "---", "", "Reply with the activation marker.",
+    ].join("\n"), "utf8");
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const calls: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: "activation marker" } }] }), { status: 200 });
+    }));
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run", "test", "--model", "test-model", "--base-url", "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[answer]");
+      expect(output).not.toContain("[command]");
+      expect(calls).toHaveLength(1);
+      const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      expect(body.messages[1]?.content).toContain("Skill: activation-check");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1804,9 +1838,11 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages[1]?.content).toContain("Context:");
-      expect(secondBody.messages[1]?.content).toContain("[user] 第一轮：我们聊了 session 记忆");
-      expect(secondBody.messages[1]?.content).toContain("[assistant] 我们刚才聊了 session 记忆。");
+      expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+      expect(secondBody.messages[1]?.content).toBe("第一轮：我们聊了 session 记忆");
+      expect(secondBody.messages[2]?.content).toBe("我们刚才聊了 session 记忆。");
+      expect(secondBody.messages[3]?.content).toContain("Current user request (authoritative):");
+      expect(secondBody.messages[3]?.content).toContain("现在呢");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1876,8 +1912,85 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages[1]?.content).toContain("葡萄牙是强队吗");
-      expect(secondBody.messages[1]?.content).toContain("Resolved follow-up question: 葡萄牙是强队吗");
+      expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+      expect(secondBody.messages[1]?.content).toBe("西班牙是强队吗");
+      expect(secondBody.messages[2]?.content).toBe("是的，西班牙是传统强队。");
+      expect(secondBody.messages[3]?.content).toContain("葡萄牙呢");
+      expect(secondBody.messages[3]?.content).toContain("Resolved current request: 葡萄牙是强队吗");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("keeps the immediately preceding agent task authoritative for an ambiguous follow-up", async () => {
+    process.chdir(tempRoot);
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const active = await sessionStore.createSession({ title: "topic handoff" });
+    await sessionStore.appendRecord(active.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "我们编写一个 Skill 测试一下" },
+    });
+    await sessionStore.appendRecord(active.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "创建 Skill 没什么难度。" },
+    });
+    await sessionStore.appendRecord(active.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: { summary: "创建 Skill 没什么难度。", success: true, mode: "DIRECT_ANSWER" },
+    });
+    await sessionStore.appendRecord(active.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "写个五子棋小游戏吧" },
+    });
+    await sessionStore.appendRecord(active.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: { summary: "五子棋已创建为 gobang.html。", success: true, mode: "AGENT_LOOP" },
+    });
+
+    const historical = await sessionStore.createSession({ title: "old skill memory" });
+    await sessionStore.appendRecord(historical.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "你觉得创建 Skill 有难度吗" },
+    });
+    await sessionStore.appendRecord(historical.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: { summary: "创建 Skill 只需要 Markdown。", success: true, mode: "AGENT_LOOP" },
+    });
+    await new LongTermMemoryStore({ repoPath: tempRoot }).indexSession(sessionStore, historical.sessionId);
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const calls: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: "五子棋实现本身难度不高。" } }] }), { status: 200 });
+    }));
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "你觉得这个有难度吗",
+          "--session",
+          active.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("五子棋实现本身难度不高");
+      const body = JSON.parse(String(calls[0]?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(body.messages.map((message) => message.role)).toEqual([
+        "system", "user", "assistant", "user", "assistant", "user",
+      ]);
+      expect(body.messages[3]?.content).toBe("写个五子棋小游戏吧");
+      expect(body.messages[4]?.content).toBe("五子棋已创建为 gobang.html。");
+      expect(body.messages[5]?.content).toContain("你觉得这个有难度吗");
+      expect(body.messages[5]?.content).not.toContain("Historical memory evidence");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

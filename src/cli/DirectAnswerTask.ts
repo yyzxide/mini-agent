@@ -3,7 +3,9 @@ import { readSessionMemory } from "../session/SessionMemory.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import { resolveFollowUpQuestion } from "../web/WebQuestionPlanner.js";
 import { appendLongTermMemoryContext, MemoryContextService } from "../memory/MemoryContextService.js";
+import { planDirectAnswerMemory } from "../memory/DirectAnswerMemoryPolicy.js";
 import { appendSkillContext, SkillContextService } from "../skills/SkillContextService.js";
+import { buildConversationHistory } from "../session/ConversationHistory.js";
 import {
   createOpenAICompatibleClient,
   openTaskSession,
@@ -20,13 +22,22 @@ export async function runDirectAnswerTask(
 ): Promise<CliTaskResult> {
   const { sessionId, sessionStore, eventStore } = await openTaskSession({ repoPath, userGoal, options });
 
+  const recordsBeforeCurrent = await sessionStore.readRecords(sessionId).catch(() => []);
+  const conversation = buildConversationHistory(recordsBeforeCurrent);
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
   const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
-  const longTermMemory = await new MemoryContextService({ repoPath }).build({
-    query: resolvedFollowUpGoal ?? userGoal,
-    sessionId,
-  }).catch(() => "(none)");
+  const memoryPlan = planDirectAnswerMemory({
+    userGoal,
+    ...(resolvedFollowUpGoal ? { resolvedFollowUpGoal } : {}),
+    hasRecentConversation: conversation.length > 0,
+  });
+  const longTermMemory = memoryPlan.retrieve
+    ? await new MemoryContextService({ repoPath }).build({
+      query: memoryPlan.query,
+      excludeSessionId: sessionId,
+    }).catch(() => "(none)")
+    : "(none)";
   const skillContext = await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
     .catch(() => "(none selected)");
 
@@ -57,20 +68,16 @@ export async function runDirectAnswerTask(
 
   const client = await createOpenAICompatibleClient(repoPath, options);
   const directContextBase = resolvedFollowUpGoal && resolvedFollowUpGoal !== userGoal
-    ? [
-      sessionMemory,
-      "",
-      `Original short follow-up: ${userGoal}`,
-      `Resolved follow-up question: ${resolvedFollowUpGoal}`,
-    ].join("\n")
-    : sessionMemory;
+    ? `Resolved current request: ${resolvedFollowUpGoal}`
+    : "";
   const directContext = appendSkillContext(
     appendLongTermMemoryContext(directContextBase, longTermMemory),
     skillContext,
   );
   const result = await client.completeText({
-    userGoal: resolvedFollowUpGoal ?? userGoal,
-    context: directContext,
+    userGoal,
+    conversation,
+    ...(directContext.trim().length > 0 ? { context: directContext.trim() } : {}),
     mode: "direct",
   });
   await recordLlmUsageFromClient(sessionStore, sessionId, client, "direct");

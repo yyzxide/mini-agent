@@ -89,8 +89,8 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).toContain("运行目录问题");
     expect(output).toContain(wrongDirectory);
     expect(output).toContain(tempRoot);
-    expect(output).toContain(`cd '${tempRoot}'`);
-    expect(output).toContain(`npm --prefix '${tempRoot}' run guess`);
+    expect(output).toContain(`cd ${tempRoot}`);
+    expect(output).toContain(`npm --prefix ${tempRoot} run guess`);
   });
 
   it("repairs web answers that contradict already executed web tools", async () => {
@@ -584,7 +584,10 @@ describe("mini-agent CLI regression scenarios", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages[1]?.content).toContain("Resolved follow-up question: 葡萄牙是强队吗");
+      expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+      expect(secondBody.messages[1]?.content).toBe("西班牙是强队吗");
+      expect(secondBody.messages[2]?.content).toBe("是的，西班牙是传统强队。");
+      expect(secondBody.messages[3]?.content).toContain("Resolved current request: 葡萄牙是强队吗");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

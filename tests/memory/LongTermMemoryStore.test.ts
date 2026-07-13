@@ -124,6 +124,28 @@ describe("LongTermMemoryStore", () => {
     await expect(store.list()).resolves.toEqual([]);
   });
 
+  it("does not promote transient direct answers into long-term memory", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const session = await sessionStore.createSession({ title: "casual chat" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "你觉得这个有难度吗" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary: "错误地回答了更早的 Skill 话题。",
+        success: true,
+        mode: "DIRECT_ANSWER",
+      },
+    });
+
+    const store = new LongTermMemoryStore({ repoPath });
+    await store.indexSession(sessionStore, session.sessionId);
+
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
   it("redacts common secrets before persistence", async () => {
     expect(redactMemoryText("api_key=secret-value password: hunter2 sk-abcdefghijklmnop")).toBe(
       "api_key=[REDACTED] password=[REDACTED] [REDACTED_API_KEY]",
@@ -158,5 +180,16 @@ describe("LongTermMemoryStore", () => {
     expect(entry.embeddingProvider).toBe("fixture-embedding");
     expect(entry.vector).toEqual([1, 0, 0]);
     await expect(store.stats()).resolves.toMatchObject({ embeddingProvider: "fixture-embedding" });
+  });
+
+  it("can exclude the active session before ranking retrieval candidates", async () => {
+    const store = new LongTermMemoryStore({ repoPath });
+    await store.remember({ sessionId: "active", title: "五子棋", text: "active session result" });
+    const historical = await store.remember({ sessionId: "historical", title: "五子棋", text: "historical result" });
+
+    const results = await store.search("五子棋", { excludeSessionId: "active", limit: 5, minScore: 0 });
+
+    expect(results.map((result) => result.entry.id)).toContain(historical.id);
+    expect(results.every((result) => result.entry.sessionId !== "active")).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
 import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
+import { isTestCommand } from "../command/CommandClassification.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { GitManager } from "../git/GitManager.js";
 import type { LlmClient, ToolSpec } from "../llm/LlmClient.js";
@@ -700,20 +701,6 @@ function commandResultToPayload(result: CommandResult): JsonObject {
     truncated: result.truncated,
     error: result.error,
   });
-}
-
-function isTestCommand(command: string): boolean {
-  const normalized = command.toLowerCase();
-  return [
-    "mvn test",
-    "npm test",
-    "pnpm test",
-    "yarn test",
-    "go test",
-    "pytest",
-    "gradle test",
-    "echo test passed",
-  ].some((keyword) => normalized.includes(keyword));
 }
 
 function commandInputFromDecision(decision: Extract<AgentDecision, { type: "RUN_COMMAND" }>): CommandInput {

@@ -14,6 +14,7 @@ import {
 } from "../agent/TaskRouter.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
+import { isTestCommand } from "../command/CommandClassification.js";
 import {
   initAgentConfig,
   loadAgentConfig,
@@ -1731,6 +1732,14 @@ async function resolveTaskRoute(
   sessionId: string | undefined,
 ): Promise<{ intent: TaskChangeMode; reason: string }> {
   const baseRoute = routeTask(userGoal);
+  const activatedSkill = await new SkillStore({ repoPath }).matchExactActivation(userGoal).catch(() => undefined);
+  if (activatedSkill) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: `Input exactly activates repository skill ${activatedSkill.name}.`,
+    };
+  }
+
   if (!sessionId || !isShortFollowUpQuestion(userGoal)) {
     return baseRoute;
   }
@@ -2092,19 +2101,6 @@ function commandResultToPayload(result: CommandResult): JsonObject {
     truncated: result.truncated,
     error: result.error,
   });
-}
-
-function isTestCommand(command: string): boolean {
-  const normalized = command.toLowerCase();
-  return [
-    "mvn test",
-    "npm test",
-    "pnpm test",
-    "yarn test",
-    "go test",
-    "pytest",
-    "gradle test",
-  ].some((keyword) => normalized.includes(keyword));
 }
 
 function isGitDiffData(value: unknown): value is { diff: string } {
