@@ -41,6 +41,41 @@ describe("WebQuestionPlanner", () => {
     expect(plan.needsLiveData).toBe(true);
   });
 
+  it("reuses the previous sports question for a natural-language web retry", () => {
+    const plan = buildFallbackWebQuestionPlan(
+      "。。。我不就是问你吗，你用搜一下啊",
+      "[user] 昨天法国队踢西班牙队，谁赢了\n[assistant] 我无法获取实时结果。",
+    );
+
+    expect(plan.standaloneQuestion).toBe("昨天法国队踢西班牙队，谁赢了");
+    expect(plan.needsLiveData).toBe(true);
+    expect(plan.searchQueries.some((query) => query.includes("site:fifa.com"))).toBe(true);
+  });
+
+  it("does not let the model overwrite a deterministically resolved web retry", async () => {
+    const plan = await planWebQuestion({
+      userGoal: "你用搜一下啊",
+      sessionMemory: "[user] 昨天法国队踢西班牙队，谁赢了\n[assistant] 我无法获取实时结果。",
+      client: {
+        completeText: async () => ({
+          success: true,
+          text: JSON.stringify({
+            standaloneQuestion: "Coding Agent 有哪些模式",
+            searchQueries: ["Coding Agent modes"],
+            answerScope: "回答产品模式。",
+            sourceHints: ["documentation"],
+            answerInstructions: ["回答产品模式。"],
+            needsLiveData: false,
+            confidence: "high",
+          }),
+        }),
+      },
+    });
+
+    expect(plan.standaloneQuestion).toBe("昨天法国队踢西班牙队，谁赢了");
+    expect(plan.needsLiveData).toBe(true);
+  });
+
   it("adds source-focused queries for live sports data", () => {
     const plan = buildFallbackWebQuestionPlan("世界杯最新比分", "(none)");
 

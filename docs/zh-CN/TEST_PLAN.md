@@ -6,7 +6,7 @@
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 基线：36 个测试文件、262 个测试用例。
+- 正常环境全量 Vitest 基线：39 个测试文件、288 个测试用例。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -98,7 +98,7 @@
 - `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
 - `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
-- Direct/Web/Review/RepositoryAnalysis/AgentLoop 都能召回长期记忆，并把它标记为不可信历史证据。
+- Direct/Web/Review/RepositoryAnalysis/AgentLoop 可按策略召回长期记忆，并把它标记为不可信历史证据；实时 Web 问题和易过期赛果必须禁用长期记忆召回。
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
 - 结构化 compaction 同时保留关键用户/助手事实和最近上下文。
 
@@ -173,7 +173,8 @@
 - Harness 能校验成功状态、diff 内容和文件内容。
 - Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
 - stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call。
-- Web 问题在没有任何可读正文证据时进入证据不足回答；多份独立来源用于提升证据等级。
+- 普通 Web 问题没有可读正文时进入证据不足回答；实时问题必须至少抓取两个独立域名的正文，否则不得输出确定性结果。
+- Web 答案中出现本轮来源列表之外的 URL 时必须触发重写；重写仍引用未知 URL 时由本地拦截。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
 - 后续真实场景可以沉淀成 scenario，不再完全依赖人工 CLI 试用。
 
@@ -199,6 +200,13 @@
 - 用户问“你写入了嘛？”时，必须读取 session 中的 `FILE_CHANGE` 记录作答，不能让模型猜测
 - 用户贴出 `npm error enoent Could not read package.json`，且报错路径不在当前仓库时，必须诊断为运行目录错误，而不是说代码本身能跑
 - `葡萄牙呢` 这种短追问，必须结合上一轮会话补全为明确问题
+- 先测试 Skill、再创建五子棋，随后问“这个难度如何”时，请求上下文只能保留最近的五子棋任务，不能重新引用 Skill 或注入历史 Skill 记忆
+- `long time no see` 必须走普通问答，不能进入 AgentLoop 或输出 `[diff]`
+- “昨天法国队踢西班牙队，谁赢了”与“法国队vs西班牙队，谁赢了”必须直接进入 `WEB_ANSWER`
+- 普通回答拒绝联网后再说“你用搜一下啊”，必须复用上一轮赛事问题，而不是搜索这句追问本身
+- `/new` 后的实时赛果不得从旧 session 长期记忆中作答
+- 名称、模型标识、处理路径和 `WEB_ANSWER` 能力说明必须由本地产品知识回答，不能虚构手动切换方式
+- AgentLoop 的 tool/patch/command decision 不能作为 `ASSISTANT_MESSAGE` 进入后续聊天历史；旧 session 中紧随 `AGENT_DECISION` 的遗留消息也必须过滤
 - “分析当前文件夹的项目”必须先读取真实仓库证据，再总结
 - 模型声称“已写入”但没有 patch 时，必须被质量闸门拦截并继续修复
 - 模型在已经有代码上下文时反问“写入什么内容到哪个文件”，必须被质量闸门拦截

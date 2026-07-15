@@ -107,6 +107,15 @@ describe("TaskRouter", () => {
     expect(routeTask("嗯切换吧")).toMatchObject({
       intent: "WEB_ANSWER",
     });
+    expect(routeTask("昨天法国队踢西班牙队，谁赢了")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("法国队vs西班牙队，谁赢了")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("。。。我不就是问你吗，你用搜一下啊")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
   });
 
   it("routes questions about web capability to direct local answers", () => {
@@ -144,6 +153,9 @@ describe("TaskRouter", () => {
       intent: "DIRECT_ANSWER",
     });
     expect(routeTask("apple pear pork")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("long time no see")).toMatchObject({
       intent: "DIRECT_ANSWER",
     });
   });

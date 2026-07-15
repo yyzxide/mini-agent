@@ -86,6 +86,7 @@
 - `数据流的中位数呢` 这类代码连续追问必须继续走 `AGENT_LOOP`
 - `你写入了嘛？` 这类确认问题必须基于 session 文件变更记录回答
 - `葡萄牙呢` 这类短追问必须结合当前 session 补全语义
+- `Skill -> 五子棋 -> 这个难度如何` 必须只指向最近的五子棋任务，不能被旧主题、长期记忆或 Skill 注入带偏
 - “分析当前项目”必须先读取 README / 构建文件 / 代表性源码再总结
 
 运行命令：
@@ -100,7 +101,7 @@ npm run test:regression
 npm run verify:regression
 ```
 
-当前正常环境回归基线：36 个测试文件、262 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+当前正常环境回归基线：39 个测试文件、288 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
 
 ## 快速验证
 

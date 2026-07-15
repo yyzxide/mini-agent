@@ -119,6 +119,8 @@ function isWebSwitchConfirmation(value: string): boolean {
     "那就查吧",
     "那就搜吧",
     "用网页查吧",
+    "你用搜一下",
+    "用搜一下",
     "useweb",
     "switchtoweb",
     "searchonlinethen",
@@ -145,7 +147,11 @@ function normalizePlannerResult(
   parsed: ParsedWebQuestionPlan,
   fallback: WebQuestionPlan,
 ): WebQuestionPlan {
-  const standaloneQuestion = normalizeSpaces(parsed.standaloneQuestion);
+  const original = normalizeSpaces(originalQuestion);
+  const fallbackResolvedContext = normalizeSpaces(fallback.standaloneQuestion) !== original;
+  const standaloneQuestion = fallbackResolvedContext
+    ? fallback.standaloneQuestion
+    : normalizeSpaces(parsed.standaloneQuestion);
   const needsLiveData = parsed.needsLiveData || fallback.needsLiveData || isLikelyLiveOrCurrentQuestion(standaloneQuestion);
   const searchQueries = uniqueStrings([
     ...parsed.searchQueries,
@@ -154,7 +160,7 @@ function normalizePlannerResult(
   ]).slice(0, MAX_SEARCH_QUERIES);
 
   return {
-    originalQuestion: normalizeSpaces(originalQuestion),
+    originalQuestion: original,
     standaloneQuestion,
     searchQueries,
     answerScope: parsed.answerScope,
@@ -219,7 +225,7 @@ function buildSearchQueries(standaloneQuestion: string, needsLiveData: boolean):
     additions.push("FIFA World Cup official results scores fixtures");
   }
 
-  if (containsAnyText(lower, ["比分", "赛果", "成绩", "战绩", "score", "scores", "result", "results"])) {
+  if (containsAnyText(lower, ["比分", "赛果", "成绩", "战绩", "比赛", "谁赢", "score", "scores", "result", "results", " vs ", "vs"])) {
     additions.push("live scores match results official");
   }
 
@@ -256,7 +262,7 @@ function buildSourceFocusedQueries(standaloneQuestion: string, needsLiveData: bo
   const lower = standaloneQuestion.toLowerCase();
   const queries: string[] = [];
 
-  if (containsAnyText(lower, ["世界杯", "world cup", "fifa", "足球", "比分", "赛果", "score", "scores", "match", "team"])) {
+  if (containsAnyText(lower, ["世界杯", "world cup", "fifa", "足球", "比分", "赛果", "比赛", "谁赢", "score", "scores", "match", "team", "vs"])) {
     queries.push(`site:fifa.com ${standaloneQuestion} results scores fixtures`);
     queries.push(`site:espn.com soccer ${standaloneQuestion} results scores`);
     queries.push(`site:sofascore.com ${standaloneQuestion} live score`);
@@ -297,7 +303,7 @@ function buildSourceHints(standaloneQuestion: string, needsLiveData: boolean): s
   const lower = standaloneQuestion.toLowerCase();
   const hints: string[] = ["official source", "recent source"];
 
-  if (containsAnyText(lower, ["世界杯", "world cup", "比分", "赛果", "score", "scores", "match"])) {
+  if (containsAnyText(lower, ["世界杯", "world cup", "比分", "赛果", "比赛", "谁赢", "score", "scores", "match", "vs"])) {
     hints.push("official competition site", "live score source", "fixture/results page");
   }
 
@@ -335,7 +341,7 @@ function buildAnswerInstructions(
     instructions.push("This is a follow-up question; preserve the previous topic and scope.");
   }
 
-  if (containsAnyText(lower, ["世界杯", "world cup", "比分", "赛果", "成绩", "战绩", "score", "scores", "result", "results"])) {
+  if (containsAnyText(lower, ["世界杯", "world cup", "比分", "赛果", "成绩", "战绩", "比赛", "谁赢", "score", "scores", "result", "results", "vs"])) {
     instructions.push("For sports results, keep competitions separate; do not mix friendlies, qualifiers, leagues, cups, or different tournaments unless the user asks for all competitions.");
   }
 
@@ -443,10 +449,12 @@ function isLikelyLiveOrCurrentQuestion(value: string): boolean {
     "最近",
     "当前",
     "今天",
+    "昨天",
     "现在",
     "实时",
     "比分",
     "赛果",
+    "谁赢",
     "价格",
     "汇率",
     "新闻",
@@ -454,6 +462,7 @@ function isLikelyLiveOrCurrentQuestion(value: string): boolean {
     "recent",
     "current",
     "today",
+    "yesterday",
     "now",
     "live",
     "score",

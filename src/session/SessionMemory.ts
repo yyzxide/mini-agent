@@ -30,7 +30,9 @@ export function buildSessionMemory(
     Math.max(4, Math.floor(maxRecords * 0.25)),
   );
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
-  const usefulRecords = records.filter(isUsefulMemoryRecord);
+  const usefulRecords = records.filter((record, index) => {
+    return isUsefulMemoryRecord(record) && !isPersistedAgentDecisionMessage(record, records[index - 1]);
+  });
   const selectedIds = new Set([
     ...usefulRecords.filter(isPrimaryMemoryRecord).slice(-maxRecords),
     ...usefulRecords.filter(isAuxiliaryMemoryRecord).slice(-maxAuxiliaryRecords),
@@ -75,6 +77,13 @@ function isAuxiliaryMemoryRecord(record: SessionRecord): boolean {
 
 function isUsefulMemoryRecord(record: SessionRecord): boolean {
   return isPrimaryMemoryRecord(record) || isAuxiliaryMemoryRecord(record);
+}
+
+function isPersistedAgentDecisionMessage(
+  record: SessionRecord,
+  previousRecord: SessionRecord | undefined,
+): boolean {
+  return record.type === "ASSISTANT_MESSAGE" && previousRecord?.type === "AGENT_DECISION";
 }
 
 function formatMemoryRecord(record: SessionRecord): string {

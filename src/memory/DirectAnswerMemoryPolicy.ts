@@ -19,6 +19,11 @@ export interface DirectAnswerMemoryPlan {
  */
 export function planDirectAnswerMemory(input: DirectAnswerMemoryPlanInput): DirectAnswerMemoryPlan {
   const query = input.resolvedFollowUpGoal ?? input.userGoal;
+  const memoryQuery = buildMemoryQuery({ query });
+  if (memoryQuery.intent === "WEB_RESEARCH") {
+    return { retrieve: false, query };
+  }
+
   if (!input.hasRecentConversation) {
     return { retrieve: true, query };
   }
@@ -26,7 +31,6 @@ export function planDirectAnswerMemory(input: DirectAnswerMemoryPlanInput): Dire
     return { retrieve: true, query };
   }
 
-  const memoryQuery = buildMemoryQuery({ query: input.userGoal });
   return {
     retrieve: memoryQuery.intent === "CONVERSATION",
     query,

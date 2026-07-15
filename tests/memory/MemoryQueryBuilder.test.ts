@@ -24,6 +24,13 @@ describe("buildMemoryQuery", () => {
     expect(query.recencyBias).toBeGreaterThan(0.7);
   });
 
+  it("treats recent match-result questions as volatile web research", () => {
+    const query = buildMemoryQuery({ query: "法国队vs西班牙队，谁赢了" });
+
+    expect(query.intent).toBe("WEB_RESEARCH");
+    expect(query.preferredModes).toEqual(["WEB_ANSWER"]);
+  });
+
   it("detects pasted runtime errors", () => {
     const query = buildMemoryQuery({ query: "npm error enoent Could not read package.json" });
 

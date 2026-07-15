@@ -26,7 +26,7 @@ CLI
 2. 构建仓库上下文和当前 session 的短期记忆。
 3. 先用 `TaskRouter` 判断是直接回答、联网回答，还是进入仓库 AgentLoop。
 4. 直接回答任务只调用文本 LLM，不改文件。
-5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`；如果前几个来源抓取失败，会继续尝试后续候选来源，最后把资料交给文本 LLM 生成完整回答。
+5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`；如果前几个来源抓取失败，会继续尝试后续候选来源。实时问题必须抓到至少两个独立域名的可读正文，生成答案中的 URL 也必须来自本轮工具证据。
 6. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
 7. 根据 decision 执行工具、应用 patch、运行命令或结束。
 8. 命令失败时把日志放回上下文。
@@ -85,7 +85,7 @@ tests                自动化测试
 - `answerInstructions`：约束回答不要混淆赛事、版本、政策或其它领域边界。
 - `needsLiveData`：标记是否属于实时或强时效问题。
 
-Web 支持逻辑位于 `WebAnswerSupport`：负责来源校验、去重、排序、抓取候选、证据上下文和能力纠偏；完整执行编排位于 `WebAnswerTask`。Direct、Review、AgentLoop 和仓库分析也分别拥有独立 Task 模块，公共 Session/LLM 生命周期由 `CliTaskRuntime` 提供。
+Web 支持逻辑位于 `WebAnswerSupport`：负责来源校验、去重、排序、抓取候选、实时问题双来源门槛、引用 URL 白名单和能力纠偏；完整执行编排位于 `WebAnswerTask`。Direct、Review、AgentLoop 和仓库分析也分别拥有独立 Task 模块，公共 Session/LLM 生命周期由 `CliTaskRuntime` 提供。
 
 规划优先由 LLM 根据 session memory 完成；如果规划失败，会回退到本地启发式策略。例如上一轮问“世界杯最新比分”，下一轮问“日本队最近几场的成绩”，搜索 query 会携带“世界杯”范围，避免泛化成日本国家队所有友谊赛、预选赛或其它赛事成绩。
 
@@ -257,7 +257,7 @@ MCP 已从 descriptor bridge 升级为可运行的客户端链路：支持 stdio
 
 当前 `web_search` 默认先尝试 DuckDuckGo HTML 结果页做轻量解析；如果 HTML 结果为空或质量不够，再降级到 DuckDuckGo Lite。CLI 在抓取来源前还会结合域名可信度、query 词项覆盖、官方/发布页特征和域名去重做一轮排序，尽量优先抓取更像官方说明、release notes、比赛结果页的来源，避免前三条都落在同一站点上。后续如果需要更稳定的生产效果，可以继续接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
 
-“你不能联网吗？”这类能力询问不应该触发网页搜索。CLI 会在本地直接回答：当前项目有受控、按需的联网工具，但不是浏览器式常驻联网，也没有手动联网按钮。如果 `WEB_ANSWER` 已经执行了 `web_search` / `fetch_url`，而模型最终回答却否认联网能力或编造“联网开关”，本地会把该回答判为无效，并要求模型基于已有工具证据重写；重写仍失败时，会返回一段本地纠偏说明。
+“你不能联网吗？”这类能力询问不应该触发网页搜索。名称、当前配置的模型标识、五条处理路径和联网能力都由本地产品知识确定性回答，避免模型虚构产品说明。CLI 不要求退出会话或手动切换聊天室，每条输入都会重新路由；“你用搜一下啊”会复用上一轮真实问题。如果 `WEB_ANSWER` 已经执行工具，而模型否认联网能力或引用本轮证据中不存在的 URL，本地会要求重写；重写仍包含伪造链接时直接拦截。
 
 ## 7.5 仓库状态分析
 
@@ -347,7 +347,11 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 - 交互式 `mini-agent` 内部，依赖 Node `readline` 的 completer，为 `/status`、`/repo`、`/review` 这类 slash 命令提供 `Tab` 补全。
 
-`SessionMemory` 会把当前 session 最近的用户消息、助手消息、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆；直接回答模式和联网回答模式也会把这段记忆放进文本回答请求中。因此它能回答“刚才我们聊了什么”这类当前会话追问。
+`SessionMemory` 会把当前 session 最近的用户消息、真实助手回复、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`AGENT_DECISION` 是执行轨迹，不属于聊天回复；新版不再把它重复写成 `ASSISTANT_MESSAGE`，读取旧 session 时也会过滤紧随 decision 的历史助手记录。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆，因此它能回答“刚才我们聊了什么”，同时不会把 `Calling tool ...` 误当成对话内容。
+
+Direct 模式还会重建 role-separated conversation。对于“这个难度如何”这类没有显式命名对象的指代追问，只保留最近一次已完成的 user/assistant exchange，并暂停本轮长期记忆召回和 Skill 自动选择；对于“之前那个 Skill”这类显式历史回看则保留完整受限历史。这样由确定性的上下文选择先消除多个候选指代，再交给模型作答。
+
+“昨天谁赢了”“最新比分”这类易过期事实即使在新 session 中也不会召回长期记忆；进入 `WEB_ANSWER` 后同样不向回答上下文注入历史赛果。实时事实只服从本轮 Web 工具证据，避免旧摘要污染当前答案。
 
 长期记忆由 `LongTermMemoryStore` 负责。它会读取成功的 `TASK_SUMMARY`、`MEMORY_COMPACTION` 和显式保存的 `MANUAL` 记忆，生成 `.mini-agent/memory/index.jsonl`。失败任务默认不进入索引，常见 API key/token/password 会在持久化前脱敏。每条长期记忆包含：
 
@@ -376,7 +380,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 Skill v1 是本地声明式指令，而不是动态脚本或插件。系统发现版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md`，校验名称、描述、触发词、大小和真实路径边界；同名时版本化仓库 Skill 优先。
 
-Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description 和 triggers 确定性匹配，最多注入三个。`ContextBuilder` 和 Direct/Web/Review/RepositoryAnalysis 都会注入匹配 Skill，并明确优先级为“当前用户指令和仓库事实高于 Skill”。Skill 不会注册动态工具，也不能绕过 ToolRegistry、PermissionManager 或 Plan 只读策略。
+Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description 和 triggers 确定性匹配，最多注入三个。`ContextBuilder` 和 Direct/Web/Review/RepositoryAnalysis 会按任务注入匹配 Skill，并明确优先级为“当前用户指令和仓库事实高于 Skill”；Direct 的模糊指代追问会暂停新 Skill 注入，防止旧主题抢占当前指代。Skill 不会注册动态工具，也不能绕过 ToolRegistry、PermissionManager 或 Plan 只读策略。
 
 ## 10.5 CLI 诊断和常用 slash 命令
 

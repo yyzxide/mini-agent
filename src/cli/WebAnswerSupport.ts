@@ -29,20 +29,22 @@ export interface WebEvidenceAssessment {
 }
 
 export function assessWebEvidence(sources: WebAnswerSource[], needsLiveData: boolean): WebEvidenceAssessment {
-  const fetchedSources = sources.filter((source) => source.fetch && source.fetch.text.trim().length > 0).length;
-  const independentDomains = new Set(sources.map((source) => {
+  const fetched = sources.filter((source) => source.fetch && source.fetch.text.trim().length > 0);
+  const fetchedSources = fetched.length;
+  const independentDomains = new Set(fetched.map((source) => {
     try { return new URL(source.fetch?.finalUrl ?? source.url).hostname.replace(/^www\./, ""); } catch { return ""; }
   }).filter(Boolean)).size;
   const candidateCount = sources.filter((source) => source.snippet.trim().length > 0 || source.fetch).length;
-  const requiredFetched = 1;
-  const sufficient = fetchedSources >= requiredFetched;
+  const requiredFetched = needsLiveData ? 2 : 1;
+  const requiredDomains = needsLiveData ? 2 : 1;
+  const sufficient = fetchedSources >= requiredFetched && independentDomains >= requiredDomains;
   const strong = needsLiveData
     ? fetchedSources >= 2 && independentDomains >= 2
     : fetchedSources >= 1 && independentDomains >= 1;
   const reasons: string[] = [];
   if (candidateCount === 0) reasons.push("no usable search result");
   if (fetchedSources < requiredFetched) reasons.push(`only ${fetchedSources} fetched source(s), need ${requiredFetched}`);
-  if (independentDomains === 0) reasons.push("no identifiable source domain");
+  if (independentDomains < requiredDomains) reasons.push(`only ${independentDomains} independent fetched domain(s), need ${requiredDomains}`);
   return {
     sufficient,
     level: sufficient ? (strong ? "STRONG" : "LIMITED") : "INSUFFICIENT",
@@ -95,6 +97,7 @@ export function buildWebAnswerContext(input: {
     ...(input.webPlan.answerInstructions.length > 0
       ? input.webPlan.answerInstructions.map((instruction) => `- ${instruction}`)
       : ["- Only answer facts supported by the gathered sources."]),
+    "- Cite only URLs that appear verbatim as url or fetchedUrl in the web tool results below. Never invent, repair, or guess a source URL.",
     "",
     "Evidence quality:",
     `- evidence level: ${assessment.level}`,
@@ -130,17 +133,54 @@ export function buildWebAnswerContext(input: {
 export function buildWebAnswerRepairContext(input: {
   originalContext: string;
   invalidAnswer: string;
+  unsupportedUrls?: string[];
 }): string {
+  const unsupportedUrls = input.unsupportedUrls ?? [];
   return [
     input.originalContext,
     "",
-    "Previous answer was invalid because it contradicted the local tool execution.",
+    "Previous answer was invalid because it failed local validation.",
     "The CLI has controlled web capability and already attempted web_search/fetch_url for this turn.",
     "Rewrite the answer using the evidence above. Do not mention browser buttons, manual web switches, training-only knowledge, or that the CLI cannot network.",
+    "Use only source URLs shown verbatim as url or fetchedUrl above. Do not invent, repair, autocomplete, or guess links.",
+    ...(unsupportedUrls.length > 0 ? [
+      "The following URLs were not present in the gathered evidence and must not appear in the rewrite:",
+      ...unsupportedUrls.map((url) => `- ${url}`),
+    ] : []),
     "If the gathered sources are insufficient, say the sources are insufficient to verify the requested current data.",
     "",
     "Invalid previous answer:",
     input.invalidAnswer,
+  ].join("\n");
+}
+
+export function findUnsupportedWebAnswerUrls(answer: string, sources: WebAnswerSource[]): string[] {
+  const allowed = new Set(sources.flatMap((source) => [source.url, source.fetch?.finalUrl])
+    .filter((url): url is string => typeof url === "string")
+    .map(normalizeUrlForCitation)
+    .filter((url): url is string => url !== undefined));
+  const cited = answer.match(/https?:\/\/[^\s<>"'`]+/gi) ?? [];
+
+  return [...new Set(cited
+    .map((url) => url.replace(/[)\]}>.,，。;；:：!?！？]+$/g, ""))
+    .filter((url) => {
+      const normalized = normalizeUrlForCitation(url);
+      return normalized !== undefined && !allowed.has(normalized);
+    }))];
+}
+
+export function buildUnsupportedCitationAnswer(sources: WebAnswerSource[]): string {
+  const verifiedSources = sources
+    .filter((source) => source.fetch && source.fetch.text.trim().length > 0)
+    .slice(0, 4);
+  return [
+    "模型生成的答案包含本轮检索证据中不存在的链接，已被本地校验拦截，因此不输出未经可靠引用支撑的结论。",
+    ...(verifiedSources.length > 0 ? [
+      "",
+      "本轮成功抓取的来源：",
+      ...verifiedSources.map((source) => `- ${source.title}: ${source.fetch?.finalUrl ?? source.url}`),
+    ] : []),
+    "请重试本轮检索；若问题涉及实时结果，至少需要两个可抓取的独立来源。",
   ].join("\n");
 }
 
@@ -346,6 +386,20 @@ function normalizeUrlForDedupe(url: string): string {
     return parsed.toString();
   } catch {
     return url;
+  }
+}
+
+function normalizeUrlForCitation(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^(?:utm_|fbclid$|gclid$)/i.test(key)) parsed.searchParams.delete(key);
+    }
+    const pathname = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, "") : parsed.pathname;
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ""}${pathname}${parsed.search}`;
+  } catch {
+    return undefined;
   }
 }
 

@@ -27,4 +27,14 @@ describe("planDirectAnswerMemory", () => {
       query: "葡萄牙是强队吗",
     });
   });
+
+  it("never answers volatile match results from long-term memory", () => {
+    expect(planDirectAnswerMemory({
+      userGoal: "法国队vs西班牙队，谁赢了",
+      hasRecentConversation: false,
+    })).toEqual({
+      retrieve: false,
+      query: "法国队vs西班牙队，谁赢了",
+    });
+  });
 });

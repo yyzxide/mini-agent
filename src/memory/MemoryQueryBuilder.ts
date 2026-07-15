@@ -34,7 +34,7 @@ const QUERY_EXPANSIONS: Array<{ pattern: RegExp; terms: string[] }> = [
   { pattern: /怎么运行|运行|启动|run|start/i, terms: ["运行", "启动", "命令", "script", "package"] },
   { pattern: /报错|错误|失败|error|failed|exception|enoent|cannot find/i, terms: ["错误", "失败", "诊断", "修复", "command_result"] },
   { pattern: /审查|检查.*bug|review|bug/i, terms: ["代码审查", "bug", "finding", "verification"] },
-  { pattern: /联网|最新|今天|实时|新闻|比分|股市|汇率|latest|current/i, terms: ["联网", "搜索", "来源", "web_search", "fetch_url"] },
+  { pattern: /联网|最新|今天|昨天|实时|新闻|比分|赛果|谁赢|比赛结果|\bvs\b|股市|汇率|latest|current|yesterday|who won/i, terms: ["联网", "搜索", "来源", "web_search", "fetch_url"] },
   { pattern: /记得|之前|上次|刚才|历史|memory|session/i, terms: ["记忆", "历史", "session", "summary"] },
 ];
 
@@ -95,11 +95,11 @@ function inferMemoryQueryIntent(query: string): MemoryQueryIntent {
   if (/报错|错误|失败|exception|error|failed|cannot find|enoent|eaddrinuse|econnrefused/.test(query)) {
     return "ERROR_DIAGNOSIS";
   }
-  if (/联网|最新|今天|实时|新闻|比分|股市|行情|汇率|latest|current|news/.test(query)) {
-    return "WEB_RESEARCH";
-  }
   if (/记得|之前|上次|刚才|历史|memory|session|聊了什么/.test(query)) {
     return "CONVERSATION";
+  }
+  if (/联网|最新|今天|昨天|实时|新闻|比分|赛果|谁赢|比赛结果|\bvs\b|股市|行情|汇率|latest|current|yesterday|who won|news/.test(query)) {
+    return "WEB_RESEARCH";
   }
   if (/写|实现|修复|创建|保存|落盘|测试|运行|代码|函数|类|demo|game|算法|中位数|括号|数组|链表|堆|栈|二叉树|排序|查找|file|patch|run/.test(query)) {
     return "CODE_TASK";
@@ -127,7 +127,7 @@ function inferPreferredModes(intent: MemoryQueryIntent, query: string): string[]
 }
 
 function inferRecencyBias(intent: MemoryQueryIntent, query: string): number {
-  if (/刚才|最近|latest|current|今天|上次|previous|last/.test(query)) {
+  if (/刚才|最近|latest|current|今天|昨天|yesterday|上次|previous|last/.test(query)) {
     return 1;
   }
   if (intent === "WEB_RESEARCH" || intent === "ERROR_DIAGNOSIS") {

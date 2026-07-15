@@ -17,11 +17,13 @@ import {
   buildLocalWebCapabilityCorrection,
   assessWebEvidence,
   buildInsufficientEvidenceAnswer,
+  buildUnsupportedCitationAnswer,
   buildWebAnswerContext,
   buildWebAnswerRepairContext,
   containsInvalidWebCapabilityDenial,
   extractFetchedSource,
   extractWebSources,
+  findUnsupportedWebAnswerUrls,
   isWebSearchData,
   mergeWebSources,
   rankWebSources,
@@ -45,14 +47,6 @@ export async function runWebAnswerTask(
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
   const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
-  const longTermMemory = await new MemoryContextService({ repoPath }).build({
-    query: resolvedFollowUpGoal ?? userGoal,
-    sessionId,
-  }).catch(() => "(none)");
-  const answerMemory = appendLongTermMemoryContext(sessionMemory, longTermMemory);
-  const skillContext = await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
-    .catch(() => "(none selected)");
-  const answerContext = appendSkillContext(answerMemory, skillContext);
 
   await recordTaskUserMessage({ sessionId, sessionStore, eventStore, content: userGoal });
 
@@ -63,6 +57,16 @@ export async function runWebAnswerTask(
     client,
   });
   await recordLlmUsageFromClient(sessionStore, sessionId, client, "web_rewrite");
+  const longTermMemory = webPlan.needsLiveData
+    ? "(none)"
+    : await new MemoryContextService({ repoPath }).build({
+      query: webPlan.standaloneQuestion,
+      sessionId,
+    }).catch(() => "(none)");
+  const answerMemory = appendLongTermMemoryContext(sessionMemory, longTermMemory);
+  const skillContext = await new SkillContextService({ repoPath }).build(webPlan.standaloneQuestion)
+    .catch(() => "(none selected)");
+  const answerContext = appendSkillContext(answerMemory, skillContext);
   await logger.info("web", "Web plan prepared", {
     searchQueries: webPlan.searchQueries,
     sourceHints: webPlan.sourceHints,
@@ -110,6 +114,7 @@ export async function runWebAnswerTask(
   const fetchCandidates = selectWebSourcesForFetching(sources, webPlan.needsLiveData ? 5 : 4);
   const targetFetchedSources = webPlan.needsLiveData ? 2 : 1;
   let successfulFetches = 0;
+  const successfulFetchDomains = new Set<string>();
 
   for (const source of fetchCandidates) {
     process.stdout.write("[tool] fetch_url\n");
@@ -125,6 +130,8 @@ export async function runWebAnswerTask(
     if (fetchedSource) {
       source.fetch = fetchedSource;
       successfulFetches += 1;
+      const domain = readWebDomain(fetchedSource.finalUrl);
+      if (domain) successfulFetchDomains.add(domain);
     } else if (fetchResult.error) {
       source.fetchError = fetchResult.error.message;
     }
@@ -135,23 +142,26 @@ export async function runWebAnswerTask(
       error: fetchResult.error?.message ?? null,
     }, sessionId).catch(() => undefined);
 
-    if (successfulFetches >= targetFetchedSources) {
+    const reachedFetchTarget = successfulFetches >= targetFetchedSources;
+    const reachedDomainTarget = !webPlan.needsLiveData || successfulFetchDomains.size >= 2;
+    if (reachedFetchTarget && reachedDomainTarget) {
       break;
     }
   }
 
   const evidence = assessWebEvidence(sources, webPlan.needsLiveData);
+  const webAnswerContext = buildWebAnswerContext({
+    userGoal,
+    webPlan,
+    sessionMemory: answerContext,
+    searchQueries,
+    searchResults,
+    sources,
+  });
   const result = evidence.sufficient
     ? await client.completeText({
       userGoal: webPlan.standaloneQuestion,
-      context: buildWebAnswerContext({
-        userGoal,
-        webPlan,
-        sessionMemory: answerContext,
-        searchQueries,
-        searchResults,
-        sources,
-      }),
+      context: webAnswerContext,
       mode: "web",
     })
     : { success: true, text: buildInsufficientEvidenceAnswer({ question: webPlan.standaloneQuestion, assessment: evidence }) };
@@ -187,39 +197,43 @@ export async function runWebAnswerTask(
   }
 
   let answerText = result.text;
-  if (containsInvalidWebCapabilityDenial(answerText)) {
-    await logger.warn("web", "Web answer contradicted executed web tools; requesting repair", {
+  const capabilityDenial = containsInvalidWebCapabilityDenial(answerText);
+  const unsupportedUrls = findUnsupportedWebAnswerUrls(answerText, sources);
+  if (capabilityDenial || unsupportedUrls.length > 0) {
+    await logger.warn("web", "Web answer failed local validation; requesting repair", {
       searchQueryCount: searchQueries.length,
       sourceCount: sources.length,
       fetchedSourceCount: successfulFetches,
+      capabilityDenial,
+      unsupportedUrls,
       answerPreview: answerText.slice(0, 500),
     }, sessionId).catch(() => undefined);
 
     const repaired = await client.completeText({
       userGoal: webPlan.standaloneQuestion,
       context: buildWebAnswerRepairContext({
-        originalContext: buildWebAnswerContext({
-          userGoal,
-          webPlan,
-          sessionMemory: answerContext,
-          searchQueries,
-          searchResults,
-          sources,
-        }),
+        originalContext: webAnswerContext,
         invalidAnswer: answerText,
+        ...(unsupportedUrls.length > 0 ? { unsupportedUrls } : {}),
       }),
       mode: "web",
     });
     await recordLlmUsageFromClient(sessionStore, sessionId, client, "web_repair");
 
-    answerText = repaired.success && repaired.text && !containsInvalidWebCapabilityDenial(repaired.text)
-      ? repaired.text
-      : buildLocalWebCapabilityCorrection({
+    const repairedText = repaired.success ? repaired.text : undefined;
+    const repairedUnsupportedUrls = repairedText ? findUnsupportedWebAnswerUrls(repairedText, sources) : [];
+    if (repairedText && !containsInvalidWebCapabilityDenial(repairedText) && repairedUnsupportedUrls.length === 0) {
+      answerText = repairedText;
+    } else if (unsupportedUrls.length > 0 || repairedUnsupportedUrls.length > 0) {
+      answerText = buildUnsupportedCitationAnswer(sources);
+    } else {
+      answerText = buildLocalWebCapabilityCorrection({
         searchQueryCount: searchQueries.length,
         sourceCount: sources.length,
         fetchedSourceCount: successfulFetches,
         sources,
       });
+    }
   }
 
   process.stdout.write(`[answer]\n${answerText}\n`);
@@ -271,4 +285,12 @@ export async function runWebAnswerTask(
         .filter((provider): provider is string => typeof provider === "string"),
     }),
   };
+}
+
+function readWebDomain(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
 }

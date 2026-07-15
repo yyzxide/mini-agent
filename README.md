@@ -19,7 +19,7 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 ## What It Does
 
 - Starts an interactive local coding-agent session with `mini-agent`.
-- Keeps one active session in interactive mode, so follow-up prompts can use recent conversation history.
+- Keeps one active session in interactive mode, and resolves implicit demonstratives against the latest completed exchange instead of unrelated older topics.
 - Runs one-shot tasks with `mini-agent run "..."`.
 - Routes normal questions and explicit snippet-only requests to direct-answer mode before using the repository-editing agent loop.
 - Routes current external-information questions to web-answer mode instead of treating them as code tasks.
@@ -33,7 +33,7 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Maintains governed long-term memory with confidence, TTL, same-topic supersession, secret redaction, and pluggable local or OpenAI-compatible embeddings.
 - Provides repository-local document RAG for Markdown/TXT with safe ingestion, line-aware chunking, incremental source replacement, hybrid retrieval, metadata filters, grounded citations, insufficient-evidence refusal, and offline evaluation metrics.
 - Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory clear --yes`, `/remember`, and `/forget`; failed task summaries are excluded and common secrets are redacted.
-- Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into every answer/task mode without allowing skills to bypass tool permissions.
+- Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into answer/task modes without allowing skills to bypass tool permissions. Ambiguous direct-answer follow-ups suppress fresh Skill selection so an older workflow cannot become the referent.
 - Provides a hard read-only plan mode through `mini-agent plan`, `/plan`, `/plan off`, and `/execute`; plan mode exposes only read-only tools and blocks patches and commands at runtime.
 - Connects configured MCP servers over stdio or Streamable HTTP, discovers remote tools, namespaces them, maps permissions, forwards `tools/call`, and closes server lifecycles.
 - Provides an Agent Harness suite with repeatable scenarios, step/LLM/tool metrics, tool-choice accuracy, and failure classification.
@@ -186,7 +186,7 @@ mini-agent run "write a C++ two-sum example" --agent-loop
 `mini-agent` separates user input into four modes:
 
 - `DIRECT_ANSWER`: normal chat, explanations, and explicit snippet-only requests. Output uses `[answer]`.
-- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Output uses `[answer]`.
+- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Live/current claims require readable pages from at least two independent domains, and answer URLs must come from this turn's gathered sources. Output uses `[answer]`.
 - `CODE_REVIEW`: file-focused bug inspection and code review. The CLI reads the target file, automatically loads a few related files referenced by local imports/includes, asks the model for structured findings, locally filters out findings whose quoted code does not match the primary file, then runs a second-pass verification step that can downgrade or drop overreaching findings. Output uses `[review]`.
 - `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
 - `PLAN`: a persisted read-only operating mode for repository planning. Only read-only tools are exposed; patches, commands, and non-read-only tool calls are blocked again at execution time. Use `mini-agent plan`, `/plan`, `/plan off`, and `/execute`.
@@ -213,9 +213,9 @@ In interactive mode, web-answer follow-up questions reuse the active session con
 
 For example, after asking about World Cup scores, a follow-up like "Japan's recent results" is searched as a World Cup-scoped question instead of a broad national-team query.
 
-Very short follow-up prompts such as `葡萄牙呢`, `那这个呢`, or `and Portugal?` also reuse the active session. When the previous question makes the omitted predicate clear, the CLI rewrites the follow-up into a fuller question before routing and answering.
+Very short follow-up prompts such as `葡萄牙呢`, `那这个呢`, or `and Portugal?` also reuse the active session. When the previous question makes the omitted predicate clear, the CLI rewrites the follow-up into a fuller question before routing and answering. Referential prompts such as `这个难度如何` are given only the latest completed exchange; older topics, Agent decision traces, long-term retrieval, and fresh Skill selection are excluded from that turn.
 
-Time-sensitive popularity questions such as `YouTube现在最热门的视频是什么` route directly to web-answer mode. If the assistant previously suggested web research, confirmations such as `嗯切换吧` or `联网查吧` also enter that mode and reuse the previous question instead of searching for the confirmation phrase itself.
+Time-sensitive popularity and match-result questions such as `YouTube现在最热门的视频是什么` or `法国队vs西班牙队，谁赢了` route directly to web-answer mode. Natural retries such as `你用搜一下啊`, `嗯切换吧`, or `联网查吧` also enter that mode and reuse the previous question instead of searching for the retry phrase itself.
 
 Short repository follow-ups can also reuse the active session. For example, if the previous turn returned a code snippet and the next turn says `写入一个文件里面`, `写进去`, or `保存一下`, the CLI rewrites that into an explicit repository task, carries over the latest code block, and lets `AGENT_LOOP` create the file instead of asking the user to repeat the code. Short coding follow-ups after an edit task, such as `数据流的中位数呢`, keep the repository-editing mode instead of falling back to chat-only output.
 
@@ -247,7 +247,7 @@ For a quick pre-demo gate:
 npm run verify:regression
 ```
 
-Current normal-environment gate: 36 Vitest files and 262 tests, along with TypeScript type checking and unused-symbol checks.
+Current normal-environment gate: 39 Vitest files and 288 tests, along with TypeScript type checking and unused-symbol checks.
 
 Interactive slash commands:
 
@@ -375,7 +375,7 @@ The current MVP uses local guardrails:
 - `search_code` limits result count.
 - `fetch_url` requires review permission, blocks localhost/private-network targets, validates DNS and each redirect hop, limits timeout/download size, and returns only readable text-like content.
 - `web_search` returns bounded public result titles, URLs, and snippets; it currently tries DuckDuckGo HTML first and falls back to DuckDuckGo Lite when needed. The CLI then ranks sources by domain trust hints, query overlap, and page type before deciding what to fetch, but it still does not grant arbitrary browser control.
-- If a model-generated web answer contradicts the executed tool trace by claiming the CLI has no web capability or needs a manual web switch, the CLI treats that as invalid and asks for a grounded rewrite. Capability questions such as "你不能联网吗" are answered locally without calling the model.
+- If a model-generated web answer contradicts the executed tool trace or cites a URL absent from the gathered evidence, the CLI treats it as invalid and asks for a grounded rewrite. A second invalid citation is rejected locally. Product questions about its name, configured model identifier, processing paths, or web capability are answered from deterministic local product knowledge instead of model improvisation.
 - Patch application runs `git apply --check` before `git apply`.
 - Commands execute as structured `executable + args` processes with shell disabled by default, plus timeout and output truncation.
 - Explicit shell or shell-like commands require additional approval; dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.

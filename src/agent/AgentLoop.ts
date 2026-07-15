@@ -143,7 +143,7 @@ export class AgentLoop {
 
       state.addDecision(decision);
       await this.recordDecision(state.sessionId, decision);
-      await this.recordAssistantMessage(state, decisionToMessage(decision));
+      state.addAssistantMessage(decisionToMessage(decision));
 
       const decisionKey = stableDecisionKey(decision);
       if (decisionKey === previousDecisionKey) {
@@ -589,18 +589,6 @@ export class AgentLoop {
       payload: {
         decision: toJsonValue(decision),
       },
-    });
-  }
-
-  private async recordAssistantMessage(state: AgentState, content: string): Promise<void> {
-    state.addAssistantMessage(content);
-    await this.sessionStore.appendRecord(state.sessionId, {
-      type: "ASSISTANT_MESSAGE",
-      payload: { content },
-    });
-    await this.eventStore.appendEvent(state.sessionId, {
-      type: "ASSISTANT_MESSAGE",
-      payload: { content },
     });
   }
 

@@ -1326,7 +1326,7 @@ describe("mini-agent CLI", () => {
       const urlText = String(url);
 
       if (urlText.includes("duckduckgo.com/html")) {
-        return new Response(fakeDuckDuckGoHtml(), {
+        return new Response(fakeDuckDuckGoHtml("https://updates.example/roco-news"), {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -1334,6 +1334,13 @@ describe("mini-agent CLI", () => {
 
       if (urlText === "https://example.com/roco-news") {
         return new Response("<html><body><main>2026年6月19日更新，新增宠物夜回犀牛和天擎犀牛。</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://updates.example/roco-news") {
+        return new Response("<html><body><main>更新复核：2026年6月19日新增宠物夜回犀牛和天擎犀牛。</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -1414,6 +1421,7 @@ describe("mini-agent CLI", () => {
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/2\">Result Two</a><div class=\"result__snippet\">Second source</div></div>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/3\">Result Three</a><div class=\"result__snippet\">Third source</div></div>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/4\">Result Four</a><div class=\"result__snippet\">Fourth source works</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://backup.example/latest\">Backup Result</a><div class=\"result__snippet\">Independent backup source works</div></div>",
           "</body></html>",
         ].join(""), {
           status: 200,
@@ -1431,6 +1439,13 @@ describe("mini-agent CLI", () => {
 
       if (urlText === "https://example.com/4") {
         return new Response("<html><body><main>Fourth source confirmed the latest note.</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://backup.example/latest") {
+        return new Response("<html><body><main>Independent source also confirmed the latest note.</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -1484,8 +1499,9 @@ describe("mini-agent CLI", () => {
 
       expect(output).toContain("[answer]");
       expect(fetchMock.mock.calls.some((call) => String(call[0]) === "https://example.com/4")).toBe(true);
-      expect(answerBodies[0]?.messages[1]?.content).toContain("fetched sources: 1");
+      expect(answerBodies[0]?.messages[1]?.content).toContain("fetched sources: 2");
       expect(answerBodies[0]?.messages[1]?.content).toContain("Fourth source confirmed");
+      expect(answerBodies[0]?.messages[1]?.content).toContain("Independent source also confirmed");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1591,7 +1607,7 @@ describe("mini-agent CLI", () => {
       if (urlText.includes("duckduckgo.com/html")) {
         const parsed = new URL(urlText);
         duckQueries.push(parsed.searchParams.get("q") ?? "");
-        return new Response(fakeDuckDuckGoHtml(), {
+        return new Response(fakeDuckDuckGoHtml("https://scores.example/japan"), {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -1599,6 +1615,13 @@ describe("mini-agent CLI", () => {
 
       if (urlText === "https://example.com/roco-news") {
         return new Response("<html><body><main>日本队世界杯小组赛最近成绩：日本 2-1 示例队。</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://scores.example/japan") {
+        return new Response("<html><body><main>独立赛果来源复核：日本队世界杯小组赛日本 2-1 示例队。</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -1985,12 +2008,14 @@ describe("mini-agent CLI", () => {
         messages: Array<{ role: string; content: string }>;
       };
       expect(body.messages.map((message) => message.role)).toEqual([
-        "system", "user", "assistant", "user", "assistant", "user",
+        "system", "user", "assistant", "user",
       ]);
-      expect(body.messages[3]?.content).toBe("写个五子棋小游戏吧");
-      expect(body.messages[4]?.content).toBe("五子棋已创建为 gobang.html。");
-      expect(body.messages[5]?.content).toContain("你觉得这个有难度吗");
-      expect(body.messages[5]?.content).not.toContain("Historical memory evidence");
+      expect(body.messages[1]?.content).toBe("写个五子棋小游戏吧");
+      expect(body.messages[2]?.content).toBe("五子棋已创建为 gobang.html。");
+      expect(body.messages[3]?.content).toContain("你觉得这个有难度吗");
+      expect(body.messages[3]?.content).toContain("immediately preceding exchange");
+      expect(body.messages[3]?.content).not.toContain("Historical memory evidence");
+      expect(JSON.stringify(body.messages)).not.toContain("创建 Skill");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -2011,7 +2036,7 @@ describe("mini-agent CLI", () => {
       const urlText = String(url);
 
       if (urlText.includes("duckduckgo.com/html")) {
-        return new Response(fakeDuckDuckGoHtml(), {
+        return new Response(fakeDuckDuckGoHtml("https://updates.example/latest"), {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -2019,6 +2044,13 @@ describe("mini-agent CLI", () => {
 
       if (urlText === "https://example.com/roco-news") {
         return new Response("<html><body><main>最新官方版本说明。</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://updates.example/latest") {
+        return new Response("<html><body><main>第二个独立来源确认最新官方版本说明。</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -2304,13 +2336,19 @@ function stubDecisionResponses(responses: string[]) {
   }), { status: 200 }));
 }
 
-function fakeDuckDuckGoHtml(): string {
+function fakeDuckDuckGoHtml(additionalUrl?: string): string {
   return [
     "<html><body>",
     "<div class=\"result\">",
     "<a class=\"result__a\" href=\"https://example.com/roco-news\">洛克王国更新公告</a>",
     "<div class=\"result__snippet\">洛克王国 2026 年 6 月 19 日更新内容。</div>",
     "</div>",
+    ...(additionalUrl ? [
+      "<div class=\"result\">",
+      `<a class=\"result__a\" href=\"${additionalUrl}\">独立来源复核</a>`,
+      "<div class=\"result__snippet\">第二个独立来源提供相同事实。</div>",
+      "</div>",
+    ] : []),
     "</body></html>",
   ].join("");
 }

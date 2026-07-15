@@ -5,7 +5,8 @@ import { resolveFollowUpQuestion } from "../web/WebQuestionPlanner.js";
 import { appendLongTermMemoryContext, MemoryContextService } from "../memory/MemoryContextService.js";
 import { planDirectAnswerMemory } from "../memory/DirectAnswerMemoryPolicy.js";
 import { appendSkillContext, SkillContextService } from "../skills/SkillContextService.js";
-import { buildConversationHistory } from "../session/ConversationHistory.js";
+import { buildConversationHistory, focusConversationHistory } from "../session/ConversationHistory.js";
+import { loadAgentConfig, resolveLlmConfig } from "../config/AgentConfig.js";
 import {
   createOpenAICompatibleClient,
   openTaskSession,
@@ -23,7 +24,9 @@ export async function runDirectAnswerTask(
   const { sessionId, sessionStore, eventStore } = await openTaskSession({ repoPath, userGoal, options });
 
   const recordsBeforeCurrent = await sessionStore.readRecords(sessionId).catch(() => []);
-  const conversation = buildConversationHistory(recordsBeforeCurrent);
+  const conversationHistory = buildConversationHistory(recordsBeforeCurrent);
+  const conversationFocus = focusConversationHistory(conversationHistory, userGoal);
+  const conversation = conversationFocus.messages;
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
   const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
@@ -38,8 +41,10 @@ export async function runDirectAnswerTask(
       excludeSessionId: sessionId,
     }).catch(() => "(none)")
     : "(none)";
-  const skillContext = await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
-    .catch(() => "(none selected)");
+  const skillContext = conversationFocus.focusedOnLatestTurn
+    ? "(none selected)"
+    : await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
+      .catch(() => "(none selected)");
 
   await recordTaskUserMessage({ sessionId, sessionStore, eventStore, content: userGoal });
 
@@ -55,7 +60,12 @@ export async function runDirectAnswerTask(
     );
   }
 
-  const localReply = resolveLocalDirectReply(repoPath, userGoal);
+  const configuredModel = options.model ?? await loadAgentConfig(repoPath)
+    .then((config) => resolveLlmConfig(config).openai.model)
+    .catch(() => undefined);
+  const localReply = resolveLocalDirectReply(repoPath, userGoal, {
+    ...(configuredModel ? { configuredModel } : {}),
+  });
   if (localReply) {
     return await finalizeDirectAnswerSuccess(
       sessionStore,
@@ -67,9 +77,14 @@ export async function runDirectAnswerTask(
   }
 
   const client = await createOpenAICompatibleClient(repoPath, options);
-  const directContextBase = resolvedFollowUpGoal && resolvedFollowUpGoal !== userGoal
-    ? `Resolved current request: ${resolvedFollowUpGoal}`
-    : "";
+  const directContextBase = [
+    resolvedFollowUpGoal && resolvedFollowUpGoal !== userGoal
+      ? `Resolved current request: ${resolvedFollowUpGoal}`
+      : "",
+    conversationFocus.focusedOnLatestTurn
+      ? "Referent rule: resolve demonstratives in the current request only against the immediately preceding exchange shown above. Do not switch to an older topic."
+      : "",
+  ].filter(Boolean).join("\n");
   const directContext = appendSkillContext(
     appendLongTermMemoryContext(directContextBase, longTermMemory),
     skillContext,

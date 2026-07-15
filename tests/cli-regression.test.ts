@@ -89,8 +89,8 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).toContain("运行目录问题");
     expect(output).toContain(wrongDirectory);
     expect(output).toContain(tempRoot);
-    expect(output).toContain(`cd ${tempRoot}`);
-    expect(output).toContain(`npm --prefix ${tempRoot} run guess`);
+    expect(output).toContain(`cd '${tempRoot}'`);
+    expect(output).toContain(`npm --prefix '${tempRoot}' run guess`);
   });
 
   it("repairs web answers that contradict already executed web tools", async () => {
@@ -108,6 +108,8 @@ describe("mini-agent CLI regression scenarios", () => {
           "<html><body>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/market-close\">A股收盘：三大指数涨跌情况</a>",
           "<div class=\"result__snippet\">上证指数、深证成指、创业板指收盘行情。</div></div>",
+          "<div class=\"result\"><a class=\"result__a\" href=\"https://finance.example/close-report\">市场收盘复核</a>",
+          "<div class=\"result__snippet\">主要指数收盘数据复核。</div></div>",
           "</body></html>",
         ].join(""), {
           status: 200,
@@ -117,6 +119,13 @@ describe("mini-agent CLI regression scenarios", () => {
 
       if (urlText === "https://example.com/market-close") {
         return new Response("<html><body><main>收盘数据显示，上证指数上涨0.30%，深证成指下跌0.10%，创业板指上涨0.20%。</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (urlText === "https://finance.example/close-report") {
+        return new Response("<html><body><main>市场收盘复核：上证指数上涨0.30%，深证成指下跌0.10%，创业板指上涨0.20%。</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });

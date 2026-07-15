@@ -286,6 +286,7 @@ const CASUAL_DIRECT_REPLY_PHRASES = [
 const WEB_RESEARCH_KEYWORDS = [
   "联网",
   "网上",
+  "搜一下",
   "搜索一下",
   "查一下",
   "查找",
@@ -314,6 +315,7 @@ const WEB_RESEARCH_KEYWORDS = [
   "世界杯",
   "大师赛",
   "比赛结果",
+  "谁赢",
   "股市",
   "股票",
   "a股",
@@ -372,6 +374,8 @@ const WEB_SWITCH_CONFIRMATION_PHRASES = [
   "那就查吧",
   "那就搜吧",
   "用网页查吧",
+  "你用搜一下",
+  "用搜一下",
   "use web",
   "switch to web",
   "search online then",
@@ -653,7 +657,7 @@ function looksLikeShortPlainChat(normalized: string, userGoal: string): boolean 
     return true;
   }
 
-  return tokens.length <= 3 && trimmed.length <= 32;
+  return tokens.length <= 4 && trimmed.length <= 32;
 }
 
 function looksLikeStandaloneCodeGenerationTask(normalized: string, userGoal: string): boolean {

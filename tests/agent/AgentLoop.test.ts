@@ -65,7 +65,6 @@ describe("AgentLoop", () => {
     const records = await sessionStore.readRecords(result.sessionId);
     expect(recordTypes(records)).toEqual(expect.arrayContaining([
       "USER_MESSAGE",
-      "ASSISTANT_MESSAGE",
       "TOOL_CALL",
       "TOOL_RESULT",
       "COMMAND_RESULT",
@@ -73,6 +72,7 @@ describe("AgentLoop", () => {
       "DIFF_SUMMARY",
       "TASK_SUMMARY",
     ]));
+    expect(recordTypes(records)).not.toContain("ASSISTANT_MESSAGE");
     expect(toolNames(records)).toEqual(expect.arrayContaining(["search_code", "read_file", "apply_patch", "git_diff"]));
 
     const events = await eventStore.readEvents(result.sessionId);

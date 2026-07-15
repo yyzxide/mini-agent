@@ -59,6 +59,20 @@ describe("SessionMemory", () => {
     expect(memory.match(/你好，有什么我可以帮你的？/g)).toHaveLength(1);
     expect(memory).not.toContain("[summary]");
   });
+
+  it("drops legacy assistant messages generated from agent decisions", () => {
+    const records: SessionRecord[] = [
+      record("1", "USER_MESSAGE", { content: "创建五子棋" }),
+      record("2", "AGENT_DECISION", { type: "TOOL_CALL", toolName: "write_file" }),
+      record("3", "ASSISTANT_MESSAGE", { content: "Calling tool write_file" }),
+      record("4", "TASK_SUMMARY", { summary: "五子棋已创建。", success: true }),
+    ];
+
+    const memory = buildSessionMemory(records);
+
+    expect(memory).not.toContain("Calling tool write_file");
+    expect(memory).toContain("[summary] 五子棋已创建。");
+  });
 });
 
 function record(id: string, type: SessionRecordType, payload: JsonObject): SessionRecord {
