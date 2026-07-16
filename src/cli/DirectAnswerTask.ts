@@ -70,6 +70,8 @@ export async function runDirectAnswerTask(
     ? await new MemoryContextService({ repoPath }).build({
       query: memoryPlan.query,
       excludeSessionId: sessionId,
+      allowedKinds: memoryPlan.allowedKinds,
+      allowedScopes: memoryPlan.allowedScopes,
     }).catch(() => "(none)")
     : "(none)";
   const skillContext = conversationFocus.focusedOnLatestTurn

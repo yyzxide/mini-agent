@@ -73,6 +73,21 @@ describe("SessionMemory", () => {
     expect(memory).not.toContain("Calling tool write_file");
     expect(memory).toContain("[summary] 五子棋已创建。");
   });
+
+  it("preserves the newest user decision when a long session is compacted", () => {
+    const records: SessionRecord[] = [
+      record("old-user", "USER_MESSAGE", { content: `早期背景 ${"x".repeat(1_200)}` }),
+      record("old-answer", "ASSISTANT_MESSAGE", { content: `旧回答 ${"y".repeat(1_200)}` }),
+      record("latest-user", "USER_MESSAGE", { content: "最新决定：保持公开 API 不变" }),
+      record("latest-answer", "ASSISTANT_MESSAGE", { content: "收到，将保留公开 API。" }),
+    ];
+
+    const memory = buildSessionMemory(records, { maxRecords: 10, maxChars: 600 });
+
+    expect(memory).toContain("[structured session compaction]");
+    expect(memory).toContain("最新决定：保持公开 API 不变");
+    expect(memory).toContain("收到，将保留公开 API");
+  });
 });
 
 function record(id: string, type: SessionRecordType, payload: JsonObject): SessionRecord {

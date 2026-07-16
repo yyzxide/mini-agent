@@ -1,268 +1,443 @@
-import { GitManager } from "../git/GitManager.js";
-import { isTestCommand } from "../command/CommandClassification.js";
+import { looksLikeDocumentCreationTask } from "../agent/ArtifactIntent.js";
 import type { AgentState } from "../agent/AgentState.js";
+import { buildTaskCompletionContract, formatTaskCompletionContract } from "../agent/TaskCompletionContract.js";
 import { looksLikeIndexedKnowledgeRequest } from "../agent/TaskRouter.js";
+import { isTestCommand } from "../command/CommandClassification.js";
+import { GitManager } from "../git/GitManager.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
+import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
-import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
-import { RepoScanner } from "./RepoScanner.js";
-import { truncateText } from "../utils/fs.js";
-import { formatRuntimeContext } from "./RuntimeContext.js";
 import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
+import { ContextPlanner } from "./ContextPlanner.js";
+import { formatRecentEvidence } from "./ContextEvidence.js";
+import type { ContextSectionCandidate, ContextTrace, TaskPhase, WorkingSet } from "./ContextTypes.js";
+import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
+import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
+import { RepoScanner } from "./RepoScanner.js";
+import { formatRuntimeContext } from "./RuntimeContext.js";
+import { buildWorkingSet, formatWorkingSet } from "./WorkingSet.js";
+import { formatSubAgentResults } from "../agent/SubAgentTypes.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
   maxChars?: number;
-  budgets?: Partial<ContextSectionBudgets>;
-}
-
-export interface ContextSectionBudgets {
-  task: number;
-  memory: number;
-  longTermMemory: number;
-  skills: number;
-  repoState: number;
-  tools: number;
-  runtime: number;
-  git: number;
-  repositoryStructure: number;
-  projectDocs: number;
-  filePlacement: number;
-  recentResults: number;
-  diagnostics: number;
-  diff: number;
+  maxTokens?: number;
+  onTrace?: (trace: ContextTrace) => void | Promise<void>;
 }
 
 export class ContextBuilder {
   private readonly repoPath: string;
-  private readonly maxChars: number;
-  private readonly budgets: ContextSectionBudgets;
+  private readonly planner: ContextPlanner;
+  private readonly onTrace: ((trace: ContextTrace) => void | Promise<void>) | undefined;
+  private lastTrace: ContextTrace | undefined;
 
   constructor(options: ContextBuilderOptions) {
     this.repoPath = options.repoPath;
-    this.maxChars = options.maxChars ?? 30_000;
-    this.budgets = {
-      ...createDefaultBudgets(this.maxChars),
-      ...options.budgets,
-    };
+    this.planner = new ContextPlanner({
+      ...(options.maxChars !== undefined ? { maxChars: options.maxChars } : {}),
+      ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+    });
+    this.onTrace = options.onTrace;
   }
 
-  async build(state: AgentState, availableTools: ToolSpec[] = []): Promise<string> {
+  getLastTrace(): ContextTrace | undefined {
+    return this.lastTrace ? structuredClone(this.lastTrace) : undefined;
+  }
+
+  async build(state: AgentState, _availableTools: ToolSpec[] = []): Promise<string> {
+    const workingSet = buildWorkingSet(state);
+    const phase = workingSet.phase;
+    const goal = state.userGoal;
+    const needsTree = shouldIncludeTree(goal, phase, workingSet);
+    const needsReadme = shouldIncludeReadme(goal, phase);
+    const needsBuildFiles = shouldIncludeBuildFiles(goal, phase);
+    const needsFilePlacement = shouldIncludeFilePlacement(goal, phase, state);
+    const needsRepoState = phase === "DISCOVERY" || needsFilePlacement;
+    const knowledgeRequest = looksLikeIndexedKnowledgeRequest(goal);
+    const memoryPlan = planMemoryRead({
+      query: goal,
+      mode: "AGENT_LOOP",
+      indexedKnowledgeRequest: knowledgeRequest,
+    });
+    const needsLongTermMemory = memoryPlan.retrieve;
+
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
-    const repoStateAnalyzer = new RepoStateAnalyzer({ repoPath: this.repoPath });
-    const filePlacementAdvisor = new FilePlacementAdvisor({ repoPath: this.repoPath });
-
     const sessionStore = new SessionStore({ repoPath: this.repoPath });
     const memoryContextService = new MemoryContextService({ repoPath: this.repoPath });
     const skillStore = new SkillStore({ repoPath: this.repoPath });
 
     const [
       repoStateDetails,
-      isGitRepository,
       tree,
       readme,
       buildFiles,
+      isGitRepository,
       status,
       diff,
       sessionMemory,
       longTermMemory,
       selectedSkills,
     ] = await Promise.all([
-      repoStateAnalyzer.analyze().catch((error: unknown) => ({ error: errorToText(error) })),
-      scanner.isGitRepository().catch((error: unknown) => `error: ${errorToText(error)}`),
-      scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
-      scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
-      scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`),
+      needsRepoState
+        ? new RepoStateAnalyzer({ repoPath: this.repoPath }).analyze().catch((error: unknown) => ({ error: errorToText(error) }))
+        : Promise.resolve(undefined),
+      needsTree
+        ? scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
+        : Promise.resolve(""),
+      needsReadme
+        ? scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
+        : Promise.resolve(""),
+      needsBuildFiles
+        ? scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
+        : Promise.resolve(""),
+      scanner.isGitRepository().catch(() => false),
       git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`),
-      git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
-      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 80, maxChars: 12_000 })
+      git.getDiff({ maxChars: 10_000 }).then((result) => result.diff)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
-      looksLikeIndexedKnowledgeRequest(state.userGoal)
-        ? Promise.resolve("(disabled for indexed knowledge-base requests)")
-        : memoryContextService.build({ query: state.userGoal, limit: 5, sessionId: state.sessionId })
-          .catch((error: unknown) => `error: ${errorToText(error)}`),
-      skillStore.select(state.userGoal, 3)
-        .then(formatSkillsForContext)
+      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 60, maxAuxiliaryRecords: 8, maxChars: 10_000 })
+        .catch(() => "(none)"),
+      needsLongTermMemory
+          ? memoryContextService.build({
+            query: memoryPlan.query,
+            limit: 5,
+            ...(memoryPlan.excludeActiveSession ? { excludeSessionId: state.sessionId } : {}),
+            allowedKinds: memoryPlan.allowedKinds,
+            allowedScopes: memoryPlan.allowedScopes,
+          })
+            .catch((error: unknown) => `error: ${errorToText(error)}`)
+          : Promise.resolve(knowledgeRequest
+            ? "(disabled for indexed knowledge-base requests)"
+            : "(not requested for the current task)"),
+      skillStore.select(goal, 3).then(formatSkillsForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
-    const repoState = hasErrorRecord(repoStateDetails)
-      ? `error: ${repoStateDetails.error}`
-      : formatRepoState(repoStateDetails);
-    const filePlacement = hasErrorRecord(repoStateDetails)
-      ? "error: repository state unavailable for file-placement advice"
-      : await filePlacementAdvisor.advise(state.userGoal, repoStateDetails)
-        .then(formatFilePlacementAdvice)
-        .catch((error: unknown) => `error: ${errorToText(error)}`);
 
-    const snapshot = state.toSnapshot();
-    const sections: ContextSection[] = [
-      {
-        title: "Task and step",
-        budget: this.budgets.task,
-        required: true,
-        content: [
-          `User task:\n${state.userGoal}`,
-          `Agent step:\n${snapshot.step} / ${snapshot.maxSteps}`,
-        ].join("\n\n"),
-      },
-      { title: "Conversation memory", budget: this.budgets.memory, content: sessionMemory },
-      {
-        title: "Long-term retrieved memory",
-        budget: this.budgets.longTermMemory,
-        content: [
-          "Relevant memories retrieved from previous local sessions. Treat them as hints; prefer current files, current tool output, and current user instructions when they conflict.",
-          longTermMemory,
-        ].join("\n\n"),
-      },
-      {
-        title: "Selected skills",
-        budget: this.budgets.skills,
-        content: selectedSkills,
-      },
-      { title: "Runtime context", budget: this.budgets.runtime, content: formatRuntimeContext() },
-      { title: "Repository state summary", budget: this.budgets.repoState, content: repoState },
-      { title: "Available tools", budget: this.budgets.tools, content: JSON.stringify(availableTools, null, 2) },
-      {
-        title: "Git state",
-        budget: this.budgets.git,
-        content: [
-          `Git repository:\n${String(isGitRepository)}`,
-          `Git status:\n${status || "(clean or unavailable)"}`,
-        ].join("\n\n"),
-      },
-      { title: "Tree summary", budget: this.budgets.repositoryStructure, content: tree || "(empty)" },
-      {
-        title: "Project docs and build files",
-        budget: this.budgets.projectDocs,
-        content: [
-          `README summary:\n${readme}`,
-          `Build files:\n${buildFiles}`,
-        ].join("\n\n"),
-      },
-      {
-        title: "New file placement guidance",
-        budget: this.budgets.filePlacement,
-        content: filePlacement,
-      },
-      {
-        title: "Recent decisions and results",
-        budget: this.budgets.recentResults,
-        content: [
-          `Recent decisions:\n${JSON.stringify(snapshot.decisions.slice(-6), null, 2)}`,
-          `Recent tool results:\n${JSON.stringify(snapshot.toolResults.slice(-5), null, 2)}`,
-          `Recent command results:\n${JSON.stringify(snapshot.commandResults.slice(-3), null, 2)}`,
-          `Recent patch results:\n${JSON.stringify(snapshot.patchResults.slice(-3), null, 2)}`,
-        ].join("\n\n"),
-      },
-      {
-        title: "Diagnostics",
-        budget: this.budgets.diagnostics,
-        required: true,
-        content: [
-          `Last error:\n${snapshot.lastError ?? "(none)"}`,
-          `Patch failure summary:\n${summarizePatchFailures(state)}`,
-          `Test failure summary:\n${summarizeTestFailures(state)}`,
-        ].join("\n\n"),
-      },
-      { title: "Current diff", budget: this.budgets.diff, required: true, content: diff || "(none)" },
-    ];
+    const repoState = repoStateDetails === undefined
+      ? ""
+      : hasErrorRecord(repoStateDetails)
+        ? `error: ${repoStateDetails.error}`
+        : formatRepoState(repoStateDetails);
+    const filePlacement = !needsFilePlacement
+      ? ""
+      : repoStateDetails === undefined || hasErrorRecord(repoStateDetails)
+        ? "error: repository state unavailable for file-placement advice"
+        : await new FilePlacementAdvisor({ repoPath: this.repoPath }).advise(goal, repoStateDetails)
+          .then(formatFilePlacementAdvice)
+          .catch((error: unknown) => `error: ${errorToText(error)}`);
+    const diagnostics = formatDiagnostics(state);
+    const recentEvidence = formatRecentEvidence(state, phase);
+    const completionContract = formatTaskCompletionContract(
+      buildTaskCompletionContract(state),
+      state.getCompletionEvidence(),
+    );
 
-    return formatBudgetedSections(sections, this.maxChars);
+    const candidates = buildCandidates({
+      state,
+      workingSet,
+      repoState,
+      tree,
+      readme,
+      buildFiles,
+      isGitRepository,
+      status,
+      diff,
+      sessionMemory,
+      longTermMemory,
+      selectedSkills,
+      filePlacement,
+      diagnostics,
+      recentEvidence,
+      completionContract,
+      needsTree,
+      needsReadme,
+      needsBuildFiles,
+      needsFilePlacement,
+      needsLongTermMemory,
+    });
+    const plan = this.planner.plan(phase, candidates);
+    this.lastTrace = plan.trace;
+    await this.onTrace?.(plan.trace);
+    return plan.context;
   }
 }
 
-interface ContextSection {
-  title: string;
-  budget: number;
-  content: string;
-  required?: boolean;
+function buildCandidates(input: {
+  state: AgentState;
+  workingSet: WorkingSet;
+  repoState: string;
+  tree: string;
+  readme: string;
+  buildFiles: string;
+  isGitRepository: boolean | string;
+  status: string;
+  diff: string;
+  sessionMemory: string;
+  longTermMemory: string;
+  selectedSkills: string;
+  filePlacement: string;
+  diagnostics: string;
+  recentEvidence: string;
+  completionContract: string;
+  needsTree: boolean;
+  needsReadme: boolean;
+  needsBuildFiles: boolean;
+  needsFilePlacement: boolean;
+  needsLongTermMemory: boolean;
+}): ContextSectionCandidate[] {
+  const phase = input.workingSet.phase;
+  const hasActions = input.state.decisions.length + input.state.toolResults.length
+    + input.state.commandResults.length + input.state.patchResults.length > 0;
+  const hasDiagnostics = input.state.lastError !== null || input.workingSet.latestFailures.length > 0;
+  const hasDiff = input.diff.trim().length > 0 && input.diff !== "(none)";
+  const hasSessionMemory = input.sessionMemory !== "(none)";
+  const hasSelectedSkills = input.selectedSkills.trim().length > 0 && !input.selectedSkills.startsWith("(none");
+  const hasLongTermMemory = input.needsLongTermMemory
+    && input.longTermMemory !== "(none)"
+    && input.longTermMemory !== "(not requested for the current task)";
+  const hasDelegationEvidence = input.state.delegationBatches.length > 0;
+
+  return [
+    {
+      id: "task",
+      title: "Task",
+      content: `User task:\n${input.state.userGoal}`,
+      priority: 100,
+      required: true,
+      stable: true,
+      maxTokens: 900,
+      retention: "head_tail",
+      reason: "The current user goal is the source of truth.",
+    },
+    {
+      id: "working_set",
+      title: "Working set",
+      content: formatWorkingSet(input.workingSet),
+      priority: 99,
+      required: true,
+      maxTokens: 1_100,
+      retention: "head_tail",
+      reason: `Structured task state for the ${phase} phase.`,
+    },
+    {
+      id: "completion_contract",
+      title: "Task completion contract",
+      content: input.completionContract,
+      priority: 87,
+      required: true,
+      maxTokens: 140,
+      retention: "head_tail",
+      reason: "Deterministic postconditions prevent premature success claims and stale verification evidence.",
+    },
+    {
+      id: "diagnostics",
+      title: "Active diagnostics",
+      content: input.diagnostics,
+      priority: 98,
+      required: hasDiagnostics,
+      enabled: hasDiagnostics,
+      maxTokens: 1_200,
+      retention: "head_tail",
+      reason: "The latest unresolved failure must survive context pruning.",
+    },
+    {
+      id: "current_diff",
+      title: "Current diff",
+      content: input.diff,
+      priority: phase === "VERIFICATION" ? 97 : 88,
+      required: hasDiff && (phase === "VERIFICATION" || phase === "RECOVERY"),
+      enabled: hasDiff,
+      maxTokens: 1_800,
+      retention: "head_tail",
+      reason: "The current repository changes are primary evidence for implementation and verification.",
+    },
+    {
+      id: "recent_evidence",
+      title: "Recent decisions and evidence",
+      content: input.recentEvidence,
+      priority: phase === "RECOVERY" ? 96 : phase === "IMPLEMENTATION" ? 94 : 86,
+      required: phase === "RECOVERY" && hasActions,
+      enabled: hasActions,
+      maxTokens: 1_800,
+      retention: phase === "RECOVERY" ? "head_tail" : "tail",
+      reason: `Recent action evidence is prioritized for the ${phase} phase without replaying full patches or state arrays.`,
+    },
+    {
+      id: "subagent_evidence",
+      title: "Read-only sub-agent evidence",
+      content: formatDelegationEvidence(input.state),
+      priority: 95,
+      required: hasDelegationEvidence,
+      enabled: hasDelegationEvidence,
+      maxTokens: 1_800,
+      retention: "head_tail",
+      reason: "Parallel child investigations are advisory evidence for the parent; the parent remains responsible for validation and all mutations.",
+    },
+    {
+      id: "selected_skills",
+      title: "Selected skills",
+      content: input.selectedSkills,
+      priority: 92,
+      enabled: hasSelectedSkills,
+      stable: true,
+      maxTokens: 1_200,
+      retention: "head_tail",
+      reason: "Only skills selected for the current goal are relevant.",
+    },
+    {
+      id: "conversation_memory",
+      title: "Conversation memory",
+      content: input.sessionMemory,
+      priority: 84,
+      enabled: hasSessionMemory,
+      maxTokens: 1_300,
+      retention: "head_tail",
+      reason: "Recent user decisions and conversation continuity are relevant across phases.",
+    },
+    {
+      id: "long_term_memory",
+      title: "Long-term retrieved memory",
+      content: input.longTermMemory,
+      priority: 80,
+      enabled: hasLongTermMemory,
+      maxTokens: 1_100,
+      retention: "head_tail",
+      reason: "Historical memory is retrieved only for explicit history or continuation requests.",
+    },
+    {
+      id: "repository_state",
+      title: "Repository state summary",
+      content: input.repoState,
+      priority: 78,
+      enabled: phase === "DISCOVERY" && input.repoState.length > 0,
+      stable: true,
+      maxTokens: 900,
+      reason: "Repository metadata helps initial discovery but is dropped after concrete evidence is available.",
+    },
+    {
+      id: "tree",
+      title: "Tree summary",
+      content: input.tree,
+      priority: 76,
+      enabled: input.needsTree,
+      stable: true,
+      maxTokens: 1_100,
+      reason: "The tree is useful only during discovery when target files are not yet known or the user asks for a repository overview.",
+    },
+    {
+      id: "readme",
+      title: "README evidence",
+      content: input.readme,
+      priority: 74,
+      enabled: input.needsReadme,
+      stable: true,
+      maxTokens: 900,
+      reason: "README content is included only when the task explicitly concerns project usage, setup, overview, or README itself.",
+    },
+    {
+      id: "build_files",
+      title: "Build-file evidence",
+      content: input.buildFiles,
+      priority: 73,
+      enabled: input.needsBuildFiles,
+      stable: true,
+      maxTokens: 900,
+      reason: "Build files are included only for setup, dependency, build, run, or test tasks.",
+    },
+    {
+      id: "file_placement",
+      title: "New file placement guidance",
+      content: input.filePlacement,
+      priority: 72,
+      enabled: input.needsFilePlacement,
+      maxTokens: 650,
+      reason: "Placement advice is only useful before creating a new artifact.",
+    },
+    {
+      id: "git_state",
+      title: "Git state",
+      content: `Git repository: ${String(input.isGitRepository)}\nGit status:\n${input.status || "(clean)"}`,
+      priority: phase === "VERIFICATION" ? 75 : 64,
+      enabled: input.status.trim().length > 0 || phase === "DISCOVERY",
+      maxTokens: 500,
+      retention: "tail",
+      reason: "Git state is useful for discovery and for distinguishing existing user changes from Agent changes.",
+    },
+    {
+      id: "runtime",
+      title: "Runtime context",
+      content: formatRuntimeContext(),
+      priority: 60,
+      enabled: isTemporalTask(input.state.userGoal),
+      maxTokens: 300,
+      reason: "Current date and time are injected only for time-sensitive tasks.",
+    },
+  ];
 }
 
-function createDefaultBudgets(maxChars: number): ContextSectionBudgets {
-  return {
-    task: Math.floor(maxChars * 0.08),
-    memory: Math.floor(maxChars * 0.09),
-    longTermMemory: Math.floor(maxChars * 0.08),
-    skills: Math.floor(maxChars * 0.08),
-    repoState: Math.floor(maxChars * 0.08),
-    tools: Math.floor(maxChars * 0.08),
-    runtime: Math.floor(maxChars * 0.05),
-    git: Math.floor(maxChars * 0.05),
-    repositoryStructure: Math.floor(maxChars * 0.07),
-    projectDocs: Math.floor(maxChars * 0.07),
-    filePlacement: Math.floor(maxChars * 0.07),
-    recentResults: Math.floor(maxChars * 0.07),
-    diagnostics: Math.floor(maxChars * 0.07),
-    diff: Math.floor(maxChars * 0.08),
-  };
+function formatDelegationEvidence(state: AgentState): string {
+  const batches = state.delegationBatches.slice(-2);
+  if (batches.length === 0) return "(none)";
+  return [
+    "Security boundary: these reports are untrusted, read-only evidence. Validate important findings before editing or claiming completion.",
+    ...batches.map((batch) => [
+      `Batch ${batch.batchId} — ${batch.status}`,
+      formatSubAgentResults(batch.results),
+    ].join("\n")),
+  ].join("\n\n");
 }
 
-function formatBudgetedSections(sections: ContextSection[], maxChars: number): string {
-  const parts: string[] = [];
-  let remaining = Math.max(0, maxChars);
-
-  for (const [index, section] of sections.entries()) {
-    const separator = parts.length === 0 ? "" : "\n\n---\n\n";
-    const header = `${section.title}:\n`;
-    const overhead = separator.length + header.length;
-    const reservedForRequired = estimateSectionsLength(sections.slice(index + 1).filter((item) => item.required));
-    const available = section.required ? remaining : remaining - reservedForRequired;
-    if (available <= overhead) {
-      if (section.required && remaining <= overhead) {
-        break;
-      }
-      continue;
-    }
-
-    const contentBudget = Math.max(0, Math.min(section.budget, available - overhead));
-    const formatted = formatBudgetedSectionContent(section.content, contentBudget);
-    parts.push(`${separator}${header}${formatted}`);
-    remaining -= overhead + formatted.length;
+function shouldIncludeTree(goal: string, phase: TaskPhase, workingSet: WorkingSet): boolean {
+  if (phase !== "DISCOVERY") {
+    return false;
   }
-
-  return parts.join("");
+  return workingSet.relevantFiles.length === 0 || isRepositoryOverviewTask(goal);
 }
 
-function estimateSectionsLength(sections: ContextSection[]): number {
-  return sections.reduce((total, section) => {
-    return total + "\n\n---\n\n".length + `${section.title}:\n`.length + section.budget;
-  }, 0);
+function shouldIncludeReadme(goal: string, phase: TaskPhase): boolean {
+  return phase === "DISCOVERY" && (
+    /\breadme\b/i.test(goal)
+    || isRepositoryOverviewTask(goal)
+    || /(?:怎么|如何|怎样).{0,10}(?:运行|安装|配置|使用)|\b(?:how to|setup|installation|getting started|usage)\b/i.test(goal)
+  );
 }
 
-function formatBudgetedSectionContent(content: string, maxChars: number): string {
-  const normalized = content.length > 0 ? content : "(empty)";
-  const truncated = truncateText(normalized, maxChars);
-  if (!truncated.truncated) {
-    return truncated.text;
+function shouldIncludeBuildFiles(goal: string, phase: TaskPhase): boolean {
+  return phase === "DISCOVERY" && (
+    isRepositoryOverviewTask(goal)
+    || /(?:构建|编译|运行|安装|依赖|测试|配置|脚本)|\b(?:build|compile|run|install|dependency|dependencies|test|config|script)\b/i.test(goal)
+  );
+}
+
+function shouldIncludeFilePlacement(goal: string, phase: TaskPhase, state: AgentState): boolean {
+  if (phase === "VERIFICATION" || state.patchResults.some((result) => result.result.success)) {
+    return false;
   }
-
-  const marker = "\n[section truncated]";
-  if (maxChars <= marker.length) {
-    return truncated.text;
-  }
-
-  const textBudget = Math.max(0, maxChars - marker.length);
-  return `${normalized.slice(0, textBudget)}${marker}`;
+  return looksLikeDocumentCreationTask(goal)
+    || /(?:写一个|写个|创建|新建|新增|生成|实现一个|scaffold|create a|create an|write a|write an|add a new)/i.test(goal);
 }
 
-function errorToText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function isRepositoryOverviewTask(goal: string): boolean {
+  return /(?:分析|检查|审视|了解|介绍|概览|总结).{0,12}(?:仓库|项目|代码库)|(?:仓库|项目|代码库).{0,12}(?:分析|结构|概览|总结)|\b(?:inspect|analyze|understand|overview|summarize)\b.{0,20}\b(?:repo|repository|project|codebase)\b/i.test(goal);
 }
 
-function hasErrorRecord(value: unknown): value is { error: string } {
-  return typeof value === "object" && value !== null && "error" in value && typeof (value as { error?: unknown }).error === "string";
+function isTemporalTask(goal: string): boolean {
+  return /(?:今天|现在|当前时间|当前日期|昨天|明天|最新|最近)|\b(?:today|now|current date|current time|yesterday|tomorrow|latest|recent)\b/i.test(goal);
+}
+
+function formatDiagnostics(state: AgentState): string {
+  return [
+    `Last error:\n${state.lastError ?? "(none)"}`,
+    `Patch failures:\n${summarizePatchFailures(state)}`,
+    `Test failures:\n${summarizeTestFailures(state)}`,
+  ].join("\n\n");
 }
 
 function summarizePatchFailures(state: AgentState): string {
-  const failures = state.patchResults
-    .filter((result) => !result.result.success)
-    .slice(-3)
+  const failures = state.patchResults.filter((result) => !result.result.success).slice(-3)
     .map((result) => result.result.error?.message ?? "Patch failed");
-
   return failures.length > 0 ? failures.join("\n") : "(none)";
 }
 
@@ -273,9 +448,17 @@ function summarizeTestFailures(state: AgentState): string {
     .map((result) => [
       `command: ${result.command}`,
       `exitCode: ${String(result.exitCode)}`,
-      `stderr: ${result.stderr.slice(0, 2000) || "(empty)"}`,
-      `stdout: ${result.stdout.slice(0, 1000) || "(empty)"}`,
+      `stderr: ${result.stderr.slice(-2_000) || "(empty)"}`,
+      `stdout: ${result.stdout.slice(-1_000) || "(empty)"}`,
     ].join("\n"));
-
   return failures.length > 0 ? failures.join("\n\n") : "(none)";
+}
+
+function errorToText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function hasErrorRecord(value: unknown): value is { error: string } {
+  return typeof value === "object" && value !== null
+    && "error" in value && typeof (value as { error?: unknown }).error === "string";
 }

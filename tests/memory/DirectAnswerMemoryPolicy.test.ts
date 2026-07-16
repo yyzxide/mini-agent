@@ -6,13 +6,10 @@ describe("planDirectAnswerMemory", () => {
     expect(planDirectAnswerMemory({
       userGoal: "你觉得这个有难度吗",
       hasRecentConversation: true,
-    })).toEqual({
-      retrieve: false,
-      query: "你觉得这个有难度吗",
-    });
+    }).retrieve).toBe(false);
   });
 
-  it("allows explicit recall and grounded follow-ups", () => {
+  it("allows explicit recall but not an ordinary grounded follow-up", () => {
     expect(planDirectAnswerMemory({
       userGoal: "之前的 MedianFinder 是怎么实现的",
       hasRecentConversation: true,
@@ -22,19 +19,13 @@ describe("planDirectAnswerMemory", () => {
       userGoal: "葡萄牙呢",
       resolvedFollowUpGoal: "葡萄牙是强队吗",
       hasRecentConversation: true,
-    })).toEqual({
-      retrieve: true,
-      query: "葡萄牙是强队吗",
-    });
+    }).retrieve).toBe(false);
   });
 
   it("never answers volatile match results from long-term memory", () => {
     expect(planDirectAnswerMemory({
       userGoal: "法国队vs西班牙队，谁赢了",
       hasRecentConversation: false,
-    })).toEqual({
-      retrieve: false,
-      query: "法国队vs西班牙队，谁赢了",
-    });
+    }).retrieve).toBe(false);
   });
 });

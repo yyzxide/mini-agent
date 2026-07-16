@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
 import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
 import { isTestCommand } from "../command/CommandClassification.js";
@@ -27,6 +28,9 @@ import { validateAgentDecisionGuardrails } from "./TaskGuardrails.js";
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 import type { AgentOperatingMode } from "./AgentOperatingMode.js";
 import { isPlanModeReadOnlyTool, selectToolsForOperatingMode } from "./AgentOperatingMode.js";
+import { checkpointToPayload, createAgentCheckpoint } from "./AgentCheckpoint.js";
+import { AgentStateReducer } from "./AgentStateReducer.js";
+import type { MultiAgentPolicy, SubAgentBatchResult, SubAgentCoordinator } from "./SubAgentTypes.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -40,6 +44,7 @@ export interface AgentLoopOptions {
   contextBuilder?: ContextBuilder;
   onProgress?: AgentProgressHandler;
   askUser?: (message: string) => Promise<string>;
+  subAgentCoordinator?: SubAgentCoordinator;
 }
 
 export interface AgentRunInput {
@@ -51,6 +56,7 @@ export interface AgentRunInput {
   nonInteractive?: boolean;
   keepSessionActive?: boolean;
   operatingMode?: AgentOperatingMode;
+  multiAgent?: MultiAgentPolicy;
 }
 
 export interface AgentRunResult {
@@ -60,12 +66,15 @@ export interface AgentRunResult {
   finalDiff: string;
   steps: number;
   error?: string;
+  delegationBatches?: number;
+  subAgents?: number;
 }
 
 export type AgentProgressEvent =
   | { type: "session"; sessionId: string }
   | { type: "plan"; message: string }
   | { type: "tool"; toolName: string; input: JsonObject }
+  | { type: "agents"; phase: "started" | "finished" | "failed"; tasks: number; message: string }
   | { type: "patch"; description: string }
   | { type: "command"; command: string }
   | { type: "ask_user"; message: string }
@@ -96,6 +105,7 @@ export class AgentLoop {
   private readonly onProgress: AgentProgressHandler | undefined;
   private readonly askUser: ((message: string) => Promise<string>) | undefined;
   private readonly availableTools: ToolSpec[];
+  private readonly subAgentCoordinator: SubAgentCoordinator | undefined;
 
   constructor(options: AgentLoopOptions) {
     this.repoPath = options.repoPath;
@@ -109,6 +119,7 @@ export class AgentLoop {
     this.contextBuilder = options.contextBuilder ?? new ContextBuilder({ repoPath: options.repoPath });
     this.onProgress = options.onProgress;
     this.askUser = options.askUser;
+    this.subAgentCoordinator = options.subAgentCoordinator;
     this.availableTools = this.toolRegistry.listSpecs();
   }
 
@@ -123,15 +134,39 @@ export class AgentLoop {
     const sessionId = await this.ensureSession(originalUserGoal, input.sessionId, operatingMode);
     await this.emit({ type: "session", sessionId });
 
+    const recoveredCheckpoint = input.sessionId
+      ? await new AgentStateReducer(this.sessionStore).recover(sessionId, operatingMode)
+      : undefined;
+
     const state = new AgentState({
       sessionId,
+      runId: recoveredCheckpoint?.runId ?? randomUUID(),
       repoPath: this.repoPath,
       userGoal,
       ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
       operatingMode,
+      ...(recoveredCheckpoint ? { recoveredCheckpoint } : {}),
+      multiAgentEnabled: input.multiAgent?.enabled === true && this.subAgentCoordinator !== undefined,
     });
 
+    if (recoveredCheckpoint) {
+      state.setLastError(recoveredCheckpoint.inFlightAction
+        ? `Recovered after interruption during ${recoveredCheckpoint.inFlightAction}; inspect current repository state before retrying.`
+        : recoveredCheckpoint.lastError ?? null);
+      await this.eventStore.appendEvent(sessionId, {
+        type: "AGENT_STATE_RESTORED",
+        payload: {
+          runId: state.runId,
+          checkpointRecordedAt: recoveredCheckpoint.recordedAt,
+          previousGoal: recoveredCheckpoint.userGoal,
+          previousTotalSteps: recoveredCheckpoint.totalSteps,
+          hadInFlightAction: Boolean(recoveredCheckpoint.inFlightAction),
+        },
+      });
+    }
+
     await this.recordUserMessage(state, originalUserGoal);
+    await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
@@ -139,11 +174,19 @@ export class AgentLoop {
     while (!state.isStepLimitReached()) {
       const availableTools = selectToolsForOperatingMode(this.availableTools, state.operatingMode);
       const context = await this.contextBuilder.build(state, availableTools);
+      const contextTrace = this.contextBuilder.getLastTrace();
+      if (contextTrace) {
+        await this.eventStore.appendEvent(state.sessionId, {
+          type: "CONTEXT_BUILT",
+          payload: { trace: toJsonValue(contextTrace) },
+        });
+      }
       const decision = await this.readDecision(state, userGoal, context, availableTools);
 
       state.addDecision(decision);
       await this.recordDecision(state.sessionId, decision);
       state.addAssistantMessage(decisionToMessage(decision));
+      await this.recordDecisionCheckpoint(state, decision);
 
       const decisionKey = stableDecisionKey(decision);
       if (decisionKey === previousDecisionKey) {
@@ -172,6 +215,7 @@ export class AgentLoop {
       }
 
       state.incrementStep();
+      await this.recordCheckpoint(state);
     }
 
     const error = `Agent stopped after reaching max steps (${state.maxSteps})`;
@@ -199,6 +243,9 @@ export class AgentLoop {
       case "TOOL_CALL":
         return { failed: await this.executeToolDecision(state, decision.toolName, decision.input, input) };
 
+      case "DELEGATE_READONLY":
+        return await this.executeDelegationDecision(state, decision, input);
+
       case "APPLY_PATCH":
         return await this.executePatchDecision(state, decision, input);
 
@@ -218,6 +265,81 @@ export class AgentLoop {
     }
   }
 
+  private async executeDelegationDecision(
+    state: AgentState,
+    decision: Extract<AgentDecision, { type: "DELEGATE_READONLY" }>,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    const policy = input.multiAgent;
+    if (!state.multiAgentEnabled || !policy || !this.subAgentCoordinator) {
+      const error = "MULTI_AGENT_DISABLED: DELEGATE_READONLY requires an enabled multi-agent policy";
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return { failed: true };
+    }
+    if (state.delegationBatches.length >= policy.maxBatchesPerRun) {
+      const error = `MULTI_AGENT_BUDGET_EXHAUSTED: maximum ${String(policy.maxBatchesPerRun)} delegation batches reached`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return { failed: true };
+    }
+    const previousTaskCount = state.delegationBatches.reduce((total, batch) => total + batch.results.length, 0);
+    if (previousTaskCount + decision.tasks.length > policy.maxTasksPerRun) {
+      const error = `MULTI_AGENT_BUDGET_EXHAUSTED: maximum ${String(policy.maxTasksPerRun)} child tasks reached`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return { failed: true };
+    }
+
+    await this.emit({
+      type: "agents",
+      phase: "started",
+      tasks: decision.tasks.length,
+      message: decision.reason,
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "SUBAGENT_BATCH_STARTED",
+      payload: { reason: decision.reason, taskCount: decision.tasks.length },
+    });
+
+    let batch: SubAgentBatchResult;
+    try {
+      batch = await this.subAgentCoordinator.runBatch({
+        parentRunId: state.runId,
+        originalGoal: state.userGoal,
+        tasks: decision.tasks,
+        policy,
+      });
+    } catch (error) {
+      const message = `MULTI_AGENT_COORDINATOR_FAILED: ${errorToMessage(error)}`;
+      state.setLastError(message);
+      await this.recordError(state.sessionId, message, error);
+      await this.eventStore.appendEvent(state.sessionId, {
+        type: "SUBAGENT_BATCH_FAILED",
+        payload: { status: "FAILED", taskCount: decision.tasks.length, error: message },
+      });
+      await this.emit({ type: "agents", phase: "failed", tasks: decision.tasks.length, message });
+      return { failed: true };
+    }
+    state.addDelegationBatch(batch);
+    await this.recordSubAgentBatch(state.sessionId, batch);
+    const failed = batch.status === "FAILED";
+    const message = `${batch.status}: ${String(batch.results.filter((result) => result.status === "COMPLETED").length)}/${String(batch.results.length)} child tasks completed`;
+    await this.emit({
+      type: "agents",
+      phase: failed ? "failed" : "finished",
+      tasks: batch.results.length,
+      message,
+    });
+    if (failed) {
+      state.setLastError(`MULTI_AGENT_BATCH_FAILED: ${message}`);
+      await this.recordError(state.sessionId, state.lastError);
+      return { failed: true };
+    }
+    state.setLastError(null);
+    return { failed: false };
+  }
+
   private validatePlanModeDecision(state: AgentState, decision: AgentDecision): string | undefined {
     if (state.operatingMode !== "PLAN") {
       return undefined;
@@ -233,7 +355,6 @@ export class AgentLoop {
         return `PLAN_MODE_TOOL_BLOCKED: tool ${decision.toolName} is not read-only or is unavailable`;
       }
     }
-
     return undefined;
   }
 
@@ -397,6 +518,7 @@ export class AgentLoop {
   ): Promise<AgentRunResult> {
     if (state.operatingMode === "PLAN") {
       state.markFinished("");
+      await this.recordCheckpoint(state, "FINISHED");
       await this.sessionStore.appendRecord(state.sessionId, {
         type: "TASK_SUMMARY",
         payload: {
@@ -415,11 +537,19 @@ export class AgentLoop {
         await this.sessionStore.updateSessionStatus(state.sessionId, success ? "FINISHED" : "FAILED");
       }
       await this.emit({ type: "summary", summary, success });
-      return { sessionId: state.sessionId, success, summary, finalDiff: "", steps: state.step };
+      return {
+        sessionId: state.sessionId,
+        success,
+        summary,
+        finalDiff: "",
+        steps: state.step,
+        ...collaborationResultMetadata(state),
+      };
     }
 
     const finalDiff = await this.readFinalDiff();
     state.markFinished(finalDiff);
+    await this.recordCheckpoint(state, "FINISHED");
     await this.sessionStore.appendRecord(state.sessionId, {
       type: "DIFF_SUMMARY",
       payload: {
@@ -464,6 +594,7 @@ export class AgentLoop {
       summary,
       finalDiff,
       steps: state.step,
+      ...collaborationResultMetadata(state),
     };
   }
 
@@ -471,6 +602,7 @@ export class AgentLoop {
     state.markFailed(error);
     const finalDiff = state.operatingMode === "PLAN" ? "" : await this.readFinalDiff();
     state.finalDiff = finalDiff;
+    await this.recordCheckpoint(state, "FAILED");
 
     if (state.operatingMode !== "PLAN") {
       await this.sessionStore.appendRecord(state.sessionId, {
@@ -508,6 +640,7 @@ export class AgentLoop {
       finalDiff,
       steps: state.step,
       error,
+      ...collaborationResultMetadata(state),
     };
   }
 
@@ -592,6 +725,59 @@ export class AgentLoop {
     });
   }
 
+  private async recordDecisionCheckpoint(state: AgentState, decision: AgentDecision): Promise<void> {
+    if (decision.type === "ASK_USER") {
+      await this.recordCheckpoint(state, "WAITING_USER");
+      return;
+    }
+    if (decision.type === "TOOL_CALL") {
+      await this.recordCheckpoint(state, "RUNNING", `tool:${decision.toolName}`);
+      return;
+    }
+    if (decision.type === "DELEGATE_READONLY") {
+      await this.recordCheckpoint(state, "RUNNING", `delegation:${decision.reason}`);
+      return;
+    }
+    if (decision.type === "APPLY_PATCH") {
+      await this.recordCheckpoint(state, "RUNNING", `patch:${decision.description}`);
+      return;
+    }
+    if (decision.type === "RUN_COMMAND") {
+      await this.recordCheckpoint(state, "RUNNING", `command:${decision.description}`);
+    }
+  }
+
+  private async recordCheckpoint(
+    state: AgentState,
+    status: "RUNNING" | "WAITING_USER" | "FINISHED" | "FAILED" = state.status,
+    inFlightAction?: string,
+  ): Promise<void> {
+    const checkpoint = createAgentCheckpoint({
+      state,
+      status,
+      ...(inFlightAction ? { inFlightAction } : {}),
+    });
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "AGENT_CHECKPOINT",
+      payload: checkpointToPayload(checkpoint),
+    });
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "AGENT_CHECKPOINTED",
+      payload: {
+        version: checkpoint.version,
+        runId: checkpoint.runId,
+        status: checkpoint.status,
+        completedSteps: checkpoint.completedSteps,
+        totalSteps: checkpoint.totalSteps,
+        modifiedFileCount: checkpoint.workingSet.modifiedFiles.length,
+        successfulPatch: checkpoint.effects.successfulPatch,
+        verificationAttemptedAfterPatch: checkpoint.effects.verificationAttemptedAfterPatch ?? false,
+        verificationAfterPatch: checkpoint.effects.verificationAfterPatch ?? false,
+        ...(checkpoint.inFlightAction ? { inFlightAction: checkpoint.inFlightAction } : {}),
+      },
+    });
+  }
+
   private async recordCommandResult(sessionId: string, result: CommandResult): Promise<void> {
     await this.sessionStore.appendRecord(sessionId, {
       type: "COMMAND_RESULT",
@@ -619,6 +805,45 @@ export class AgentLoop {
         },
       });
     }
+  }
+
+  private async recordSubAgentBatch(sessionId: string, batch: SubAgentBatchResult): Promise<void> {
+    await this.sessionStore.appendRecord(sessionId, {
+      type: "SUBAGENT_BATCH_RESULT",
+      payload: toJsonObject(batch as unknown as Record<string, unknown>),
+    });
+    for (const result of batch.results) {
+      await this.sessionStore.appendRecord(sessionId, {
+        type: "LLM_USAGE",
+        payload: toJsonObject({
+          mode: `subagent:${result.role}`,
+          taskId: result.taskId,
+          llmCalls: result.usage.llmCalls,
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
+          totalTokens: result.usage.totalTokens,
+          cachedPromptTokens: result.usage.cachedPromptTokens,
+          reasoningTokens: result.usage.reasoningTokens,
+          usageAvailable: result.usage.usageAvailable,
+        }),
+      });
+    }
+    await this.eventStore.appendEvent(sessionId, {
+      type: batch.status === "FAILED" ? "SUBAGENT_BATCH_FAILED" : "SUBAGENT_BATCH_FINISHED",
+      payload: {
+        batchId: batch.batchId,
+        status: batch.status,
+        taskCount: batch.results.length,
+        completedCount: batch.results.filter((result) => result.status === "COMPLETED").length,
+        maxParallelAgents: batch.maxParallelAgents,
+        durationMs: batch.durationMs,
+        llmCalls: batch.usage.llmCalls,
+        totalTokens: batch.usage.totalTokens,
+        cachedPromptTokens: batch.usage.cachedPromptTokens,
+        reasoningTokens: batch.usage.reasoningTokens,
+        usageAvailable: batch.usage.usageAvailable,
+      },
+    });
   }
 
   private async recordError(sessionId: string, message: string | null, error?: unknown): Promise<void> {
@@ -735,6 +960,14 @@ function isGitDiffData(value: unknown): value is { diff: string } {
 
 function stableDecisionKey(decision: AgentDecision): string {
   return JSON.stringify(sortJsonValue(decision));
+}
+
+function collaborationResultMetadata(state: AgentState): Pick<AgentRunResult, "delegationBatches" | "subAgents"> {
+  if (state.delegationBatches.length === 0) return {};
+  return {
+    delegationBatches: state.delegationBatches.length,
+    subAgents: state.delegationBatches.reduce((total, batch) => total + batch.results.length, 0),
+  };
 }
 
 function sortJsonValue(value: unknown): unknown {

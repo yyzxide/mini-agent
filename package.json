@@ -9,6 +9,7 @@
   "files": [
     "dist",
     "docs",
+    "benchmarks",
     "README.md",
     "mini-agent.config.example.json"
   ],
@@ -18,6 +19,7 @@
     "test": "vitest run",
     "guess": "tsx src/guessing-game.ts",
     "test:regression": "vitest run tests/cli-regression.test.ts tests/cli-real-api-regressions.test.ts",
+    "bench": "npm run build --silent && node dist/cli/index.js bench run benchmarks/agent-bench-v1.json",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:unused": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",

@@ -17,6 +17,10 @@ import { EventStore } from "../../src/session/EventStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
 import type { EventRecord, SessionRecord } from "../../src/session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
+import { checkpointToPayload, createAgentCheckpoint } from "../../src/agent/AgentCheckpoint.js";
+import { AgentState } from "../../src/agent/AgentState.js";
+import type { SubAgentCoordinator } from "../../src/agent/SubAgentTypes.js";
+import { DEFAULT_MULTI_AGENT_POLICY } from "../../src/agent/SubAgentTypes.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,6 +69,7 @@ describe("AgentLoop", () => {
     const records = await sessionStore.readRecords(result.sessionId);
     expect(recordTypes(records)).toEqual(expect.arrayContaining([
       "USER_MESSAGE",
+      "AGENT_CHECKPOINT",
       "TOOL_CALL",
       "TOOL_RESULT",
       "COMMAND_RESULT",
@@ -77,6 +82,8 @@ describe("AgentLoop", () => {
 
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toEqual(expect.arrayContaining([
+      "CONTEXT_BUILT",
+      "AGENT_CHECKPOINTED",
       "TOOL_CALL_STARTED",
       "TOOL_CALL_FINISHED",
       "PATCH_APPLY_STARTED",
@@ -113,6 +120,131 @@ describe("AgentLoop", () => {
 
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toContain("TASK_FAILED");
+  });
+
+  it("persists read-only child evidence and returns it to the parent context", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const eventStore = new EventStore({ repoPath });
+    const client = new ScriptedLlmClient([
+      {
+        type: "DELEGATE_READONLY",
+        reason: "Inspect architecture and risks independently",
+        tasks: [
+          { id: "architecture", role: "repository_analyst", objective: "Map the loop", focusPaths: ["src/agent"] },
+          { id: "risks", role: "risk_reviewer", objective: "Review isolation", focusPaths: ["src/session"] },
+        ],
+      },
+      { type: "FINAL", success: true, summary: "Analysis completed from validated child evidence." },
+    ]);
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => ({
+        batchId: "batch-1",
+        status: "COMPLETED",
+        results: tasks.map((task) => ({
+          taskId: task.id,
+          role: task.role,
+          objective: task.objective,
+          status: "COMPLETED",
+          summary: `Evidence for ${task.id}`,
+          evidence: [{ path: task.focusPaths[0] ?? "src" }],
+          toolsCalled: ["read_file"],
+          usage: {
+            steps: 1,
+            llmCalls: 1,
+            toolCalls: 1,
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            cachedPromptTokens: 0,
+            reasoningTokens: 0,
+            usageAvailable: true,
+          },
+        })),
+        usage: {
+          steps: 2,
+          llmCalls: 2,
+          toolCalls: 2,
+          promptTokens: 20,
+          completionTokens: 10,
+          totalTokens: 30,
+          cachedPromptTokens: 0,
+          reasoningTokens: 0,
+          usageAvailable: true,
+        },
+        maxParallelAgents: 2,
+        durationMs: 20,
+      }),
+    };
+    const loop = createLoop({ sessionStore, eventStore, llmClient: client, subAgentCoordinator: coordinator });
+
+    const result = await loop.run({
+      userGoal: "Analyze the agent architecture",
+      autoApprove: true,
+      nonInteractive: true,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
+    });
+
+    expect(result).toMatchObject({ success: true, delegationBatches: 1, subAgents: 2 });
+    expect(client.getCallInputs()[1]?.context).toContain("Read-only sub-agent evidence");
+    expect(client.getCallInputs()[1]?.context).toContain("Evidence for architecture");
+    expect(recordTypes(await sessionStore.readRecords(result.sessionId))).toContain("SUBAGENT_BATCH_RESULT");
+    expect(eventTypes(await eventStore.readEvents(result.sessionId))).toEqual(expect.arrayContaining([
+      "SUBAGENT_BATCH_STARTED",
+      "SUBAGENT_BATCH_FINISHED",
+    ]));
+  });
+
+  it("restores an interrupted checkpoint and isolates it after successful completion", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const eventStore = new EventStore({ repoPath });
+    const session = await sessionStore.createSession({ title: "interrupted file task" });
+    await fs.writeFile(path.join(repoPath, "notes.txt"), "hello\n", "utf8");
+    const interruptedState = new AgentState({
+      sessionId: session.sessionId,
+      runId: "interrupted-run",
+      repoPath,
+      userGoal: "Create notes.txt containing hello.",
+    });
+    interruptedState.addPatchResult({
+      description: "Create notes.txt",
+      patch: "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n",
+      result: { success: true },
+    });
+    const checkpoint = createAgentCheckpoint({ state: interruptedState, inFlightAction: "patch:Create notes.txt" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "AGENT_CHECKPOINT",
+      payload: checkpointToPayload(checkpoint),
+    });
+
+    const resumedClient = new ScriptedLlmClient([
+      { type: "TOOL_CALL", toolName: "git_status", input: {} },
+      { type: "FINAL", success: true, summary: "Confirmed notes.txt exists after recovery." },
+    ]);
+    const resumed = await createLoop({ sessionStore, eventStore, llmClient: resumedClient }).run({
+      sessionId: session.sessionId,
+      userGoal: "Create notes.txt containing hello.",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(resumed.success).toBe(true);
+    expect(resumedClient.getCallInputs()[0]?.state).toMatchObject({
+      runId: "interrupted-run",
+      recoveredFromCheckpoint: true,
+    });
+    expect(resumedClient.getCallInputs()[0]?.context).toContain("Recovered after interruption during patch:Create notes.txt");
+    expect(resumedClient.getCallInputs()[0]?.context).toContain("notes.txt");
+    expect(eventTypes(await eventStore.readEvents(session.sessionId))).toContain("AGENT_STATE_RESTORED");
+
+    const nextClient = new ScriptedLlmClient([{ type: "FINAL", success: true, summary: "A separate task." }]);
+    const next = await createLoop({ sessionStore, eventStore, llmClient: nextClient }).run({
+      sessionId: session.sessionId,
+      userGoal: "Explain the next independent task.",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+    expect(next.success).toBe(true);
+    expect(nextClient.getCallInputs()[0]?.state.recoveredFromCheckpoint).toBe(false);
   });
 
   it("records last error context when a command fails and continues", async () => {
@@ -188,7 +320,7 @@ describe("AgentLoop", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("did not pass");
     const records = await sessionStore.readRecords(result.sessionId);
-    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_IGNORES_TEST_FAILURE"))).toBe(true);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_IGNORES_VERIFICATION_FAILURE"))).toBe(true);
   });
 
   it("fails in nonInteractive mode when patch approval is required", async () => {
@@ -296,6 +428,13 @@ describe("AgentLoop", () => {
           ].join("\n"),
         },
         { type: "FINAL", success: true, summary: "Created src/answer.ts." },
+        {
+          type: "RUN_COMMAND",
+          executable: "tsc",
+          args: ["--noEmit", "--skipLibCheck", "src/answer.ts"],
+          description: "Verify the generated TypeScript source",
+        },
+        { type: "FINAL", success: true, summary: "Created src/answer.ts." },
       ]),
     });
 
@@ -310,6 +449,48 @@ describe("AgentLoop", () => {
 
     const records = await sessionStore.readRecords(result.sessionId);
     expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_REPOSITORY_CHANGE"))).toBe(true);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_REQUIRED_VERIFICATION"))).toBe(true);
+  });
+
+  it("invalidates a passing verification when a later source patch is applied", async () => {
+    await fs.writeFile(path.join(repoPath, "value.mjs"), "export const value = 1;\n", "utf8");
+    await execFileAsync("git", ["add", "value.mjs"], { cwd: repoPath });
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        {
+          type: "RUN_COMMAND",
+          executable: "node",
+          args: ["--check", "value.mjs"],
+          description: "Run verification before editing",
+        },
+        {
+          type: "APPLY_PATCH",
+          description: "Update exported value",
+          patch: "diff --git a/value.mjs b/value.mjs\n--- a/value.mjs\n+++ b/value.mjs\n@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;\n",
+        },
+        { type: "FINAL", success: true, summary: "Updated value.mjs and tests passed." },
+        {
+          type: "RUN_COMMAND",
+          executable: "node",
+          args: ["--check", "value.mjs"],
+          description: "Rerun verification after editing",
+        },
+        { type: "FINAL", success: true, summary: "Updated value.mjs and reran verification." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "Update value.mjs to export 2 and verify its syntax.",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "value.mjs"), "utf8")).resolves.toContain("value = 2");
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITH_STALE_VERIFICATION"))).toBe(true);
   });
 
   it("blocks redundant clarification when save-to-file follow-up already includes code", async () => {
@@ -332,6 +513,12 @@ describe("AgentLoop", () => {
             "+}",
             "",
           ].join("\n"),
+        },
+        {
+          type: "RUN_COMMAND",
+          executable: "tsc",
+          args: ["--noEmit", "--skipLibCheck", "src/median_finder.ts"],
+          description: "Verify the generated TypeScript source",
         },
         { type: "FINAL", success: true, summary: "Created src/median_finder.ts." },
       ]),
@@ -537,6 +724,7 @@ function createLoop(options: {
   eventStore?: EventStore;
   llmClient?: LlmClient;
   onProgress?: (event: AgentProgressEvent) => void;
+  subAgentCoordinator?: SubAgentCoordinator;
 } = {}): AgentLoop {
   const sessionStore = options.sessionStore ?? new SessionStore({ repoPath });
   const eventStore = options.eventStore ?? new EventStore({ repoPath });
@@ -554,6 +742,7 @@ function createLoop(options: {
     patchManager: new PatchManager({ repoPath }),
     contextBuilder: new ContextBuilder({ repoPath }),
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    ...(options.subAgentCoordinator ? { subAgentCoordinator: options.subAgentCoordinator } : {}),
   });
 }
 
@@ -588,8 +777,8 @@ function scriptedDemoDecisions(): AgentDecision[] {
     },
     {
       type: "RUN_COMMAND",
-      executable: "echo",
-      args: ["test passed"],
+      executable: "git",
+      args: ["diff", "--check"],
       description: "Run a lightweight verification command",
     },
     {

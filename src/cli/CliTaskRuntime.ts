@@ -16,6 +16,7 @@ export interface AgentCliOptions {
   agentLoop?: boolean;
   keepSessionActive?: boolean;
   operatingMode?: AgentOperatingMode;
+  agents?: number;
 }
 
 export interface CliTaskResult {

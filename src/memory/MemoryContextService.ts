@@ -1,5 +1,6 @@
 import { truncateText } from "../utils/fs.js";
 import { formatLongTermMemoryResults, LongTermMemoryStore } from "./LongTermMemoryStore.js";
+import type { MemoryKind, MemoryScope } from "./MemoryTypes.js";
 
 export class MemoryContextService {
   private readonly store: LongTermMemoryStore;
@@ -14,11 +15,17 @@ export class MemoryContextService {
     excludeSessionId?: string;
     limit?: number;
     maxChars?: number;
+    allowedKinds?: MemoryKind[];
+    allowedScopes?: MemoryScope[];
+    minRerankScore?: number;
   }): Promise<string> {
     const results = await this.store.search(input.query, {
       limit: input.limit ?? 5,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.excludeSessionId ? { excludeSessionId: input.excludeSessionId } : {}),
+      ...(input.allowedKinds ? { allowedKinds: input.allowedKinds } : {}),
+      ...(input.allowedScopes ? { allowedScopes: input.allowedScopes } : {}),
+      ...(input.minRerankScore !== undefined ? { minRerankScore: input.minRerankScore } : {}),
     });
     const formatted = formatLongTermMemoryResults(results);
     if (formatted === "(none)") {

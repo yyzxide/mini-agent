@@ -57,6 +57,8 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toContain("availableTools");
     expect(body.messages[1]?.content).toContain("runtimeContext");
     expect(body.messages[1]?.content).toContain("Current local date:");
+    expect(body.messages[1]?.content).not.toContain('\"toolResults\"');
+    expect(body.messages[1]?.content).not.toContain('\"patchResults\"');
   });
 
   it("injects runtime context into direct text completions", async () => {

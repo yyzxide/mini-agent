@@ -44,25 +44,24 @@ describe("ContextBuilder", () => {
       },
     });
 
-    const context = await new ContextBuilder({ repoPath, maxChars: 10_000 }).build(state);
+    const builder = new ContextBuilder({ repoPath, maxChars: 10_000 });
+    const context = await builder.build(state);
 
     expect(context).toContain("User task:");
     expect(context).toContain("inspect repository");
-    expect(context).toContain("Runtime context:");
-    expect(context).toContain("Current local date:");
     expect(context).toContain("Repository state summary:");
     expect(context).toContain("package manager:");
     expect(context).toContain("Git status:");
     expect(context).toContain("Tree summary:");
     expect(context).toContain("file README.md");
-    expect(context).toContain("README summary:");
+    expect(context).toContain("README evidence:");
     expect(context).toContain("Context builder readme.");
-    expect(context).toContain("Build files:");
+    expect(context).toContain("Build-file evidence:");
     expect(context).toContain("package.json");
-    expect(context).toContain("New file placement guidance:");
-    expect(context).toContain("Suggested target paths:");
-    expect(context).toContain("Recent tool results:");
+    expect(context).toContain("Task completion contract:");
+    expect(context).toContain("Relevant tool evidence:");
     expect(context.length).toBeLessThanOrEqual(10_000);
+    expect(builder.getLastTrace()).toMatchObject({ version: 2, phase: "DISCOVERY" });
   });
 
   it("injects recent session records into the agent context", async () => {
@@ -103,6 +102,7 @@ describe("ContextBuilder", () => {
         summary: "已创建 demo_app.html，里面是一个浏览器可直接打开的贪吃蛇小游戏。",
         success: true,
         mode: "AGENT_LOOP",
+        finalDiff: "+++ b/demo_app.html\n@@ -0,0 +1,10 @@",
       },
     });
     await new LongTermMemoryStore({ repoPath }).indexSession(sessionStore, oldSession.sessionId);
@@ -135,7 +135,7 @@ describe("ContextBuilder", () => {
 
     const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
 
-    expect(context).toContain("(disabled for indexed knowledge-base requests)");
+    expect(context).not.toContain("Long-term retrieved memory:");
     expect(context).not.toContain("旧任务错误地声称");
   });
 
@@ -170,11 +170,62 @@ describe("ContextBuilder", () => {
 
     const context = await new ContextBuilder({ repoPath, maxChars: 900 }).build(state);
 
-    expect(context).toContain("Task and step:");
+    expect(context).toContain("Task:");
     expect(context).toContain("User task:");
-    expect(context).toContain("Diagnostics:");
+    expect(context).toContain("Active diagnostics:");
     expect(context).toContain("Last error:");
     expect(context).toContain("Current diff:");
     expect(context.length).toBeLessThanOrEqual(900);
+  });
+
+  it("drops README and repository discovery context after target-file evidence is available", async () => {
+    const state = new AgentState({
+      sessionId: "implementation-session",
+      repoPath,
+      userGoal: "修复 src/index.ts 的布尔值，但不要修改公开 API",
+    });
+    state.addToolResult({
+      toolName: "read_file",
+      input: { path: "src/index.ts" },
+      result: {
+        success: true,
+        data: {
+          path: "src/index.ts",
+          startLine: 1,
+          endLine: 1,
+          totalLines: 1,
+          content: "export const demo = true;",
+        },
+      },
+    });
+
+    const builder = new ContextBuilder({ repoPath, maxChars: 8_000 });
+    const context = await builder.build(state);
+    const trace = builder.getLastTrace();
+
+    expect(context).toContain("Phase: IMPLEMENTATION");
+    expect(context).toContain("不要修改公开 API");
+    expect(context).toContain("export const demo = true;");
+    expect(context).not.toContain("README evidence:");
+    expect(context).not.toContain("Tree summary:");
+    expect(context).not.toContain("Repository state summary:");
+    expect(trace?.sections.find((section) => section.id === "readme")?.selected).toBe(false);
+    expect(trace?.sections.find((section) => section.id === "tree")?.selected).toBe(false);
+  });
+
+  it("injects runtime information only for time-sensitive tasks", async () => {
+    const ordinary = new AgentState({
+      sessionId: "ordinary-session",
+      repoPath,
+      userGoal: "修复 src/index.ts",
+    });
+    const temporal = new AgentState({
+      sessionId: "temporal-session",
+      repoPath,
+      userGoal: "检查今天生成的构建报告",
+    });
+
+    await expect(new ContextBuilder({ repoPath }).build(ordinary)).resolves.not.toContain("Runtime context:");
+    await expect(new ContextBuilder({ repoPath }).build(temporal)).resolves.toContain("Runtime context:");
   });
 });

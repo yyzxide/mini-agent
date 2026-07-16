@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SUBAGENT_ROLES } from "./SubAgentTypes.js";
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 
@@ -27,6 +28,28 @@ export const ToolCallDecisionSchema = z.object({
   toolName: z.string().min(1),
   input: JsonObjectSchema.default({}),
 }).strict();
+
+const SubAgentTaskSchema = z.object({
+  id: z.string().trim().min(1).max(48).regex(/^[a-zA-Z0-9_-]+$/),
+  role: z.enum(SUBAGENT_ROLES),
+  objective: z.string().trim().min(1).max(1_000),
+  focusPaths: z.array(z.string().trim().min(1).max(500)).max(8).default([]),
+}).strict();
+
+export const DelegateReadonlyDecisionSchema = z.object({
+  type: z.literal("DELEGATE_READONLY"),
+  reason: z.string().trim().min(1).max(1_000),
+  tasks: z.array(SubAgentTaskSchema).min(2).max(3),
+}).strict().superRefine((value, context) => {
+  const ids = value.tasks.map((task) => task.id);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["tasks"],
+      message: "DELEGATE_READONLY task ids must be unique",
+    });
+  }
+});
 
 export const ApplyPatchDecisionSchema = z.object({
   type: z.literal("APPLY_PATCH"),
@@ -91,6 +114,7 @@ export const FailedDecisionSchema = z.object({
 export const AgentDecisionSchema = z.discriminatedUnion("type", [
   PlanDecisionSchema,
   ToolCallDecisionSchema,
+  DelegateReadonlyDecisionSchema,
   ApplyPatchDecisionSchema,
   RunCommandDecisionSchema,
   AskUserDecisionSchema,
@@ -101,6 +125,7 @@ export const AgentDecisionSchema = z.discriminatedUnion("type", [
 export type AgentDecision = z.infer<typeof AgentDecisionSchema>;
 export type PlanDecision = z.infer<typeof PlanDecisionSchema>;
 export type ToolCallDecision = z.infer<typeof ToolCallDecisionSchema>;
+export type DelegateReadonlyDecision = z.infer<typeof DelegateReadonlyDecisionSchema>;
 export type ApplyPatchDecision = z.infer<typeof ApplyPatchDecisionSchema>;
 export type RunCommandDecision = z.infer<typeof RunCommandDecisionSchema>;
 export type AskUserDecision = z.infer<typeof AskUserDecisionSchema>;

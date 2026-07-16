@@ -62,6 +62,36 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("parses bounded read-only delegation decisions", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "delegate_readonly",
+      reason: "Inspect independent concerns",
+      tasks: [
+        { id: "architecture", role: "repository_analyst", objective: "Map the loop", focusPaths: ["src/agent"] },
+        { id: "risks", role: "risk_reviewer", objective: "Find concurrency risks", focusPaths: [] },
+      ],
+    }))).toMatchObject({
+      type: "DELEGATE_READONLY",
+      tasks: [{ id: "architecture" }, { id: "risks" }],
+    });
+  });
+
+  it("rejects duplicate or undersized delegation batches", () => {
+    expect(() => parser.parse(JSON.stringify({
+      type: "DELEGATE_READONLY",
+      reason: "Too small",
+      tasks: [{ id: "one", role: "repository_analyst", objective: "Inspect", focusPaths: [] }],
+    }))).toThrow(/schema validation failed/);
+    expect(() => parser.parse(JSON.stringify({
+      type: "DELEGATE_READONLY",
+      reason: "Duplicates",
+      tasks: [
+        { id: "same", role: "repository_analyst", objective: "Inspect A", focusPaths: [] },
+        { id: "same", role: "risk_reviewer", objective: "Inspect B", focusPaths: [] },
+      ],
+    }))).toThrow(/schema validation failed/);
+  });
+
   it("normalizes common model decision shape drift", () => {
     expect(parser.parse(JSON.stringify({
       type: "apply_patch",

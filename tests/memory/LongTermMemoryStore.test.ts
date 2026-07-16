@@ -29,6 +29,7 @@ describe("LongTermMemoryStore", () => {
         summary: "实现 MedianFinder，使用两个堆维护数据流中位数，并导出 TypeScript 类。",
         success: true,
         mode: "AGENT_LOOP",
+        finalDiff: "+++ b/src/MedianFinder.ts\n@@ -0,0 +1,10 @@",
       },
     });
 
@@ -62,7 +63,7 @@ describe("LongTermMemoryStore", () => {
 
     expect(secondIndex.total).toBe(1);
     expect(entries).toHaveLength(1);
-    expect(results[0].entry.source).toBe("MEMORY_COMPACTION");
+    expect(results[0].entry).toMatchObject({ source: "MEMORY_COMPACTION", kind: "SESSION_SUMMARY", scope: "SESSION" });
   });
 
   it("formats empty and non-empty search results for context injection", async () => {
@@ -74,7 +75,9 @@ describe("LongTermMemoryStore", () => {
       type: "TASK_SUMMARY",
       payload: {
         summary: "已经创建贪吃蛇小游戏 demo_app.html，并说明可用浏览器直接打开。",
+        success: true,
         mode: "AGENT_LOOP",
+        finalDiff: "+++ b/demo_app.html\n@@ -0,0 +1,10 @@",
       },
     });
 
@@ -109,6 +112,25 @@ describe("LongTermMemoryStore", () => {
     await expect(store.remove(first.id)).resolves.toBe(false);
     await expect(store.clear()).resolves.toBe(1);
     await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it("serializes concurrent writers so read-modify-write does not lose memories", async () => {
+    await Promise.all(Array.from({ length: 8 }, (_, index) => (
+      new LongTermMemoryStore({ repoPath }).remember({
+        title: `concurrent topic ${index}`,
+        text: `Convention number ${index}`,
+      })
+    )));
+
+    await expect(new LongTermMemoryStore({ repoPath }).stats()).resolves.toMatchObject({ total: 8, active: 8 });
+  });
+
+  it("rejects malformed persisted records with an actionable index position", async () => {
+    const store = new LongTermMemoryStore({ repoPath });
+    await store.init();
+    await fs.writeFile(path.join(repoPath, ".mini-agent", "memory", "index.jsonl"), "{\"id\":\"broken\"}\n", "utf8");
+
+    await expect(store.list()).rejects.toThrow("Invalid memory entry at index 0");
   });
 
   it("does not index failed task summaries", async () => {
@@ -166,9 +188,21 @@ describe("LongTermMemoryStore", () => {
     const results = await store.search("test command", { minScore: 0 });
     const stats = await store.stats();
     expect(listed.find((entry) => entry.id === oldEntry.id)?.metadata.supersededBy).toBe(newEntry.id);
+    expect(listed.find((entry) => entry.id === oldEntry.id)?.status).toBe("SUPERSEDED");
     expect(results.map((result) => result.entry.id)).toContain(newEntry.id);
     expect(results.map((result) => result.entry.id)).not.toContain(oldEntry.id);
     expect(stats).toMatchObject({ total: 3, active: 1, expired: 1, superseded: 1 });
+  });
+
+  it("reactivates the previous same-topic memory when the replacement is forgotten", async () => {
+    const store = new LongTermMemoryStore({ repoPath });
+    const oldEntry = await store.remember({ title: "package manager", text: "Use npm" });
+    const replacement = await store.remember({ title: "package manager", text: "Use pnpm" });
+
+    await expect(store.remove(replacement.id)).resolves.toBe(true);
+    const restored = (await store.list()).find((entry) => entry.id === oldEntry.id);
+    expect(restored).toMatchObject({ status: "ACTIVE" });
+    expect(restored?.supersededBy).toBeUndefined();
   });
 
   it("supports a pluggable embedding provider", async () => {
@@ -200,6 +234,39 @@ describe("LongTermMemoryStore", () => {
 
     await expect(differentProvider.search("upload policy", { minScore: 0 })).resolves.toEqual([]);
     await expect(differentDimensions.search("upload policy", { minScore: 0 })).resolves.toEqual([]);
+  });
+
+  it("explicitly migrates schema and embeddings instead of doing so during search", async () => {
+    const original = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "provider-a", embed: async () => [1, 0] },
+    });
+    await original.remember({ title: "upload policy", text: "Uploads require checksums." });
+    const migrated = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "provider-b", embed: async () => [1, 0, 0] },
+    });
+
+    await expect(migrated.search("upload policy", { minScore: 0 })).resolves.toEqual([]);
+    await expect(migrated.migrate()).resolves.toMatchObject({ total: 1, embeddingsMigrated: 1, embeddingProvider: "provider-b" });
+    const entries = await migrated.list();
+    expect(entries[0]).toMatchObject({ schemaVersion: 2, embeddingProvider: "provider-b", vector: [1, 0, 0] });
+  });
+
+  it("does not auto-promote plans, web answers, or outcomes without a diff", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const session = await sessionStore.createSession({ title: "non durable records" });
+    for (const payload of [
+      { summary: "A successful plan", success: true, mode: "PLAN" },
+      { summary: "A web fact", success: true, mode: "WEB_ANSWER" },
+      { summary: "No repository evidence", success: true, mode: "AGENT_LOOP" },
+    ]) {
+      await sessionStore.appendRecord(session.sessionId, { type: "TASK_SUMMARY", payload });
+    }
+
+    const store = new LongTermMemoryStore({ repoPath });
+    await expect(store.indexSession(sessionStore, session.sessionId)).resolves.toMatchObject({ indexed: 0 });
+    await expect(store.list()).resolves.toEqual([]);
   });
 
   it("can exclude the active session before ranking retrieval candidates", async () => {

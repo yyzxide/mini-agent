@@ -3,6 +3,7 @@ import { readSessionMemory } from "../session/SessionMemory.js";
 import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger } from "../utils/logger.js";
 import { appendLongTermMemoryContext, MemoryContextService } from "../memory/MemoryContextService.js";
+import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { appendSkillContext, SkillContextService } from "../skills/SkillContextService.js";
 import {
   buildCodeReviewContext,
@@ -34,8 +35,15 @@ export async function runCodeReviewTask(
 
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
-  const longTermMemory = await new MemoryContextService({ repoPath }).build({ query: userGoal, sessionId })
-    .catch(() => "(none)");
+  const memoryPlan = planMemoryRead({ query: userGoal, mode: "CODE_REVIEW" });
+  const longTermMemory = memoryPlan.retrieve
+    ? await new MemoryContextService({ repoPath }).build({
+      query: memoryPlan.query,
+      ...(memoryPlan.excludeActiveSession ? { excludeSessionId: sessionId } : {}),
+      allowedKinds: memoryPlan.allowedKinds,
+      allowedScopes: memoryPlan.allowedScopes,
+    }).catch(() => "(none)")
+    : "(none)";
   const reviewMemory = appendLongTermMemoryContext(sessionMemory, longTermMemory);
   const skillContext = await new SkillContextService({ repoPath }).build(userGoal).catch(() => "(none selected)");
   const reviewContext = appendSkillContext(reviewMemory, skillContext);

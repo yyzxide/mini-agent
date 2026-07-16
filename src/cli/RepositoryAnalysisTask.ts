@@ -6,6 +6,7 @@ import type { ToolContext, ToolResult } from "../tools/Tool.js";
 import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger } from "../utils/logger.js";
 import { appendLongTermMemoryContext, MemoryContextService } from "../memory/MemoryContextService.js";
+import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { appendSkillContext, SkillContextService } from "../skills/SkillContextService.js";
 import { createOpenAICompatibleClient, openTaskSession, recordTaskUserMessage, recordLlmUsageFromClient } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
@@ -42,8 +43,15 @@ export async function runRepositoryAnalysisTask(
 
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
-  const longTermMemory = await new MemoryContextService({ repoPath }).build({ query: userGoal, sessionId })
-    .catch(() => "(none)");
+  const memoryPlan = planMemoryRead({ query: userGoal, mode: "REPOSITORY_ANALYSIS" });
+  const longTermMemory = memoryPlan.retrieve
+    ? await new MemoryContextService({ repoPath }).build({
+      query: memoryPlan.query,
+      ...(memoryPlan.excludeActiveSession ? { excludeSessionId: sessionId } : {}),
+      allowedKinds: memoryPlan.allowedKinds,
+      allowedScopes: memoryPlan.allowedScopes,
+    }).catch(() => "(none)")
+    : "(none)";
   const analysisMemory = appendLongTermMemoryContext(sessionMemory, longTermMemory);
   const skillContext = await new SkillContextService({ repoPath }).build(userGoal).catch(() => "(none selected)");
   const analysisContextMemory = appendSkillContext(analysisMemory, skillContext);

@@ -31,14 +31,18 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
-- Maintains governed long-term memory with confidence, TTL, same-topic supersession, secret redaction, and pluggable local or OpenAI-compatible embeddings.
+- Maintains governed Memory v2 records with semantic kinds/scopes, evidence-backed automatic writes, TTL, supersession, secret redaction, and pluggable embeddings.
 - Provides repository-local document RAG for Markdown/TXT with safe ingestion, line-aware chunking, incremental source replacement, hybrid retrieval, metadata filters, grounded citations, insufficient-evidence refusal, and offline evaluation metrics.
 - Caches remote embeddings by provider/vector-space and text hash with bounded in-process LRU, single-flight deduplication, and repository-local atomic persistence without storing source text.
-- Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory clear --yes`, `/remember`, and `/forget`; failed task summaries are excluded and common secrets are redacted.
+- Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory migrate`, `memory clear --yes`, `/remember`, and `/forget`; plans, web/direct answers, failed tasks, and Agent outcomes without a repository diff are not auto-promoted.
 - Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into answer/task modes without allowing skills to bypass tool permissions. Ambiguous direct-answer follow-ups suppress fresh Skill selection so an older workflow cannot become the referent.
 - Provides a hard read-only plan mode through `mini-agent plan`, `/plan`, `/plan off`, and `/execute`; plan mode exposes only read-only tools and blocks patches and commands at runtime.
 - Connects configured MCP servers over stdio or Streamable HTTP, discovers remote tools, namespaces them, maps permissions, forwards `tools/call`, and closes server lifecycles.
-- Provides an Agent Harness suite with repeatable scenarios, step/LLM/tool metrics, tool-choice accuracy, and failure classification.
+- Provides AgentBench v1 with versioned scripted/real-model datasets, pass@1/pass@k, quality gates, baseline regression checks, token/cache/latency/context metrics, and failure classification.
+- Persists compact versioned Agent checkpoints and restores interrupted Working Set, side-effect, verification, and in-flight-action state without replaying raw patches or command output.
+- Enforces a deterministic task-completion contract: source/configuration changes require a successful verification after the latest patch, while documentation-only changes do not pay that cost.
+- Supports opt-in controlled multi-agent investigation: one parent is the sole writer, while two or three isolated children inspect independent repository concerns in parallel using only local closed-world read-only tools.
+- Grades verification evidence as `DIFF_HYGIENE < SYNTAX < STATIC < TEST`, checks file scope, and requires stronger evidence for compiled source, configuration, bug-fix, regression, refactor, and test changes.
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
 - Reads files with repository path safety checks and refuses internal metadata paths such as `.git` and `.mini-agent`.
@@ -112,6 +116,12 @@ Edit `mini-agent.config.json`:
     "topK": 5,
     "minScore": 0.12,
     "maxContextChars": 6000
+  },
+  "multiAgent": {
+    "mode": "off",
+    "maxConcurrency": 2,
+    "maxBatchesPerRun": 1,
+    "maxTasksPerRun": 3
   }
 }
 ```
@@ -149,10 +159,14 @@ mini-agent memory search "之前数据流中位数怎么实现的"
 mini-agent memory list
 mini-agent memory remember "Use npm test before pushing"
 mini-agent memory stats
+mini-agent memory migrate
 mini-agent rag ingest README.md docs --tag project
 mini-agent rag search "how does MCP permission mapping work?" --top-k 3
 mini-agent rag stats
 mini-agent rag eval docs/rag-eval.example.json
+mini-agent bench run benchmarks/agent-bench-v1.json
+mini-agent bench run benchmarks/agent-bench-v1.json --baseline benchmarks/baselines/core-v1.json
+mini-agent bench run benchmarks/agent-bench-v1.json --mode real --repetitions 3 --output .mini-agent/benchmarks/real.json
 mini-agent skill list
 mini-agent skill init testing --description "Use for Vitest regression work"
 mini-agent plan "refactor the CLI router"
@@ -178,10 +192,12 @@ mini-agent run "inspect repository" --model "your-model"
 mini-agent run "inspect repository" --base-url "https://api.example.com/v1"
 mini-agent run "inspect repository" --event-stream
 mini-agent run "write a C++ two-sum example" --agent-loop
+mini-agent run "inspect the context and memory architecture" --agents 3
 ```
 
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
 `--agent-loop` forces the repository-editing loop when the router would otherwise answer directly.
+`--agents 2..3` opts into one bounded read-only delegation batch and also forces the AgentLoop. `--agents 1` disables delegation. It is off by default; config can enable it with `multiAgent.mode: "auto"`.
 
 ## Answer Modes
 
@@ -411,12 +427,17 @@ Session records include:
 - file-change summaries
 - test pass/fail markers
 - final git diff
+- compact Agent checkpoints for interrupted-task recovery
 
 The current session records are used as short-term memory. Before each LLM call, `mini-agent` injects recent user messages, assistant messages, task summaries, command results, tool results, and errors into the prompt.
 
-Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. After tasks finish, the CLI indexes `TASK_SUMMARY` and `MEMORY_COMPACTION` records with keywords, confidence, provider identity, and vectors. Retrieval excludes expired and superseded entries, then applies query building, candidate retrieval, reranking, and evidence selection before `ContextBuilder` injects the final memories as untrusted historical evidence.
+Agent execution recovery is separate from conversational memory. During AgentLoop execution, `AGENT_CHECKPOINT` records persist a bounded Working Set, successful side effects, latest verification/test/RAG outcome, whether verification happened after the latest patch, total steps, and any in-flight action. Resuming a session restores only the latest `RUNNING` or `WAITING_USER` checkpoint in the same operating mode. `FINISHED`/`FAILED` checkpoints and checkpoints followed by a task summary are terminal, so a completed task cannot leak execution state into the next task. If interruption happened during a tool, patch, or command, the restored task enters recovery and inspects current repository state before retrying.
 
-The default provider remains a dependency-free deterministic local embedding. Set `MINI_AGENT_EMBEDDING_MODEL`, `MINI_AGENT_EMBEDDING_BASE_URL`, and `MINI_AGENT_EMBEDDING_API_KEY` to use a real OpenAI-compatible embedding endpoint. Remote embedding results are content-addressed under `.mini-agent/cache/embeddings/v1/`; cache records contain vectors and hashes, not the original text. LLM KV/prompt caching remains provider-managed, while the CLI records returned cached-token metrics. Storage is still repository-local JSONL rather than a production vector database.
+Before every model decision, Context Engine v2 injects a task-completion contract derived from the user goal and the files actually changed. `FINAL success=true` is checked locally rather than trusted: required repository changes must exist; indexed-knowledge answers must preserve grounded evidence; requested verification must pass; and source/configuration changes must have sufficiently strong, relevant evidence after the most recent successful patch. Verification is ordered as `DIFF_HYGIENE < SYNTAX < STATIC < TEST`; a weak diff check cannot satisfy a TypeScript change, a file-scoped check cannot verify an unrelated file, and bug-fix/regression/refactor tasks require tests. A passing command that predates a later patch is stale and cannot satisfy completion.
+
+Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. Automatic writes accept only successful AgentLoop outcomes with a non-empty repository diff, plus explicit compaction records; plans, web/direct answers, repository analysis, failures, and unsupported summaries are rejected by `MemoryWritePolicy`. Records carry a semantic kind, scope, status, evidence references, confidence, provider identity, and vector. `MemoryReadPolicy` selects allowed kinds/scopes per consumer before retrieval, reranking, and evidence selection. Ordinary direct/web answers do not query historical memory; explicit recall can retrieve outcomes, while normal repository work receives stable preferences, conventions, and architecture decisions only.
+
+The default provider remains a dependency-free deterministic local embedding. Set `MINI_AGENT_EMBEDDING_MODEL`, `MINI_AGENT_EMBEDDING_BASE_URL`, and `MINI_AGENT_EMBEDDING_API_KEY` to use a real OpenAI-compatible embedding endpoint. Remote embedding results are content-addressed under `.mini-agent/cache/embeddings/v1/`; cache records contain vectors and hashes, not the original text. LLM KV/prompt caching remains provider-managed, while the CLI records returned cached-token metrics. Memory JSONL mutations use a cross-process lock and atomic replacement. Changing provider/schema does not silently rebuild entries during search; run `mini-agent memory migrate` explicitly.
 
 Runtime logs and task change logs serve different purposes:
 
@@ -442,6 +463,14 @@ mini-agent doctor
 ```
 
 ## Development
+
+Run the deterministic AgentBench quality gate:
+
+```bash
+npm run bench -- --baseline benchmarks/baselines/core-v1.json
+```
+
+The versioned core dataset covers repository edits, document creation, patch-conflict recovery, premature-success guardrails, test verification, and read-only planning. Scripted mode evaluates the execution engine deterministically. Real mode ignores scripted decisions and samples the configured OpenAI-compatible model; use multiple repetitions to measure reliability rather than a single lucky run. Reports include pass@1, pass@k, run pass rate, tool-choice accuracy, steps, LLM calls, duration, token/cache usage, context truncation, test outcomes, and categorized failures. A failing dataset threshold or baseline comparison sets a non-zero CLI exit code.
 
 ```bash
 npm install
@@ -473,7 +502,8 @@ Included:
 - real OpenAI-compatible LLM client
 - task router for direct answers vs repository edits
 - agent loop
-- context builder with recent session memory
+- opt-in parent/child multi-agent investigation with a single-writer boundary and bounded parallel read-only children
+- phase-aware Context Engine v2 with Working Set, token budgeting, structured session compaction, and context traces
 - tool registry
 - path-safe file tools
 - git status and diff tools

@@ -12,6 +12,7 @@ import {
   routeTask,
   shouldPreserveAgentLoopIntent,
 } from "../agent/TaskRouter.js";
+import { findLatestAgentCheckpoint, recoverLatestAgentCheckpoint } from "../agent/AgentCheckpoint.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
 import { isTestCommand } from "../command/CommandClassification.js";
@@ -59,6 +60,7 @@ import { runWebAnswerTask } from "./WebAnswerTask.js";
 import { registerMcpCommands } from "./McpCommands.js";
 import { registerRagCommands } from "./RagCommands.js";
 import { registerToolCommands } from "./ToolCommands.js";
+import { registerBenchCommands } from "./BenchCommands.js";
 
 const VERSION = "0.1.0";
 const INTERACTIVE_RESUME_LIST_LIMIT = 10;
@@ -124,6 +126,16 @@ interface SessionAgentStatusOutput {
   lastMode?: TaskChangeMode;
   lastUserMessage?: string;
   latestSummary?: string;
+  checkpoint: {
+    runId: string;
+    status: string;
+    totalSteps: number;
+    recoverable: boolean;
+    repositoryChanged: boolean;
+    verificationAfterLatestChange: boolean;
+    latestVerification?: { command: string; success: boolean };
+    inFlightAction?: string;
+  } | null;
   llm: {
     configuredModel: string | null;
     configuredBaseUrl: string | null;
@@ -170,6 +182,7 @@ export function createProgram(): Command {
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
     .option("--agent-loop", "Force the repository-editing agent loop even for direct-answer tasks")
+    .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (task.length === 0) {
@@ -192,6 +205,7 @@ export function createProgram(): Command {
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines")
+    .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (!task) throw new Error("Plan task cannot be empty.");
@@ -556,6 +570,15 @@ export function createProgram(): Command {
     });
 
   memoryCommand
+    .command("migrate")
+    .description("Upgrade memory schema and rebuild embeddings with the configured provider")
+    .action(async () => {
+      await runJsonAction(async () => {
+        writeJson(await new LongTermMemoryStore({ repoPath: process.cwd() }).migrate());
+      });
+    });
+
+  memoryCommand
     .command("clear")
     .description("Delete all local long-term memories")
     .option("--yes", "Confirm destructive deletion")
@@ -808,6 +831,7 @@ export function createProgram(): Command {
   registerToolCommands(program);
   registerMcpCommands(program);
   registerRagCommands(program);
+  registerBenchCommands(program);
 
   return program;
 }
@@ -1389,6 +1413,8 @@ async function buildSessionAgentStatus(
     .filter((record): record is SessionRecord & { type: "LLM_USAGE" } => record.type === "LLM_USAGE");
   const usageSummary = summarizeLlmUsageRecords(usageRecords);
   const lastRecordedModel = findLastRecordedLlmModel(usageRecords);
+  const latestCheckpoint = findLatestAgentCheckpoint(records);
+  const recoverableCheckpoint = recoverLatestAgentCheckpoint(records);
 
   return {
     sessionId: meta.sessionId,
@@ -1403,6 +1429,23 @@ async function buildSessionAgentStatus(
     ...(lastMode ? { lastMode } : {}),
     ...(lastUserMessage ? { lastUserMessage } : {}),
     ...(latestSummary ? { latestSummary } : {}),
+    checkpoint: latestCheckpoint ? {
+      runId: latestCheckpoint.runId,
+      status: latestCheckpoint.status,
+      totalSteps: latestCheckpoint.totalSteps,
+      recoverable: recoverableCheckpoint?.runId === latestCheckpoint.runId,
+      repositoryChanged: latestCheckpoint.effects.successfulPatch,
+      verificationAfterLatestChange: latestCheckpoint.effects.verificationAfterPatch === true,
+      ...(latestCheckpoint.effects.latestVerification
+        ? {
+          latestVerification: {
+            command: latestCheckpoint.effects.latestVerification.command,
+            success: latestCheckpoint.effects.latestVerification.success,
+          },
+        }
+        : {}),
+      ...(latestCheckpoint.inFlightAction ? { inFlightAction: latestCheckpoint.inFlightAction } : {}),
+    } : null,
     llm: {
       configuredModel: resolvedConfig?.openai.model ?? lastRecordedModel ?? null,
       configuredBaseUrl: resolvedConfig?.openai.baseUrl ?? null,
@@ -1452,8 +1495,10 @@ function summarizeLlmUsageRecords(
   let hasCachedPromptTokens = false;
   let hasReasoningTokens = false;
   let usageAvailable = false;
+  let calls = 0;
 
   for (const record of records) {
+    calls += readPayloadNumber(record.payload, "llmCalls") ?? 1;
     if (record.payload.usageAvailable === true) {
       usageAvailable = true;
     }
@@ -1490,7 +1535,7 @@ function summarizeLlmUsageRecords(
   }
 
   return {
-    calls: records.length,
+    calls,
     promptTokens: hasPromptTokens ? promptTokens : null,
     completionTokens: hasCompletionTokens ? completionTokens : null,
     totalTokens: hasTotalTokens ? totalTokens : null,
@@ -1526,6 +1571,16 @@ function formatSessionAgentStatus(status: SessionAgentStatusOutput): string {
     status.lastMode ? `- last mode: ${status.lastMode}` : undefined,
     status.lastUserMessage ? `- last user message: ${limitSingleLine(status.lastUserMessage, 120)}` : undefined,
     status.latestSummary ? `- latest summary: ${limitSingleLine(status.latestSummary, 120)}` : undefined,
+    status.checkpoint
+      ? `- checkpoint: ${status.checkpoint.status}, run=${status.checkpoint.runId}, total steps=${String(status.checkpoint.totalSteps)}, recoverable=${String(status.checkpoint.recoverable)}`
+      : "- checkpoint: (none)",
+    status.checkpoint?.inFlightAction ? `- checkpoint in-flight action: ${status.checkpoint.inFlightAction}` : undefined,
+    status.checkpoint
+      ? `- completion evidence: repository changed=${String(status.checkpoint.repositoryChanged)}, verification after latest change=${String(status.checkpoint.verificationAfterLatestChange)}`
+      : undefined,
+    status.checkpoint?.latestVerification
+      ? `- latest verification: ${status.checkpoint.latestVerification.success ? "PASS" : "FAIL"} ${status.checkpoint.latestVerification.command}`
+      : undefined,
     `- configured model: ${status.llm.configuredModel ?? "(unconfigured)"}`,
     `- configured base URL: ${status.llm.configuredBaseUrl ?? "(unconfigured)"}`,
     `- configured max output tokens: ${status.llm.configuredMaxTokens ?? "(unknown)"}`,
@@ -1640,9 +1695,12 @@ async function runAgentTask(
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
   const route = await resolveTaskRoute(repoPath, userGoal, options.session);
+  const forceAgentLoop = options.agentLoop === true || (options.agents ?? 1) > 1;
+  const multiAgentConfigured = route.intent === "AGENT_LOOP"
+    && await loadAgentConfig(repoPath).then((config) => config.multiAgent?.mode === "auto").catch(() => false);
   const mode: TaskChangeMode = options.operatingMode === "PLAN"
     ? "PLAN"
-    : options.agentLoop === true ? "AGENT_LOOP" : route.intent;
+    : forceAgentLoop ? "AGENT_LOOP" : route.intent;
   const logger = createRuntimeLogger(repoPath);
   const beforeSnapshot = await readGitSnapshot(repoPath);
   let taskResult: CliTaskResult;
@@ -1652,18 +1710,20 @@ async function runAgentTask(
     mode,
     reason: route.reason,
     requestedSessionId: options.session ?? null,
+    multiAgentRequested: (options.agents ?? 1) > 1 || multiAgentConfigured,
   }).catch(() => undefined);
 
   try {
     if (options.operatingMode === "PLAN") {
       taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt);
-    } else if (route.intent === "DIRECT_ANSWER" && options.agentLoop !== true) {
+    } else if (route.intent === "DIRECT_ANSWER" && !forceAgentLoop) {
       taskResult = await runDirectAnswerTask(repoPath, userGoal, options);
-    } else if (route.intent === "WEB_ANSWER" && options.agentLoop !== true) {
+    } else if (route.intent === "WEB_ANSWER" && !forceAgentLoop) {
       taskResult = await runWebAnswerTask(repoPath, userGoal, options);
-    } else if (route.intent === "CODE_REVIEW" && options.agentLoop !== true) {
+    } else if (route.intent === "CODE_REVIEW" && !forceAgentLoop) {
       taskResult = await runCodeReviewTask(repoPath, userGoal, options);
-    } else if (route.intent === "AGENT_LOOP" && looksLikeRepositoryAnalysisTask(userGoal)) {
+    } else if (route.intent === "AGENT_LOOP" && looksLikeRepositoryAnalysisTask(userGoal)
+      && !forceAgentLoop && !multiAgentConfigured) {
       taskResult = await runRepositoryAnalysisTask(repoPath, userGoal, options);
     } else {
       taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt);
@@ -2037,6 +2097,14 @@ function parsePositiveInteger(value: string): number {
     throw new Error(`Expected a positive integer, got: ${value}`);
   }
 
+  return parsed;
+}
+
+function parseAgentCount(value: string): number {
+  const parsed = parsePositiveInteger(value);
+  if (parsed > 3) {
+    throw new Error(`Expected an agent count between 1 and 3, got: ${value}`);
+  }
   return parsed;
 }
 

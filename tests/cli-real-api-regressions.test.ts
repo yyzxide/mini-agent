@@ -49,6 +49,12 @@ describe("mini-agent real-api style regressions", () => {
           "",
         ].join("\n"),
       }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "tsc",
+        args: ["--noEmit", "--skipLibCheck", "src/generated_feature.ts"],
+        description: "验证生成的 TypeScript 源码。",
+      }),
       "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
       "{\"type\":\"FINAL\",\"summary\":\"已创建 longest valid parentheses 实现文件。\",\"success\":true}",
     ];

@@ -6,6 +6,8 @@ export function decisionToMessage(decision: AgentDecision): string {
       return decision.message;
     case "TOOL_CALL":
       return `Calling tool ${decision.toolName}`;
+    case "DELEGATE_READONLY":
+      return `Delegating ${String(decision.tasks.length)} read-only investigations: ${decision.reason}`;
     case "APPLY_PATCH":
       return decision.description ?? "Applying patch";
     case "RUN_COMMAND":

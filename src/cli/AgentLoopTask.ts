@@ -8,6 +8,8 @@ import { PermissionManager } from "../permission/PermissionManager.js";
 import { createConfiguredToolRegistry } from "../mcp/McpRegistryLoader.js";
 import { createOpenAICompatibleClient, createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
+import { ReadonlySubAgentCoordinator } from "../agent/ReadonlySubAgentCoordinator.js";
+import { loadAgentConfig, resolveMultiAgentPolicy } from "../config/AgentConfig.js";
 
 export async function runAgentLoopTask(
   repoPath: string,
@@ -22,6 +24,7 @@ export async function runAgentLoopTask(
       .catch(() => undefined)
     : undefined;
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
+  const multiAgent = resolveMultiAgentPolicy(await loadAgentConfig(repoPath), options.agents);
   const llmClient = await createOpenAICompatibleClient(repoPath, options);
   const { registry: toolRegistry, diagnostics } = await createConfiguredToolRegistry(repoPath);
   for (const diagnostic of diagnostics.filter((entry) => !entry.success)) {
@@ -39,6 +42,14 @@ export async function runAgentLoopTask(
     contextBuilder: new ContextBuilder({ repoPath }),
     onProgress: writeAgentProgress,
     ...(prompt ? { askUser: prompt } : {}),
+    ...(multiAgent.enabled
+      ? {
+        subAgentCoordinator: new ReadonlySubAgentCoordinator({
+          repoPath,
+          createLlmClient: async () => await createOpenAICompatibleClient(repoPath, options),
+        }),
+      }
+      : {}),
   });
 
   const result = await loop.run({
@@ -50,6 +61,7 @@ export async function runAgentLoopTask(
     nonInteractive: options.nonInteractive === true,
     keepSessionActive: options.keepSessionActive === true,
     operatingMode: options.operatingMode ?? "EXECUTE",
+    multiAgent,
   }).finally(async () => await toolRegistry.dispose());
 
   return {
@@ -58,6 +70,12 @@ export async function runAgentLoopTask(
     mode: options.operatingMode === "PLAN" ? "PLAN" : "AGENT_LOOP",
     summary: result.summary,
     ...(result.error ? { error: result.error } : {}),
+    ...(result.delegationBatches === undefined ? {} : {
+      metadata: {
+        delegationBatches: result.delegationBatches,
+        subAgents: result.subAgents ?? 0,
+      },
+    }),
   };
 }
 
@@ -72,6 +90,9 @@ function writeAgentProgress(event: AgentProgressEvent): void {
       break;
     case "tool":
       process.stdout.write(`[tool] ${event.toolName}\n`);
+      break;
+    case "agents":
+      process.stdout.write(`[agents] ${event.phase}: ${event.message}\n`);
       break;
     case "patch":
       process.stdout.write(`[patch] ${event.description}\n`);
@@ -93,4 +114,3 @@ function writeAgentProgress(event: AgentProgressEvent): void {
       break;
   }
 }
-

@@ -3,6 +3,13 @@ import type { JsonObject } from "../session/SessionTypes.js";
 import type { ToolResult } from "../tools/Tool.js";
 import type { AgentDecision } from "./AgentDecision.js";
 import type { AgentOperatingMode } from "./AgentOperatingMode.js";
+import type { AgentCheckpoint } from "./AgentCheckpoint.js";
+import {
+  classifyVerificationCommand,
+  type VerificationCommandClassification,
+  type VerificationLevel,
+} from "../command/CommandClassification.js";
+import type { SubAgentBatchResult } from "./SubAgentTypes.js";
 
 export type AgentStatus = "RUNNING" | "WAITING_USER" | "FINISHED" | "FAILED";
 
@@ -25,6 +32,7 @@ export interface AgentPatchExecutionResult {
 }
 
 export interface AgentStateSnapshot {
+  runId: string;
   sessionId: string;
   repoPath: string;
   userGoal: string;
@@ -39,18 +47,49 @@ export interface AgentStateSnapshot {
   lastError: string | null;
   finalDiff: string | null;
   operatingMode: AgentOperatingMode;
+  recoveredFromCheckpoint: boolean;
+  recoveredRepositoryChanges: boolean;
+  multiAgentEnabled: boolean;
+  delegationResultCount: number;
 }
 
 export interface AgentStateOptions {
   sessionId: string;
+  runId?: string;
   repoPath: string;
   userGoal: string;
   maxSteps?: number;
   operatingMode?: AgentOperatingMode;
+  recoveredCheckpoint?: AgentCheckpoint;
+  multiAgentEnabled?: boolean;
 }
+
+export interface AgentVerificationOutcome {
+  command: string;
+  success: boolean;
+  exitCode: number | null;
+  level: VerificationLevel;
+  repositoryWide: boolean;
+  scopePaths: string[];
+}
+
+export interface AgentCompletionEvidence {
+  repositoryChanged: boolean;
+  hasAnyVerification: boolean;
+  hasVerificationAfterLatestChange: boolean;
+  verificationAfterLatestChange: boolean;
+  latestVerification?: AgentVerificationOutcome;
+  verificationEvidence: AgentVerificationOutcome[];
+  verificationEvidenceAfterLatestChange: AgentVerificationOutcome[];
+}
+
+type AgentExecutionAction =
+  | { kind: "PATCH"; success: boolean }
+  | { kind: "COMMAND"; classification: VerificationCommandClassification; result: AgentVerificationOutcome };
 
 export class AgentState {
   readonly sessionId: string;
+  readonly runId: string;
   readonly repoPath: string;
   readonly userGoal: string;
   readonly maxSteps: number;
@@ -64,13 +103,21 @@ export class AgentState {
   lastError: string | null = null;
   finalDiff: string | null = null;
   readonly operatingMode: AgentOperatingMode;
+  readonly recoveredCheckpoint: AgentCheckpoint | undefined;
+  readonly multiAgentEnabled: boolean;
+  delegationBatches: SubAgentBatchResult[] = [];
+  private readonly executionActions: AgentExecutionAction[] = [];
 
   constructor(options: AgentStateOptions) {
     this.sessionId = options.sessionId;
+    this.runId = options.runId ?? `${options.sessionId}:run`;
     this.repoPath = options.repoPath;
     this.userGoal = options.userGoal;
     this.maxSteps = options.maxSteps ?? 20;
     this.operatingMode = options.operatingMode ?? "EXECUTE";
+    this.recoveredCheckpoint = options.recoveredCheckpoint;
+    this.multiAgentEnabled = options.multiAgentEnabled ?? false;
+    this.delegationBatches = structuredClone(options.recoveredCheckpoint?.collaboration?.batches ?? []);
   }
 
   addUserMessage(content: string): void {
@@ -91,10 +138,77 @@ export class AgentState {
 
   addCommandResult(result: CommandResult): void {
     this.commandResults.push(result);
+    const classification = classifyVerificationCommand(result.command);
+    this.executionActions.push({
+      kind: "COMMAND",
+      classification,
+      result: {
+        command: result.command,
+        success: result.success,
+        exitCode: result.exitCode,
+        level: classification.level,
+        repositoryWide: classification.repositoryWide,
+        scopePaths: classification.scopePaths,
+      },
+    });
   }
 
   addPatchResult(result: AgentPatchExecutionResult): void {
     this.patchResults.push(result);
+    this.executionActions.push({ kind: "PATCH", success: result.result.success });
+  }
+
+  addDelegationBatch(result: SubAgentBatchResult): void {
+    this.delegationBatches.push(result);
+  }
+
+  getCompletionEvidence(): AgentCompletionEvidence {
+    const recovered = this.recoveredCheckpoint?.effects;
+    let repositoryChanged = recovered?.successfulPatch === true;
+    let verificationAfterLatestChange = recovered?.verificationAfterPatch === true;
+    let hasVerificationAfterLatestChange = recovered?.verificationAttemptedAfterPatch === true
+      || verificationAfterLatestChange;
+    const recoveredLatestVerification = recovered?.latestVerification ?? recovered?.latestTest;
+    let latestVerification = recoveredLatestVerification
+      ? normalizeVerificationOutcome(recoveredLatestVerification)
+      : undefined;
+    let hasAnyVerification = latestVerification !== undefined;
+    let verificationEvidenceAfterLatestChange = (recovered?.verificationEvidenceAfterPatch ?? [])
+      .map(normalizeVerificationOutcome);
+    let verificationEvidence = latestVerification
+      ? [normalizeVerificationOutcome(latestVerification), ...verificationEvidenceAfterLatestChange]
+      : [...verificationEvidenceAfterLatestChange];
+
+    for (const action of this.executionActions) {
+      if (action.kind === "PATCH") {
+        if (action.success) {
+          repositoryChanged = true;
+          hasVerificationAfterLatestChange = false;
+          verificationAfterLatestChange = false;
+          verificationEvidenceAfterLatestChange = [];
+        }
+        continue;
+      }
+      if (action.classification.level === "NONE") continue;
+      hasAnyVerification = true;
+      latestVerification = action.result;
+      verificationEvidence.push(action.result);
+      if (repositoryChanged) {
+        hasVerificationAfterLatestChange = true;
+        verificationEvidenceAfterLatestChange.push(action.result);
+        verificationAfterLatestChange = verificationEvidenceAfterLatestChange.some((candidate) => candidate.success);
+      }
+    }
+
+    return {
+      repositoryChanged,
+      hasAnyVerification,
+      hasVerificationAfterLatestChange,
+      verificationAfterLatestChange,
+      verificationEvidence: uniqueVerificationEvidence(verificationEvidence),
+      verificationEvidenceAfterLatestChange: uniqueVerificationEvidence(verificationEvidenceAfterLatestChange),
+      ...(latestVerification ? { latestVerification } : {}),
+    };
   }
 
   setLastError(error: string | null): void {
@@ -123,6 +237,7 @@ export class AgentState {
 
   toSnapshot(): AgentStateSnapshot {
     return {
+      runId: this.runId,
       sessionId: this.sessionId,
       repoPath: this.repoPath,
       userGoal: this.userGoal,
@@ -137,6 +252,39 @@ export class AgentState {
       lastError: this.lastError,
       finalDiff: this.finalDiff,
       operatingMode: this.operatingMode,
+      recoveredFromCheckpoint: this.recoveredCheckpoint !== undefined,
+      recoveredRepositoryChanges: this.recoveredCheckpoint?.effects.successfulPatch === true,
+      multiAgentEnabled: this.multiAgentEnabled,
+      delegationResultCount: this.delegationBatches.length,
     };
   }
+}
+
+function normalizeVerificationOutcome(outcome: {
+  command: string;
+  success: boolean;
+  exitCode: number | null;
+  level?: VerificationLevel;
+  repositoryWide?: boolean;
+  scopePaths?: string[];
+}): AgentVerificationOutcome {
+  const classification = classifyVerificationCommand(outcome.command);
+  return {
+    command: outcome.command,
+    success: outcome.success,
+    exitCode: outcome.exitCode,
+    level: outcome.level ?? classification.level,
+    repositoryWide: outcome.repositoryWide ?? classification.repositoryWide,
+    scopePaths: outcome.scopePaths ?? classification.scopePaths,
+  };
+}
+
+function uniqueVerificationEvidence(values: AgentVerificationOutcome[]): AgentVerificationOutcome[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = `${value.command}:${String(value.success)}:${String(value.exitCode)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(-20);
 }

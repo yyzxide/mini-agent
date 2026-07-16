@@ -1,4 +1,4 @@
-import { buildMemoryQuery } from "./MemoryQueryBuilder.js";
+import { planMemoryRead, type MemoryReadPlan } from "./MemoryPolicy.js";
 
 export interface DirectAnswerMemoryPlanInput {
   userGoal: string;
@@ -6,33 +6,14 @@ export interface DirectAnswerMemoryPlanInput {
   hasRecentConversation: boolean;
 }
 
-export interface DirectAnswerMemoryPlan {
-  retrieve: boolean;
-  query: string;
-}
+export type DirectAnswerMemoryPlan = MemoryReadPlan;
 
-/**
- * Long-term retrieval is useful for standalone questions and explicit recall,
- * but unsafe as an automatic topic selector during an active conversation.
- * A deterministically grounded follow-up is also safe because its query already
- * contains the omitted topic or predicate.
- */
+/** Ordinary direct answers rely on current conversation state. Historical
+ * memory is selected only when the user explicitly asks for prior work. */
 export function planDirectAnswerMemory(input: DirectAnswerMemoryPlanInput): DirectAnswerMemoryPlan {
-  const query = input.resolvedFollowUpGoal ?? input.userGoal;
-  const memoryQuery = buildMemoryQuery({ query });
-  if (memoryQuery.intent === "WEB_RESEARCH") {
-    return { retrieve: false, query };
-  }
-
-  if (!input.hasRecentConversation) {
-    return { retrieve: true, query };
-  }
-  if (input.resolvedFollowUpGoal && input.resolvedFollowUpGoal !== input.userGoal) {
-    return { retrieve: true, query };
-  }
-
-  return {
-    retrieve: memoryQuery.intent === "CONVERSATION",
-    query,
-  };
+  return planMemoryRead({
+    mode: "DIRECT_ANSWER",
+    query: input.userGoal,
+    ...(input.resolvedFollowUpGoal ? { resolvedQuery: input.resolvedFollowUpGoal } : {}),
+  });
 }

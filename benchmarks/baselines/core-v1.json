@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "dataset": "mini-agent-core-v1",
+  "mode": "scripted",
+  "startedAt": "2026-07-16T00:00:00.000Z",
+  "finishedAt": "2026-07-16T00:00:00.000Z",
+  "repetitions": 1,
+  "summary": {
+    "scenarios": 7,
+    "totalRuns": 7,
+    "passedRuns": 7,
+    "passAt1": 1,
+    "passAtK": 1,
+    "runPassRate": 1,
+    "toolChoiceAccuracy": 1,
+    "averageSteps": 2.2857142857142856,
+    "averageLlmCalls": 3.2857142857142856,
+    "averageDurationMs": 0,
+    "averageTotalTokens": 0,
+    "averageCachedPromptTokens": 0,
+    "contextTruncationRate": 0,
+    "failuresByCategory": {}
+  },
+  "scenarios": [],
+  "runs": [],
+  "gate": {
+    "passed": true,
+    "failures": [],
+    "comparedToBaseline": false
+  }
+}

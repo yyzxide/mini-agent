@@ -14,6 +14,16 @@
     "minScore": 0.12,
     "maxContextChars": 6000
   },
+  "multiAgent": {
+    "mode": "off",
+    "maxConcurrency": 2,
+    "maxBatchesPerRun": 1,
+    "maxTasksPerRun": 3,
+    "maxChildSteps": 4,
+    "maxChildLlmCalls": 12,
+    "maxChildToolCalls": 18,
+    "maxResultChars": 6000
+  },
   "mcp": {
     "servers": [
       {

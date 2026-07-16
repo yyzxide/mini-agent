@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/eval/AgentHarness.js";
+import { DEFAULT_MULTI_AGENT_POLICY, type SubAgentCoordinator } from "../../src/agent/SubAgentTypes.js";
 
 const createdRepos: string[] = [];
 
@@ -86,4 +87,65 @@ describe("AgentHarness", () => {
     expect(suite.successRate).toBe(0.5);
     expect(suite.failuresByCategory.EXPECTATION).toBe(1);
   });
+
+  it("includes delegated child calls in cost metrics", async () => {
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => ({
+        batchId: "bench-batch",
+        status: "COMPLETED",
+        results: tasks.map((task) => ({
+          taskId: task.id,
+          role: task.role,
+          objective: task.objective,
+          status: "COMPLETED",
+          summary: `Evidence for ${task.id}`,
+          evidence: [{ path: "src" }],
+          toolsCalled: ["list_files"],
+          usage: usage(1),
+        })),
+        usage: usage(tasks.length),
+        maxParallelAgents: tasks.length,
+        durationMs: 10,
+      }),
+    };
+    const result = await new AgentHarness().runScenario({
+      name: "parallel repository analysis",
+      userGoal: "Analyze repository architecture",
+      decisions: [
+        {
+          type: "DELEGATE_READONLY",
+          reason: "Inspect architecture and risks",
+          tasks: [
+            { id: "architecture", role: "repository_analyst", objective: "Map modules", focusPaths: ["src"] },
+            { id: "risks", role: "risk_reviewer", objective: "Find risks", focusPaths: ["src"] },
+          ],
+        },
+        { type: "FINAL", success: true, summary: "Analysis complete." },
+      ],
+      expected: { success: true, maxLlmCalls: 4, toolsCalled: ["list_files"] },
+    }, {
+      subAgentCoordinator: coordinator,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
+    });
+    createdRepos.push(result.repoPath);
+
+    expect(result.passed).toBe(true);
+    expect(result.metrics.llmCalls).toBe(4);
+    expect(result.metrics.toolCalls).toContain("list_files");
+    expect(result.run).toMatchObject({ delegationBatches: 1, subAgents: 2 });
+  });
 });
+
+function usage(llmCalls: number) {
+  return {
+    steps: llmCalls,
+    llmCalls,
+    toolCalls: llmCalls,
+    promptTokens: llmCalls * 10,
+    completionTokens: llmCalls * 5,
+    totalTokens: llmCalls * 15,
+    cachedPromptTokens: 0,
+    reasoningTokens: 0,
+    usageAvailable: true,
+  };
+}

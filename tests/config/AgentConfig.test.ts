@@ -7,6 +7,7 @@ import {
   loadAgentConfig,
   redactAgentConfig,
   resolveLlmConfig,
+  resolveMultiAgentPolicy,
 } from "../../src/config/AgentConfig.js";
 
 let tempRoot: string;
@@ -148,6 +149,19 @@ describe("AgentConfig", () => {
     });
 
     expect(redactAgentConfig(config).llm?.apiKey).toBe("<redacted>");
+  });
+
+  it("keeps multi-agent off by default and supports bounded config or CLI opt-in", async () => {
+    expect(resolveMultiAgentPolicy({ version: 1 })).toMatchObject({ enabled: false, maxConcurrency: 2 });
+    expect(resolveMultiAgentPolicy({
+      version: 1,
+      multiAgent: { mode: "auto", maxConcurrency: 3, maxChildSteps: 6 },
+    })).toMatchObject({ enabled: true, maxConcurrency: 3, maxChildSteps: 6 });
+    expect(resolveMultiAgentPolicy({ version: 1, multiAgent: { mode: "auto" } }, 1)).toMatchObject({
+      enabled: false,
+      maxConcurrency: 1,
+    });
+    expect(resolveMultiAgentPolicy({ version: 1 }, 3)).toMatchObject({ enabled: true, maxConcurrency: 3 });
   });
 });
 

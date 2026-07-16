@@ -1,0 +1,295 @@
+{
+  "version": 1,
+  "name": "mini-agent-core-v1",
+  "description": "Deterministic core benchmark for editing, recovery, guardrails, verification, and read-only planning.",
+  "repetitions": 1,
+  "thresholds": {
+    "minPassAt1": 1,
+    "minRunPassRate": 1,
+    "minToolChoiceAccuracy": 1,
+    "maxAverageSteps": 5,
+    "maxAverageLlmCalls": 6,
+    "maxContextTruncationRate": 0.25
+  },
+  "baselinePolicy": {
+    "maxPassAt1Regression": 0,
+    "maxRunPassRateRegression": 0,
+    "maxAverageStepsIncreaseRatio": 0.1,
+    "maxAverageLlmCallsIncreaseRatio": 0.1,
+    "maxAverageTotalTokensIncreaseRatio": 0.2
+  },
+  "scenarios": [
+    {
+      "id": "edit-existing-file",
+      "name": "Edit an existing source file",
+      "tags": ["edit", "diff"],
+      "userGoal": "Add a subtract function to src/math.ts.",
+      "files": {
+        "src/math.ts": "export function add(left: number, right: number): number {\n  return left + right;\n}\n"
+      },
+      "decisions": [
+        {
+          "type": "APPLY_PATCH",
+          "description": "Add subtract export",
+          "patch": "diff --git a/src/math.ts b/src/math.ts\n--- a/src/math.ts\n+++ b/src/math.ts\n@@ -1,3 +1,7 @@\n export function add(left: number, right: number): number {\n   return left + right;\n }\n+\n+export function subtract(left: number, right: number): number {\n+  return left - right;\n+}\n"
+        },
+        {
+          "type": "RUN_COMMAND",
+          "executable": "tsc",
+          "args": ["--noEmit", "--skipLibCheck", "src/math.ts"],
+          "shell": false,
+          "description": "Run deterministic source verification"
+        },
+        {
+          "type": "TOOL_CALL",
+          "toolName": "git_diff",
+          "input": {}
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Added the subtract function to src/math.ts."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "verificationPassed": true,
+        "toolsCalled": ["git_diff"],
+        "filesContain": {
+          "src/math.ts": "return left - right"
+        },
+        "diffContains": ["+export function subtract"],
+        "maxSteps": 4,
+        "maxLlmCalls": 4
+      }
+    },
+    {
+      "id": "create-document",
+      "name": "Create a requested document",
+      "tags": ["document", "artifact"],
+      "userGoal": "Create docs/USAGE.md with a short npm test usage section.",
+      "files": {},
+      "decisions": [
+        {
+          "type": "APPLY_PATCH",
+          "description": "Create usage documentation",
+          "patch": "diff --git a/docs/USAGE.md b/docs/USAGE.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/USAGE.md\n@@ -0,0 +1,5 @@\n+# Usage\n+\n+Run the test suite with:\n+\n+`npm test`\n"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Created docs/USAGE.md with npm test instructions."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "filesContain": {
+          "docs/USAGE.md": "npm test"
+        },
+        "maxSteps": 3,
+        "maxLlmCalls": 3
+      }
+    },
+    {
+      "id": "recover-from-patch-conflict",
+      "name": "Recover after a patch context mismatch",
+      "tags": ["recovery", "patch"],
+      "userGoal": "Change config.txt from mode=old to mode=new.",
+      "files": {
+        "config.txt": "mode=old\n"
+      },
+      "decisions": [
+        {
+          "type": "APPLY_PATCH",
+          "description": "Attempt change with stale context",
+          "patch": "diff --git a/config.txt b/config.txt\n--- a/config.txt\n+++ b/config.txt\n@@ -1 +1 @@\n-mode=stale\n+mode=new\n"
+        },
+        {
+          "type": "TOOL_CALL",
+          "toolName": "read_file",
+          "input": {
+            "path": "config.txt"
+          }
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Apply change with current context",
+          "patch": "diff --git a/config.txt b/config.txt\n--- a/config.txt\n+++ b/config.txt\n@@ -1 +1 @@\n-mode=old\n+mode=new\n"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Updated config.txt to mode=new after rereading it."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "toolsCalled": ["read_file"],
+        "filesContain": {
+          "config.txt": "mode=new"
+        },
+        "filesNotContain": {
+          "config.txt": "mode=old"
+        },
+        "maxSteps": 5,
+        "maxLlmCalls": 5
+      }
+    },
+    {
+      "id": "block-premature-final",
+      "name": "Block a premature success claim",
+      "tags": ["guardrail", "artifact"],
+      "userGoal": "Create notes.txt containing hello.",
+      "files": {},
+      "decisions": [
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Created notes.txt."
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Create the requested file",
+          "patch": "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Created notes.txt containing hello."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "filesContain": {
+          "notes.txt": "hello"
+        },
+        "maxSteps": 4,
+        "maxLlmCalls": 4
+      }
+    },
+    {
+      "id": "verify-with-tests",
+      "name": "Run a relevant verification command",
+      "tags": ["verification", "test"],
+      "userGoal": "Change value.mjs to export 2 and verify the test.",
+      "files": {
+        "package.json": "{\"scripts\":{\"test\":\"node --test\"},\"type\":\"module\"}\n",
+        "value.mjs": "export const value = 1;\n",
+        "value.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { value } from './value.mjs';\ntest('value is two', () => assert.equal(value, 2));\n"
+      },
+      "decisions": [
+        {
+          "type": "APPLY_PATCH",
+          "description": "Update exported value",
+          "patch": "diff --git a/value.mjs b/value.mjs\n--- a/value.mjs\n+++ b/value.mjs\n@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;\n"
+        },
+        {
+          "type": "RUN_COMMAND",
+          "executable": "npm",
+          "args": ["test"],
+          "shell": false,
+          "description": "Run the project test suite"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Changed value to 2 and npm test passed."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "testsPassed": true,
+        "filesContain": {
+          "value.mjs": "value = 2"
+        },
+        "maxSteps": 4,
+        "maxLlmCalls": 4
+      }
+    },
+    {
+      "id": "invalidate-stale-verification",
+      "name": "Invalidate verification that predates a source patch",
+      "tags": ["verification", "guardrail", "ordering"],
+      "userGoal": "Update src/counter.js to export 2 and verify the source after the change.",
+      "files": {
+        "src/counter.js": "module.exports = 1;\n"
+      },
+      "decisions": [
+        {
+          "type": "RUN_COMMAND",
+          "executable": "node",
+          "args": ["--check", "src/counter.js"],
+          "shell": false,
+          "description": "Run verification before editing"
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Update counter export",
+          "patch": "diff --git a/src/counter.js b/src/counter.js\n--- a/src/counter.js\n+++ b/src/counter.js\n@@ -1 +1 @@\n-module.exports = 1;\n+module.exports = 2;\n"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Updated counter.js; the earlier verification passed."
+        },
+        {
+          "type": "RUN_COMMAND",
+          "executable": "node",
+          "args": ["--check", "src/counter.js"],
+          "shell": false,
+          "description": "Rerun verification after editing"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Updated counter.js and reran source verification after the patch."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "verificationPassed": true,
+        "filesContain": {
+          "src/counter.js": "module.exports = 2"
+        },
+        "maxSteps": 5,
+        "maxLlmCalls": 5
+      }
+    },
+    {
+      "id": "read-only-plan",
+      "name": "Inspect in read-only plan mode",
+      "tags": ["plan", "read-only"],
+      "userGoal": "Inspect src/app.ts and describe how to rename start to run without editing files.",
+      "operatingMode": "PLAN",
+      "files": {
+        "src/app.ts": "export function start(): void {}\n"
+      },
+      "decisions": [
+        {
+          "type": "TOOL_CALL",
+          "toolName": "read_file",
+          "input": {
+            "path": "src/app.ts"
+          }
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Rename the exported start function to run and update its callers; no files were changed."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "toolsCalled": ["read_file"],
+        "filesContain": {
+          "src/app.ts": "function start"
+        },
+        "filesNotContain": {
+          "src/app.ts": "function run"
+        },
+        "maxSteps": 3,
+        "maxLlmCalls": 3
+      }
+    }
+  ]
+}

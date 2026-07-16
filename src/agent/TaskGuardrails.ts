@@ -1,73 +1,19 @@
 import type { AgentDecision } from "./AgentDecision.js";
 import type { AgentState } from "./AgentState.js";
-import { looksLikeDocumentCreationTask } from "./ArtifactIntent.js";
-import { looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
 import { looksLikeIndexedKnowledgeRequest } from "./TaskRouter.js";
-import { isTestCommand } from "../command/CommandClassification.js";
+import {
+  buildTaskCompletionContract,
+  hasEnoughContextForFileWrite,
+  requiresRepositoryFileChange,
+} from "./TaskCompletionContract.js";
+import { isVerificationRelevant, verificationLevelAtLeast } from "../command/CommandClassification.js";
+
+export { requiresRepositoryFileChange } from "./TaskCompletionContract.js";
 
 export interface AgentDecisionGuardrailViolation {
   code: string;
   message: string;
 }
-
-const FILE_MUTATION_KEYWORDS = [
-  "写入",
-  "写进",
-  "写到",
-  "写个",
-  "写一个",
-  "做个",
-  "做一个",
-  "保存",
-  "落盘",
-  "创建",
-  "新建",
-  "新增",
-  "修改",
-  "改成",
-  "实现",
-  "生成",
-  "scaffold",
-  "create",
-  "write",
-  "save",
-  "implement",
-  "modify",
-  "update",
-];
-
-const FILE_TARGET_KEYWORDS = [
-  "代码",
-  "程序",
-  "算法",
-  "函数",
-  "类",
-  "文件",
-  "页面",
-  "游戏",
-  "组件",
-  "脚本",
-  "html",
-  "typescript",
-  "javascript",
-  "python",
-  "java",
-  "c++",
-  "cpp",
-  "go",
-  "rust",
-  "leetcode",
-  "文档",
-  "说明书",
-  "报告",
-  "指南",
-  "手册",
-  "readme",
-  "documentation",
-  "document",
-  "specification",
-  "manual",
-];
 
 const REDUNDANT_FILE_WRITE_QUESTION_PATTERNS = [
   /(写入|保存|创建|新建).*(什么|哪个|哪里|路径|文件|内容)/i,
@@ -94,33 +40,6 @@ export function validateAgentDecisionGuardrails(
   return undefined;
 }
 
-export function requiresRepositoryFileChange(userGoal: string): boolean {
-  const normalized = normalize(userGoal);
-  if (!normalized) {
-    return false;
-  }
-
-  if (looksLikeSaveToFileFollowUp(userGoal)) {
-    return true;
-  }
-
-  if (looksLikeDocumentCreationTask(userGoal)) {
-    return true;
-  }
-
-  if (normalized.includes("真正写入仓库文件") || normalized.includes("需要落盘的代码如下")) {
-    return true;
-  }
-
-  const mentionsMutation = FILE_MUTATION_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
-  if (!mentionsMutation) {
-    return false;
-  }
-
-  return FILE_TARGET_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()))
-    || /\.(ts|tsx|js|jsx|java|go|py|cpp|cc|c|html|css|rs|sh|md)\b/i.test(userGoal);
-}
-
 function validateFinalDecision(
   state: AgentState,
   decision: Extract<AgentDecision, { type: "FINAL" }>,
@@ -128,6 +47,17 @@ function validateFinalDecision(
   if (!decision.success) {
     return undefined;
   }
+  const contract = buildTaskCompletionContract(state);
+  const completionEvidence = state.getCompletionEvidence();
+  const currentVerificationEvidence = completionEvidence.repositoryChanged
+    ? completionEvidence.verificationEvidenceAfterLatestChange
+    : completionEvidence.verificationEvidence;
+  const sufficientVerification = currentVerificationEvidence.filter((evidence) => (
+    verificationLevelAtLeast(evidence.level, contract.requiredVerificationLevel)
+    && isVerificationRelevant(evidence, contract.targetFiles)
+  ));
+  const latestSufficientVerification = sufficientVerification.at(-1);
+  const verificationSatisfied = latestSufficientVerification?.success === true;
 
   if (looksLikeIndexedKnowledgeRequest(state.userGoal) && !hasSuccessfulKnowledgeSearch(state)) {
     return {
@@ -174,7 +104,7 @@ function validateFinalDecision(
     };
   }
 
-  if (requiresRepositoryFileChange(state.userGoal) && !hasSuccessfulPatch(state)) {
+  if (contract.requiresRepositoryChange && !completionEvidence.repositoryChanged) {
     return {
       code: "FINAL_WITHOUT_REPOSITORY_CHANGE",
       message: [
@@ -186,13 +116,55 @@ function validateFinalDecision(
     };
   }
 
-  if (hasUnresolvedTestFailure(state)) {
+  if (contract.requiresVerification && !verificationSatisfied) {
+    if (latestSufficientVerification?.success === false) {
+      return {
+        code: "FINAL_IGNORES_VERIFICATION_FAILURE",
+        message: [
+          "Postcondition failed: the verification performed after the latest repository change failed.",
+          "Fix the failure and run a successful replacement verification before returning success.",
+        ].join(" "),
+      };
+    }
+    if (completionEvidence.repositoryChanged
+      && completionEvidence.verificationEvidenceAfterLatestChange.length === 0
+      && completionEvidence.hasAnyVerification) {
+      return {
+        code: "FINAL_WITH_STALE_VERIFICATION",
+        message: [
+          "Postcondition failed: the recorded verification predates the latest successful patch.",
+          "Run a relevant test, typecheck, lint, or build command again before returning success.",
+        ].join(" "),
+      };
+    }
+    if (currentVerificationEvidence.length > 0) {
+      return {
+        code: "FINAL_WITH_INSUFFICIENT_VERIFICATION",
+        message: [
+          `Postcondition failed: this task requires ${contract.requiredVerificationLevel} verification after the latest change.`,
+          "The recorded checks are weaker than required or target unrelated files.",
+          "Run a relevant test, typecheck, lint, build, or syntax check at the required level before returning success.",
+        ].join(" "),
+      };
+    }
     return {
-      code: "FINAL_IGNORES_TEST_FAILURE",
+      code: "FINAL_WITHOUT_REQUIRED_VERIFICATION",
       message: [
-        "Postcondition failed: the latest test command failed and no later test command passed.",
+        "Postcondition failed: this task has no successful required verification evidence.",
+        completionEvidence.repositoryChanged
+          ? "Run a relevant test, typecheck, lint, or build command after the patch before returning success."
+          : "Run the requested test, typecheck, lint, or build command before returning success.",
+      ].join(" "),
+    };
+  }
+
+  if (hasUnresolvedVerificationFailure(state)) {
+    return {
+      code: "FINAL_IGNORES_VERIFICATION_FAILURE",
+      message: [
+        "Postcondition failed: the latest verification command failed and no later verification command passed.",
         "Do not claim testing or verification succeeded.",
-        "Run a successful replacement test, or finish with FINAL success=false / FAILED.",
+        "Run a successful replacement verification, or finish with FINAL success=false / FAILED.",
       ].join(" "),
     };
   }
@@ -226,10 +198,6 @@ function validateAskUserDecision(
   };
 }
 
-function hasSuccessfulPatch(state: AgentState): boolean {
-  return state.patchResults.some((patchResult) => patchResult.result.success);
-}
-
 function hasSuccessfulKnowledgeSearch(state: AgentState): boolean {
   return readLatestKnowledgeSearchOutcome(state) !== undefined;
 }
@@ -260,7 +228,7 @@ function readLatestKnowledgeSearchOutcome(state: AgentState): KnowledgeSearchOut
         : [],
     };
   }
-  return undefined;
+  return state.recoveredCheckpoint?.effects.knowledgeSearch;
 }
 
 function reportsInsufficientKnowledgeEvidence(summary: string): boolean {
@@ -268,19 +236,8 @@ function reportsInsufficientKnowledgeEvidence(summary: string): boolean {
     || /\b(?:(?:no|not enough|insufficient)\s+(?:relevant\s+)?(?:evidence|documents?|results?|context)|(?:could not|couldn't|cannot|can't)\s+(?:find|answer|verify)|not found)\b/i.test(summary);
 }
 
-function hasUnresolvedTestFailure(state: AgentState): boolean {
-  const latestTestResult = state.commandResults.filter((result) => isTestCommand(result.command)).at(-1);
-  return latestTestResult !== undefined && !latestTestResult.success;
-}
-
-function hasEnoughContextForFileWrite(userGoal: string): boolean {
-  const normalized = normalize(userGoal);
-  return normalized.includes("需要落盘的代码如下")
-    || userGoal.includes("```")
-    || looksLikeDocumentCreationTask(userGoal)
-    || FILE_TARGET_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
-}
-
-function normalize(value: string): string {
-  return value.trim().toLowerCase();
+function hasUnresolvedVerificationFailure(state: AgentState): boolean {
+  const evidence = state.getCompletionEvidence();
+  if (evidence.latestVerification?.success !== false) return false;
+  return !evidence.repositoryChanged || evidence.hasVerificationAfterLatestChange;
 }

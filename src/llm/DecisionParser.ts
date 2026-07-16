@@ -41,6 +41,12 @@ function normalizeDecisionCandidate(value: unknown): unknown {
         toolName: readString(value.toolName) ?? readString(value.name) ?? readString(value.tool),
         input: isObject(value.input) ? value.input : {},
       };
+    case "DELEGATE_READONLY":
+      return {
+        type,
+        reason: readString(value.reason) ?? readString(value.message) ?? readString(value.description),
+        tasks: Array.isArray(value.tasks) ? value.tasks : [],
+      };
     case "APPLY_PATCH":
       return {
         type,
@@ -221,6 +227,8 @@ function assertRequiredDecisionFields(value: unknown): void {
       if (typeof value.toolName !== "string" || value.toolName.trim().length === 0) {
         throw new InvalidAgentDecisionError("TOOL_CALL decision is missing toolName");
       }
+      return;
+    case "DELEGATE_READONLY":
       return;
     case "APPLY_PATCH":
       if (typeof value.patch !== "string" || value.patch.trim().length === 0) {

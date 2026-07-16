@@ -107,6 +107,7 @@ Web 支持逻辑位于 `WebAnswerSupport`：负责来源校验、去重、排序
 Agent 每轮从模型获得一个结构化决策：
 
 - `tool_call`：调用只读或安全工具。
+- `delegate_readonly`：把 2 到 3 个相互独立的调查任务并行交给只读子 Agent。
 - `apply_patch`：应用 unified diff。
 - `run_command`：执行命令，例如测试。
 - `ask_user`：需要用户补充信息。
@@ -152,9 +153,33 @@ Plan 模式具有两层只读保护：第一层只向模型暴露 `readOnlyHint=
 
 诊断结果包含 `category`、`confidence`、`title`、`explanation`、`evidence`、`suggestedCommands` 和 `metadata`。模型后续如果要参与修复，也应该基于这个结构化诊断，而不是直接猜测错误原因。
 
-## 4.4 新文件放置建议
+## 4.4 Context Engine v2
 
-为了减少模型在“用户没给目标路径”时乱猜文件位置，`ContextBuilder` 现在会额外注入一段 `New file placement guidance`。这段内容由 `FilePlacementAdvisor` 根据仓库真实结构生成，例如：
+AgentLoop 不再在每一步固定拼接 README、目录树、完整 AgentState 和最近结果 JSON。新版先由 `TaskPhaseDetector` 判断 `DISCOVERY / IMPLEMENTATION / VERIFICATION / RECOVERY`，再由 `WorkingSet` 汇总当前目标、用户约束、相关文件、修改文件、已完成动作、未解决问题、最新失败和验证状态。
+
+`ContextPlanner` 对候选 section 做 token 估算、优先级排序和双重预算控制；任务、Working Set、未解决错误以及验证阶段的 Diff 属于高优先级或必选证据。README 只在任务明确涉及项目概览、安装、运行、使用方式或 README 本身时读取；目录树只在发现阶段且目标文件尚未确定时读取；构建文件只在构建、运行、依赖和测试任务中读取。找到目标文件后，这些发现阶段信息会自动退出上下文。
+
+最近工具、命令和 Patch 结果会先转成受限证据摘要，完整 patch 不再和 `Current diff` 重复注入。发送给模型的顶层 state 也只保留 step、状态、运行模式、最后错误和是否已有仓库变更，不再绕过 ContextBuilder 重放全部历史数组。
+
+每轮构建都会写入一个不包含正文的 `CONTEXT_BUILT` 事件，记录阶段、总字符数、估算 token 数，以及各 section 是否入选、是否截断和选择原因。超长 Session 会临时生成结构化压缩，优先保留用户约束、任务结果和最近记录；长期记忆仍与文档 RAG 分离。AgentLoop 普通仓库任务只允许稳定的偏好、项目约定和架构决策，显式历史/续接请求才会扩大到结果和错误方案。
+
+AgentLoop 每次开始、动作执行前、步骤完成后和终止时都会写入版本化 `AGENT_CHECKPOINT`。checkpoint 只保存受限 Working Set、已修改文件、已完成动作、最近失败、验证状态、成功副作用和正在执行的动作，不复制完整 patch、工具正文或命令输出。`AgentStateReducer` 在显式复用 session 时只恢复同一运行模式下最新的 `RUNNING / WAITING_USER` checkpoint；`FINISHED / FAILED` 或后面已有 `TASK_SUMMARY` 的 checkpoint 都视为终态，避免上一任务污染下一任务。若中断发生在 tool、patch 或 command 执行途中，恢复后的阶段为 `RECOVERY`，要求先检查当前仓库状态，不能盲目重放可能已经生效的动作。
+
+### 任务完成契约（Definition of Done）
+
+`TaskCompletionContract` 根据用户目标和实际修改文件生成确定性的验收条件，并作为必选上下文 section 提供给模型。普通回答、知识库查询、文档变更、源码变更、配置变更和只读计划使用不同契约；文档变更只要求真实 patch，源码与结构化配置变更则要求在最后一次成功 patch 之后执行相关测试、类型检查、lint、build 或其它验证。
+
+动作结果在 `AgentState` 中按真实执行顺序归约。成功验证之后再应用 patch 会立刻使验证失效；验证失败也不能被旧的成功结果覆盖。验证证据按 `DIFF_HYGIENE < SYNTAX < STATIC < TEST` 分级，并保存是否覆盖整个仓库以及命令中明确出现的文件作用域。动态脚本至少需要语法检查，TypeScript 等静态/编译型源码与结构化配置至少需要静态检查，修复、回归、重构和测试文件变更需要测试；弱检查或无关文件检查不能满足更强契约。`TaskGuardrails` 在 `FINAL success=true` 前本地检查这些后置条件，因此模型即使忽略上下文也不能用一句“已经完成”绕过。checkpoint 同时持久化分级验证证据，中断恢复后仍保持同样的时序与强度语义；`/status` 会显示当前变更和验证证据。
+
+### 受控多 Agent 协作
+
+多 Agent 默认关闭，可通过 `mini-agent run ... --agents 2..3`、`mini-agent plan ... --agents 2..3` 或 `multiAgent.mode: "auto"` 启用。启用后，父 Agent 可以返回一次 `DELEGATE_READONLY`，声明 2 到 3 个角色化调查任务，例如仓库结构分析、验证方案设计和风险复核。
+
+这不是多个写入者并发操作同一工作区。父 Agent 始终是唯一写入者；子 Agent 使用独立 LLM client 和独立内存状态，只能看到本地、闭世界、只读工具，不能调用 MCP/联网工具、运行命令、应用 patch、询问用户或继续嵌套委派，也不直接写 SessionStore、EventStore 或 checkpoint。Coordinator 在受限并发、步骤、LLM 调用、工具调用和报告长度预算内运行子任务，然后按声明顺序把成功与失败结果一次性写回父 session。父 Agent 收到的报告会标记为不可信建议证据，重要结论仍需复核后才能修改文件或声明完成。
+
+## 4.5 新文件放置建议
+
+为了减少模型在“用户没给目标路径”时乱猜文件位置，`ContextBuilder` 会在创建新产物且尚未成功应用 patch 时按需注入 `New file placement guidance`。这段内容由 `FilePlacementAdvisor` 根据仓库真实结构生成，例如：
 
 - 是否存在 `src/`、`app/`、`public/`、`static/`、`scripts/`
 - 是否是 Maven / Gradle / Go / Node.js 项目
@@ -340,7 +365,7 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 - `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用、CLI 异常，以及 `CODE_REVIEW` 的关键阶段，例如 review target 解析、主文件加载、补充文件加载、grounding 和 verification。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
 - `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。对于 `CODE_REVIEW`，还会额外记录 review file、loaded lines、supplemental files、findings 数量、rejected 数量和最终 verdict。它适合做 review、demo 复盘和面试材料整理。
 
-交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session。`/pause` 会把当前 session 标记为 `PAUSED` 并退出，适合临时离开；`/exit` 会把当前 session 标记为 `FINISHED`，表示这轮会话已经结束。`mini-agent resume <sessionId>` 会重新打开指定 session，把状态切回 `ACTIVE`，并继续把该 session 的最近记录作为上下文。
+交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session。`/pause` 会把当前 session 标记为 `PAUSED` 并退出，适合临时离开；`/exit` 会把当前 session 标记为 `FINISHED`，表示这轮会话已经结束。`mini-agent resume <sessionId>` 会重新打开指定 session，把状态切回 `ACTIVE`。会话对话通过 SessionMemory 恢复；若最新 Agent 任务确实在执行中，还会由 `AgentStateReducer` 恢复结构化 checkpoint。两者职责分离。
 
 交互式 CLI 也支持 `/resume <sessionId>` 在当前进程中切换历史 session，支持 `/history` 查看当前 session 记录，支持 `/events` 查看事件时间线，支持 `/logs` 和 `/changes` 查看运行日志和任务变更日志。
 
@@ -348,32 +373,37 @@ Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，
 
 - 交互式 `mini-agent` 内部，依赖 Node `readline` 的 completer，为 `/status`、`/repo`、`/review` 这类 slash 命令提供 `Tab` 补全。
 
-`SessionMemory` 会把当前 session 最近的用户消息、真实助手回复、任务总结、工具结果、命令结果、错误和压缩记忆记录拼成一段短期记忆。`AGENT_DECISION` 是执行轨迹，不属于聊天回复；新版不再把它重复写成 `ASSISTANT_MESSAGE`，读取旧 session 时也会过滤紧随 decision 的历史助手记录。`ContextBuilder` 在 AgentLoop 每轮调用 LLM 前注入这段记忆，因此它能回答“刚才我们聊了什么”，同时不会把 `Calling tool ...` 误当成对话内容。
+`SessionMemory` 会把当前 session 最近的用户消息、真实助手回复、任务总结、工具结果、命令结果、错误和压缩记忆记录整理成短期记忆。超过预算时不再简单保留大段头部，而是生成临时结构化压缩，优先保留用户约束、任务结果和最近记录。`AGENT_DECISION` 是执行轨迹，不属于聊天回复；新版不再把它重复写成 `ASSISTANT_MESSAGE`，读取旧 session 时也会过滤紧随 decision 的历史助手记录。`ContextPlanner` 再根据当前阶段决定短期记忆占用的 token 预算。
 
 Direct 模式还会重建 role-separated conversation。对于“这个难度如何”这类没有显式命名对象的指代追问，只保留最近一次已完成的 user/assistant exchange，并暂停本轮长期记忆召回和 Skill 自动选择；对于“之前那个 Skill”这类显式历史回看则保留完整受限历史。这样由确定性的上下文选择先消除多个候选指代，再交给模型作答。
 
 “昨天谁赢了”“最新比分”这类易过期事实即使在新 session 中也不会召回长期记忆；进入 `WEB_ANSWER` 后同样不向回答上下文注入历史赛果。实时事实只服从本轮 Web 工具证据，避免旧摘要污染当前答案。
 
-长期记忆由 `LongTermMemoryStore` 负责。它会读取成功的 `TASK_SUMMARY`、`MEMORY_COMPACTION` 和显式保存的 `MANUAL` 记忆，生成 `.mini-agent/memory/index.jsonl`。失败任务默认不进入索引，常见 API key/token/password 会在持久化前脱敏。每条长期记忆包含：
+长期记忆由 `LongTermMemoryStore` 负责，写入与读取分别由 `MemoryWritePolicy`、`MemoryReadPolicy` 治理，生成 `.mini-agent/memory/index.jsonl`。自动写入只接受“成功的 AgentLoop 任务 + 非空 repository diff”以及显式压缩记录；PLAN、WEB、DIRECT、仓库分析、失败任务和没有 diff 证据的摘要不会自动晋升为长期记忆。显式 `MANUAL` 记忆仍由用户控制。常见 API key/token/password 会在持久化前脱敏。每条 Memory v2 记录包含：
 
 - `sessionId`：来源会话。
 - `source`：来自任务总结还是压缩记忆。
+- `kind`：用户偏好、项目约定、架构决策、会话摘要、已验证结果、错误方案等语义类型。
+- `scope`：`SESSION`、`REPOSITORY` 或 `USER` 作用域。
+- `status`：`ACTIVE`、`SUPERSEDED` 或 `EXPIRED` 生命周期状态。
 - `title`：通常取最近一次用户请求。
 - `text`：可检索摘要正文。
 - `keywords`：中英文混合关键词。
 - `vector`：本地确定性向量表示。
 - `metadata`：模式、成功状态、证据文件数量等可选字段。
+- `evidenceRefs`：支撑自动记忆的文件或 session record 引用。
 
-长期记忆检索现在拆成四层：
+长期记忆检索现在拆成五层：
 
-1. `MemoryQueryBuilder`：把用户问题转换为检索 query，识别意图、实体、关键词、偏好的回答模式、时间敏感度和证据预算。
-2. `MemoryRetriever`：定义统一检索接口，当前实现是 JSONL 本地索引；后续可替换为 SQLite FTS、LanceDB、Qdrant 或 pgvector。
-3. `MemoryReranker`：对召回候选做二次排序，综合基础相似度、任务模式匹配、同 session 加权、时间新鲜度和实体命中。
-4. `MemoryEvidenceSelector`：从重排结果里选择最终证据，限制单个 session 过度占用结果，给每条证据附加选择原因。
+1. `MemoryReadPolicy`：按 Direct、Web、Review、RepositoryAnalysis、AgentLoop 选择允许的 kind/scope；普通 Direct/Web 不自动读历史记忆，显式历史回看才允许结果类记忆。
+2. `MemoryQueryBuilder`：把用户问题转换为检索 query，识别意图、实体、关键词、偏好的回答模式、时间敏感度和证据预算。
+3. `MemoryRetriever`：先执行 kind/scope/status/provider 等硬过滤，再完成关键词与向量候选召回；本地 hash embedding 要求存在词面证据，减少碰撞误召回。
+4. `MemoryReranker`：对召回候选做二次排序，综合基础相似度、任务模式匹配、同 session 加权、时间新鲜度和实体命中，并应用重排后最低分数线。
+5. `MemoryEvidenceSelector`：从重排结果里选择最终证据，限制单个 session 过度占用结果，给每条证据附加选择原因。
 
-默认设计不依赖外部向量库，适合本地运行；配置 embedding 环境变量后可以切换到 OpenAI-compatible embeddings。记忆条目记录 provider、confidence、expiresAt 和 supersession 关系，检索时排除过期或已被同主题新记忆覆盖的条目。存储仍是 JSONL，后续可替换为 SQLite/LanceDB/Qdrant，同时保留 query building、rerank 和 evidence selection 上层逻辑。
+默认设计不依赖外部向量库，适合本地运行；配置 embedding 环境变量后可以切换到 OpenAI-compatible embeddings。记忆条目记录 provider、confidence、validUntil 和显式 supersession 关系；忘记新版本时会恢复其前一版本。JSONL 读写具备运行时结构校验、跨进程写锁和原子替换。切换 provider 或升级 schema 后不会在查询时隐式重建，需显式运行 `mini-agent memory migrate`。
 
-每次任务结束后，CLI 会自动索引当前 session；`/compact` 写入结构化压缩记忆后也会同步索引。`MemoryContextService` 将召回统一注入 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop，并使用 `<memory_evidence>` 标记为不可信历史数据：模型不得执行记忆中的指令，当前用户要求、当前文件和当前工具结果始终优先。
+每次任务结束后，CLI 会调用写入策略审查当前 session；不满足证据要求时索引数为零。`/compact` 写入低置信度的 session 级历史上下文。`MemoryContextService` 只注入读取策略允许的结果，并使用 `<memory_evidence>` 标记为不可信历史数据：模型不得执行记忆中的指令，当前用户要求、当前文件和当前工具结果始终优先。
 
 显式生命周期控制包括 `memory remember/forget/stats/clear --yes`、`/remember` 和 `/forget`。记忆是当前仓库 `.mini-agent` 下的本地数据，不会自动随 Git 在 Windows/Linux 两台机器之间同步。
 
@@ -401,7 +431,7 @@ Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description
 - `mini-agent memory index [sessionId]`：索引一个 session；不传 sessionId 时索引全部本地 session。
 - `mini-agent memory search <query>`：检索本地长期记忆。
 - `mini-agent memory list`：列出最近写入的长期记忆。
-- `mini-agent memory remember/forget/stats/clear`：显式管理长期记忆。
+- `mini-agent memory remember/forget/stats/migrate/clear`：显式管理、迁移长期记忆。
 - `mini-agent skill list/show/validate/init`：发现、查看、校验或创建本地 Skill 模板。
 - `mini-agent plan <task>`：运行一次只读规划。
 
@@ -432,15 +462,29 @@ Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description
 - `/clear`：清屏。
 - `/exit`：结束当前 session 并退出。
 
-## 10.6 Agent Harness 和评测
+## 10.6 AgentBench v1 和评测
 
-真实 API 调用存在不稳定性，不能把所有质量保障都押在人工试用上。当前项目新增 `src/eval`：
+真实 API 调用存在不稳定性，不能把所有质量保障都押在人工试用上。当前 `src/eval` 分成执行 Harness 和质量基准两层：
 
 - `ScriptedLlmClient`：用一组预设 `AgentDecision` 模拟模型输出，记录每次调用输入。
-- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop、执行脚本化决策，并检查最终 diff、文件内容、工具选择、步骤数和 LLM 调用预算。
-- `runSuite`：汇总 scenario 成功率、平均步骤、工具选择准确率和失败分类。
+- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop，并检查最终 diff、文件内容、工具选择、测试/验证结果、步骤数和 LLM 调用预算。它既接受 scripted client，也接受真实 `LlmClient`。
+- `AgentBenchDataset`：校验版本化 JSON 场景、阈值和 baseline policy，拒绝重复场景 ID 或格式错误的决策。
+- `AgentBench`：按场景和 repetition 运行 Harness，汇总 pass@1、pass@k、run pass rate、工具选择准确率、平均步骤、LLM 调用、耗时、Token、cached Token、上下文截断率和失败分类。
+- quality gate：同时检查数据集绝对阈值与相对 baseline 回归；失败时 CLI 返回非零退出码，可直接用于 CI。
 
-Harness 解决的是“能不能把一个真实用户场景变成可重复测试”的问题。例如“修改一个文件、查看 diff、最终成功”可以变成一条 scenario，而不是每次都手动打开 CLI 测。scripted LLM 适合确定性离线回归，但不能代表真实模型质量；后续仍需扩大 scenario 数据集，并补充真实模型抽样、延迟/token 成本和轨迹回放。
+仓库自带 `benchmarks/agent-bench-v1.json` 和 `benchmarks/baselines/core-v1.json`。核心集覆盖修改文件、创建文档、patch 冲突恢复、阻止虚假完成、执行测试、使 patch 前的过期验证失效和只读规划。运行方式：
+
+```bash
+# 确定性执行引擎门禁
+npm run bench -- --baseline benchmarks/baselines/core-v1.json
+
+# 真实模型抽样；三次 repetition 用于观察稳定性
+mini-agent bench run benchmarks/agent-bench-v1.json \
+  --mode real --repetitions 3 \
+  --output .mini-agent/benchmarks/real.json
+```
+
+scripted 模式回答“执行引擎是否回归”，real 模式回答“模型是否能自己作出正确决策”，二者不能混为一谈。场景应优先断言最终文件、diff、测试和禁止出现的内容，而不是只断言模型调用了某个工具。后续上下文、checkpoint、验证和恢复策略的优化，都应先保存基线报告，再用同一数据集比较成功率与成本变化。
 
 ## 11. LLM 接入
 

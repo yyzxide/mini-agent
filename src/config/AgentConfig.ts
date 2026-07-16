@@ -2,6 +2,7 @@ import { z } from "zod";
 import { McpServerConfigSchema } from "../mcp/McpTypes.js";
 import type { McpServerConfig } from "../mcp/McpTypes.js";
 import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJsonFileAtomic } from "../utils/fs.js";
+import { DEFAULT_MULTI_AGENT_POLICY, type MultiAgentPolicy } from "../agent/SubAgentTypes.js";
 
 export const USER_CONFIG_FILE = "mini-agent.config.json";
 export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
@@ -25,6 +26,17 @@ export interface RagConfig {
   maxContextChars?: number | undefined;
 }
 
+export interface MultiAgentConfig {
+  mode?: "off" | "auto" | undefined;
+  maxConcurrency?: number | undefined;
+  maxBatchesPerRun?: number | undefined;
+  maxTasksPerRun?: number | undefined;
+  maxChildSteps?: number | undefined;
+  maxChildLlmCalls?: number | undefined;
+  maxChildToolCalls?: number | undefined;
+  maxResultChars?: number | undefined;
+}
+
 export interface AgentConfig {
   version: 1;
   repoPath?: string | undefined;
@@ -32,6 +44,7 @@ export interface AgentConfig {
   llm?: LlmConfig | undefined;
   mcp?: { servers: McpServerConfig[] } | undefined;
   rag?: RagConfig | undefined;
+  multiAgent?: MultiAgentConfig | undefined;
 }
 
 export interface InitAgentConfigInput {
@@ -79,7 +92,35 @@ const agentConfigSchema = z.object({
     minScore: z.number().min(0).max(1).optional(),
     maxContextChars: z.number().int().min(200).max(30_000).optional(),
   }).strict().optional(),
+  multiAgent: z.object({
+    mode: z.enum(["off", "auto"]).optional(),
+    maxConcurrency: z.number().int().min(1).max(3).optional(),
+    maxBatchesPerRun: z.number().int().min(1).max(2).optional(),
+    maxTasksPerRun: z.number().int().min(2).max(6).optional(),
+    maxChildSteps: z.number().int().min(1).max(10).optional(),
+    maxChildLlmCalls: z.number().int().min(2).max(40).optional(),
+    maxChildToolCalls: z.number().int().min(2).max(60).optional(),
+    maxResultChars: z.number().int().min(500).max(20_000).optional(),
+  }).strict().optional(),
 }).passthrough();
+
+export function resolveMultiAgentPolicy(config: AgentConfig, agentsOverride?: number): MultiAgentPolicy {
+  const configured = config.multiAgent ?? {};
+  const enabled = agentsOverride === undefined
+    ? configured.mode === "auto"
+    : agentsOverride > 1;
+  const maxConcurrency = agentsOverride ?? configured.maxConcurrency ?? DEFAULT_MULTI_AGENT_POLICY.maxConcurrency;
+  return {
+    enabled,
+    maxConcurrency,
+    maxBatchesPerRun: configured.maxBatchesPerRun ?? DEFAULT_MULTI_AGENT_POLICY.maxBatchesPerRun,
+    maxTasksPerRun: configured.maxTasksPerRun ?? DEFAULT_MULTI_AGENT_POLICY.maxTasksPerRun,
+    maxChildSteps: configured.maxChildSteps ?? DEFAULT_MULTI_AGENT_POLICY.maxChildSteps,
+    maxChildLlmCalls: configured.maxChildLlmCalls ?? DEFAULT_MULTI_AGENT_POLICY.maxChildLlmCalls,
+    maxChildToolCalls: configured.maxChildToolCalls ?? DEFAULT_MULTI_AGENT_POLICY.maxChildToolCalls,
+    maxResultChars: configured.maxResultChars ?? DEFAULT_MULTI_AGENT_POLICY.maxResultChars,
+  };
+}
 
 export async function loadAgentConfig(repoPath: string): Promise<AgentConfig> {
   const configPath = await findAgentConfigPath(repoPath);

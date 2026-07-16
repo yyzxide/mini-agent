@@ -33,6 +33,7 @@ describe("mini-agent CLI", () => {
       .sort();
 
     expect(commandNames).toEqual([
+      "bench",
       "changes",
       "command",
       "config",
@@ -137,6 +138,7 @@ describe("mini-agent CLI", () => {
         summary: "本次任务实现了最长有效括号算法，导出 longestValidParentheses 函数。",
         mode: "AGENT_LOOP",
         success: true,
+        finalDiff: "+++ b/src/longestValidParentheses.ts\n@@ -0,0 +1,10 @@",
       },
     });
 
@@ -212,7 +214,6 @@ describe("mini-agent CLI", () => {
           "https://llm.example/v1",
         ], { from: "user" });
       });
-
       const listOutput = await captureStdout(async () => {
         await createProgram().parseAsync(["sessions"], { from: "user" });
       });
@@ -265,7 +266,6 @@ describe("mini-agent CLI", () => {
           "https://llm.example/v1",
         ], { from: "user" });
       });
-
       const output = await captureStdout(async () => {
         await createProgram().parseAsync(["session", "summary", session.sessionId], { from: "user" });
       });
@@ -382,6 +382,20 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
+      await new SessionStore({ repoPath: tempRoot }).appendRecord(session.sessionId, {
+        type: "LLM_USAGE",
+        payload: {
+          mode: "subagent:repository_analyst",
+          llmCalls: 2,
+          usageAvailable: true,
+          promptTokens: 20,
+          completionTokens: 10,
+          totalTokens: 30,
+          cachedPromptTokens: 4,
+          reasoningTokens: 1,
+        },
+      });
+
       const output = await captureStdout(async () => {
         await createProgram().parseAsync(["session", "status", session.sessionId], { from: "user" });
       });
@@ -408,12 +422,12 @@ describe("mini-agent CLI", () => {
       expect(status.lastUserMessage).toBe("你是谁");
       expect(status.latestSummary).toBe("你好，我是 mini-agent。");
       expect(status.llm.configuredModel).toBe("test-model");
-      expect(status.llm.calls).toBe(1);
-      expect(status.llm.promptTokens).toBe(11);
-      expect(status.llm.completionTokens).toBe(7);
-      expect(status.llm.totalTokens).toBe(18);
-      expect(status.llm.cachedPromptTokens).toBe(2);
-      expect(status.llm.reasoningTokens).toBe(3);
+      expect(status.llm.calls).toBe(3);
+      expect(status.llm.promptTokens).toBe(31);
+      expect(status.llm.completionTokens).toBe(17);
+      expect(status.llm.totalTokens).toBe(48);
+      expect(status.llm.cachedPromptTokens).toBe(6);
+      expect(status.llm.reasoningTokens).toBe(4);
       expect(status.llm.remainingContextTokens).toBeNull();
       expect(status.llm.usageAvailable).toBe(true);
     } finally {
@@ -651,7 +665,7 @@ describe("mini-agent CLI", () => {
     expect(output).toContain("[tool] read_file");
     expect(output).toContain("[patch]");
     expect(output).toContain("[command]");
-    expect(output).toContain("test passed");
+    expect(output).toContain("git diff --check");
     expect(output).toContain("[summary]");
     expect(fetchMock).toHaveBeenCalled();
     await expect(fs.readFile(path.join(tempRoot, "demo.txt"), "utf8")).resolves.toContain("hello from mini-agent");
@@ -865,6 +879,12 @@ describe("mini-agent CLI", () => {
           "+    return a + b",
           "",
         ].join("\n"),
+      }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "python3",
+        args: ["-m", "py_compile", "solution.py"],
+        description: "Verify the saved Python source",
       }),
       "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
       "{\"type\":\"FINAL\",\"summary\":\"Saved the previous code into solution.py\",\"success\":true}",
@@ -2289,8 +2309,8 @@ function scriptedDemoDecisionResponses(): string[] {
     }),
     JSON.stringify({
       type: "RUN_COMMAND",
-      executable: "echo",
-      args: ["test passed"],
+      executable: "git",
+      args: ["diff", "--check"],
       description: "Run a lightweight verification command",
     }),
     "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
@@ -2324,6 +2344,12 @@ function scriptedStandaloneCodeFileResponses(): string[] {
         "+}",
         "",
       ].join("\n"),
+    }),
+    JSON.stringify({
+      type: "RUN_COMMAND",
+      executable: "c++",
+      args: ["-fsyntax-only", "two_sum.cpp"],
+      description: "Verify the generated C++ source",
     }),
     "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
     "{\"type\":\"FINAL\",\"summary\":\"Created two_sum.cpp in the repository\",\"success\":true}",

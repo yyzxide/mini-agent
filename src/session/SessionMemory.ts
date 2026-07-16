@@ -44,8 +44,7 @@ export function buildSessionMemory(
     .map(formatMemoryRecord)
     .filter((line) => line.length > 0);
 
-  const memory = lines.length > 0 ? lines.join("\n") : "(none)";
-  return truncateMiddle(memory, maxChars);
+  return compactSessionLines(lines, maxChars);
 }
 
 function isDuplicateTaskSummary(record: SessionRecord, previous: SessionRecord | undefined): boolean {
@@ -126,12 +125,55 @@ function compactJson(value: JsonValue): string {
   }
 }
 
-function truncateMiddle(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
+function compactSessionLines(lines: string[], maxChars: number): string {
+  if (lines.length === 0) {
+    return "(none)";
   }
 
-  const headLength = Math.floor(maxChars * 0.6);
-  const tailLength = Math.max(0, maxChars - headLength - 40);
-  return `${value.slice(0, headLength)}\n...[session memory truncated]...\n${value.slice(-tailLength)}`;
+  const memory = lines.join("\n");
+  if (memory.length <= maxChars) {
+    return memory;
+  }
+
+  const header = "[structured session compaction]";
+  const importantLabel = "Preserved constraints and outcomes:";
+  const recentLabel = "Recent records:";
+  const fixedChars = header.length + importantLabel.length + recentLabel.length + 4;
+  const available = Math.max(0, maxChars - fixedChars);
+  const importantCandidates = lines.filter((line) => (
+    /^\[(?:summary|error|memory)\]/i.test(line)
+    || (/^\[user\]/i.test(line) && /(?:不要|不得|不能|必须|只能|保持|避免|do not|don't|must|only|keep|avoid)/i.test(line))
+  ));
+  const important = takeRecentLines(importantCandidates, Math.floor(available * 0.35));
+  const importantText = important.length > 0 ? important.join("\n") : "(none extracted)";
+  const recentBudget = Math.max(0, available - importantText.length);
+  const importantSet = new Set(important);
+  const recent = takeRecentLines(lines.filter((line) => !importantSet.has(line)), recentBudget);
+  const recentText = recent.length > 0 ? recent.join("\n") : "(none)";
+
+  return [header, importantLabel, importantText, recentLabel, recentText].join("\n").slice(0, maxChars);
+}
+
+function takeRecentLines(lines: string[], maxChars: number): string[] {
+  if (maxChars <= 0) {
+    return [];
+  }
+  const selected: string[] = [];
+  let remaining = maxChars;
+  for (const line of [...lines].reverse()) {
+    const separatorChars = selected.length > 0 ? 1 : 0;
+    if (line.length + separatorChars <= remaining) {
+      selected.unshift(line);
+      remaining -= line.length + separatorChars;
+      continue;
+    }
+    if (selected.length === 0 && remaining >= 40) {
+      const marker = " ...[record compacted]... ";
+      const contentBudget = Math.max(0, remaining - marker.length);
+      const headChars = Math.floor(contentBudget * 0.35);
+      selected.unshift(`${line.slice(0, headChars)}${marker}${line.slice(-(contentBudget - headChars))}`);
+    }
+    break;
+  }
+  return selected;
 }

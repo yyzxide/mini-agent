@@ -360,6 +360,12 @@ describe("mini-agent CLI regression scenarios", () => {
           "",
         ].join("\n"),
       }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "python3",
+        args: ["-m", "py_compile", "longest_valid_parentheses.py"],
+        description: "Verify the generated Python source",
+      }),
       "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
       "{\"type\":\"FINAL\",\"summary\":\"Created longest_valid_parentheses.py\",\"success\":true}",
     ]);
@@ -418,6 +424,12 @@ describe("mini-agent CLI regression scenarios", () => {
           "+    return a + b",
           "",
         ].join("\n"),
+      }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "python3",
+        args: ["-m", "py_compile", "solution.py"],
+        description: "Verify the saved Python source",
       }),
       "{\"type\":\"TOOL_CALL\",\"toolName\":\"git_diff\",\"input\":{}}",
       "{\"type\":\"FINAL\",\"summary\":\"Saved previous code into solution.py\",\"success\":true}",
@@ -643,6 +655,12 @@ describe("mini-agent CLI regression scenarios", () => {
           "",
         ].join("\n"),
       }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "tsc",
+        args: ["--noEmit", "--skipLibCheck", "src/longest_valid_parentheses.ts"],
+        description: "Verify longest valid parentheses source",
+      }),
       "{\"type\":\"FINAL\",\"summary\":\"Created longest valid parentheses implementation.\",\"success\":true}",
       "{\"type\":\"PLAN\",\"message\":\"Create median finder implementation\"}",
       JSON.stringify({
@@ -660,6 +678,12 @@ describe("mini-agent CLI regression scenarios", () => {
           "+}",
           "",
         ].join("\n"),
+      }),
+      JSON.stringify({
+        type: "RUN_COMMAND",
+        executable: "tsc",
+        args: ["--noEmit", "--skipLibCheck", "src/median_finder.ts"],
+        description: "Verify median finder source",
       }),
       "{\"type\":\"FINAL\",\"summary\":\"Created median finder implementation.\",\"success\":true}",
     ]);

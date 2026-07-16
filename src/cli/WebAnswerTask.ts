@@ -5,6 +5,7 @@ import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger } from "../utils/logger.js";
 import { planWebQuestion, resolveFollowUpQuestion } from "../web/WebQuestionPlanner.js";
 import { appendLongTermMemoryContext, MemoryContextService } from "../memory/MemoryContextService.js";
+import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { appendSkillContext, SkillContextService } from "../skills/SkillContextService.js";
 import {
   createOpenAICompatibleClient,
@@ -57,12 +58,20 @@ export async function runWebAnswerTask(
     client,
   });
   await recordLlmUsageFromClient(sessionStore, sessionId, client, "web_rewrite");
-  const longTermMemory = webPlan.needsLiveData
-    ? "(none)"
-    : await new MemoryContextService({ repoPath }).build({
-      query: webPlan.standaloneQuestion,
-      sessionId,
-    }).catch(() => "(none)");
+  const memoryPlan = planMemoryRead({
+    query: userGoal,
+    resolvedQuery: webPlan.standaloneQuestion,
+    mode: "WEB_ANSWER",
+    needsLiveData: webPlan.needsLiveData,
+  });
+  const longTermMemory = memoryPlan.retrieve
+    ? await new MemoryContextService({ repoPath }).build({
+      query: memoryPlan.query,
+      ...(memoryPlan.excludeActiveSession ? { excludeSessionId: sessionId } : {}),
+      allowedKinds: memoryPlan.allowedKinds,
+      allowedScopes: memoryPlan.allowedScopes,
+    }).catch(() => "(none)")
+    : "(none)";
   const answerMemory = appendLongTermMemoryContext(sessionMemory, longTermMemory);
   const skillContext = await new SkillContextService({ repoPath }).build(webPlan.standaloneQuestion)
     .catch(() => "(none selected)");
