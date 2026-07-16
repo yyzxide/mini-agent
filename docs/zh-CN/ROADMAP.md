@@ -18,12 +18,13 @@
 - patch 应用固定 `core.autocrlf=false`，降低跨机器换行配置影响。
 - `read_file` / `search_code` 对 `.git`、`.mini-agent` 等内部元数据路径做拒绝保护。
 - JSONL session/event/log/change-log。
-- 本地长期记忆索引和轻量 RAG：query build、retrieve、rerank、evidence select、context injection。
+- 本地长期记忆索引：query build、retrieve、rerank、evidence select、context injection。
+- 独立文档知识库 RAG：Markdown/TXT 分块、增量索引、混合检索、引用、拒答和离线评测。
 - 全模式长期记忆召回、显式 remember/forget、失败过滤、密钥脱敏和结构化 compaction。
 - 声明式 Skill 发现、校验、自动/显式选择以及全模式上下文注入。
 - Session 持久化的只读 Plan 模式和 `/plan` -> `/execute` 闭环，带运行时写操作硬拦截。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
-- 当前正常环境回归基线为 39 个测试文件、288 个测试用例。
+- 当前正常环境回归基线为 40 个测试文件、303 个测试用例。
 
 ## 1. P0：继续提高稳定性
 

@@ -30,21 +30,6 @@ export async function runDirectAnswerTask(
   const sessionMemory = await readSessionMemory(sessionStore, sessionId, { maxRecords: 80, maxChars: 16_000 })
     .catch(() => "(none)");
   const resolvedFollowUpGoal = resolveFollowUpQuestion(userGoal, sessionMemory);
-  const memoryPlan = planDirectAnswerMemory({
-    userGoal,
-    ...(resolvedFollowUpGoal ? { resolvedFollowUpGoal } : {}),
-    hasRecentConversation: conversation.length > 0,
-  });
-  const longTermMemory = memoryPlan.retrieve
-    ? await new MemoryContextService({ repoPath }).build({
-      query: memoryPlan.query,
-      excludeSessionId: sessionId,
-    }).catch(() => "(none)")
-    : "(none)";
-  const skillContext = conversationFocus.focusedOnLatestTurn
-    ? "(none selected)"
-    : await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
-      .catch(() => "(none selected)");
 
   await recordTaskUserMessage({ sessionId, sessionStore, eventStore, content: userGoal });
 
@@ -75,6 +60,22 @@ export async function runDirectAnswerTask(
       localReply,
     );
   }
+
+  const memoryPlan = planDirectAnswerMemory({
+    userGoal,
+    ...(resolvedFollowUpGoal ? { resolvedFollowUpGoal } : {}),
+    hasRecentConversation: conversation.length > 0,
+  });
+  const longTermMemory = memoryPlan.retrieve
+    ? await new MemoryContextService({ repoPath }).build({
+      query: memoryPlan.query,
+      excludeSessionId: sessionId,
+    }).catch(() => "(none)")
+    : "(none)";
+  const skillContext = conversationFocus.focusedOnLatestTurn
+    ? "(none selected)"
+    : await new SkillContextService({ repoPath }).build(resolvedFollowUpGoal ?? userGoal)
+      .catch(() => "(none selected)");
 
   const client = await createOpenAICompatibleClient(repoPath, options);
   const directContextBase = [

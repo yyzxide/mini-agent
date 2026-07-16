@@ -26,4 +26,23 @@ describe("resolveLocalDirectReply product knowledge", () => {
     expect(reply).toContain("WEB_ANSWER");
     expect(reply).toContain("每条输入都会重新路由");
   });
+
+  it("describes document RAG separately from historical memory", () => {
+    const reply = resolveLocalDirectReply(".", "你有rag系统吗");
+
+    expect(reply).toContain("文档知识库 RAG");
+    expect(reply).toContain("knowledge_search");
+    expect(reply).toContain(".mini-agent/rag/index.jsonl");
+    expect(reply).toContain(".mini-agent/memory/index.jsonl");
+    expect(reply).toContain("不是把历史聊天记录换个名字叫 RAG");
+  });
+
+  it("assigns prompt and embedding caches to the correct infrastructure layers", () => {
+    const reply = resolveLocalDirectReply(".", "缓存读写和命中是模型负责还是 agent 负责？");
+
+    expect(reply).toContain("KV/Prompt Cache 由模型服务端维护");
+    expect(reply).toContain("embedding 缓存由 Agent 基础设施维护");
+    expect(reply).toContain(".mini-agent/cache/embeddings/v1/");
+    expect(reply).toContain("不会直接缓存重放");
+  });
 });

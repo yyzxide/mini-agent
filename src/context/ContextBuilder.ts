@@ -1,6 +1,7 @@
 import { GitManager } from "../git/GitManager.js";
 import { isTestCommand } from "../command/CommandClassification.js";
 import type { AgentState } from "../agent/AgentState.js";
+import { looksLikeIndexedKnowledgeRequest } from "../agent/TaskRouter.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
@@ -80,8 +81,10 @@ export class ContextBuilder {
       git.getDiff({ maxChars: 8_000 }).then((result) => result.diff).catch((error: unknown) => `error: ${errorToText(error)}`),
       readSessionMemory(sessionStore, state.sessionId, { maxRecords: 80, maxChars: 12_000 })
         .catch((error: unknown) => `error: ${errorToText(error)}`),
-      memoryContextService.build({ query: state.userGoal, limit: 5, sessionId: state.sessionId })
-        .catch((error: unknown) => `error: ${errorToText(error)}`),
+      looksLikeIndexedKnowledgeRequest(state.userGoal)
+        ? Promise.resolve("(disabled for indexed knowledge-base requests)")
+        : memoryContextService.build({ query: state.userGoal, limit: 5, sessionId: state.sessionId })
+          .catch((error: unknown) => `error: ${errorToText(error)}`),
       skillStore.select(state.userGoal, 3)
         .then(formatSkillsForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),

@@ -32,7 +32,7 @@ CLI
 8. 命令失败时把日志放回上下文。
 9. 达到 final 或最大步数后输出总结和 diff。
 
-如果任务是“写个 demo / 写个页面 / 写个游戏 / 写个某语言示例”，当前版本默认也会进入 `AGENT_LOOP`，并通过一段本地生成的“新文件放置建议”告诉模型优先把新文件落到哪里，例如 `src/`、`public/`、`src/main/java/`、`tests/` 或仓库根目录。
+如果任务是“写个 demo / 写个页面 / 写个游戏 / 写个某语言示例 / 写一份设计文档”，当前版本默认也会进入 `AGENT_LOOP`，并通过一段本地生成的“新文件放置建议”告诉模型优先把新文件落到哪里，例如 `src/`、`public/`、`src/main/java/`、`tests/`、已有 `docs/` 或仓库根目录。文档创建与代码创建一样有落盘后置条件：没有成功 patch 时不能直接返回成功。
 
 ## 3. 目录职责
 
@@ -65,6 +65,7 @@ tests                自动化测试
 
 - 普通问答和明确只要片段的请求走 `DIRECT_ANSWER`，只输出答案，不改仓库。
 - 默认的“写代码 / 实现功能 / 做个 demo / 写个游戏”会走 `AGENT_LOOP`，优先把结果落成仓库文件，而不是只在聊天里贴代码。
+- “写一份设计文档 / 创建 README / 撰写技术报告”也会走 `AGENT_LOOP`；“如何写设计文档”或明确要求“只在聊天展示、不改文件”仍走 `DIRECT_ANSWER`。
 - 如果当前输入本身很短，但语义上是在承接上一轮代码结果，例如“写入一个文件里面”“写进去”“保存一下”“把刚才那个保存成文件”，CLI 会先从当前 session 中提取最近一段代码块，重写成明确的写文件任务，再进入 `AGENT_LOOP`。
 - 如果上一轮是仓库编辑任务，下一轮是“数据流的中位数呢”这类短代码追问，CLI 会保留 `AGENT_LOOP`，避免把连续实现需求误判成普通聊天。
 - 如果用户问“你写入了嘛？”，CLI 不会把这个问题交给模型猜，而是直接检查 session 中上一轮请求之后是否存在 `FILE_CHANGE` 记录。
@@ -376,7 +377,15 @@ Direct 模式还会重建 role-separated conversation。对于“这个难度如
 
 显式生命周期控制包括 `memory remember/forget/stats/clear --yes`、`/remember` 和 `/forget`。记忆是当前仓库 `.mini-agent` 下的本地数据，不会自动随 Git 在 Windows/Linux 两台机器之间同步。
 
-## 10.1 声明式 Skill
+## 10.1 文档知识库 RAG 与 embedding cache
+
+文档 RAG 与长期记忆是两套独立语料和索引。`RagStore` 只导入仓库内 Markdown/TXT，按行分块后写入 `.mini-agent/rag/index.jsonl`；`knowledge_search` 做关键词与向量混合检索并返回文件行号 citation。长期记忆的 `.mini-agent/memory/index.jsonl` 不会被当作文档知识库。
+
+显式的“根据已索引知识库回答”请求会进入可调用工具的 Agent 路径；“你有 RAG 吗”这类能力问题由本地产品事实直接回答，避免模型把历史会话误说成 RAG。
+
+缓存分两层：LLM KV/Prompt Cache 由模型服务端维护，CLI 只记录 `cached_tokens`；远端 embedding 由 Agent 按 provider/vector-space 和文本 SHA-256 缓存到 `.mini-agent/cache/embeddings/v1/`。缓存不保存原文，并具备内存 LRU、并发 single-flight、跨进程磁盘复用、损坏回源以及 provider/维度隔离。RAG 索引和长期记忆本身属于派生索引或业务数据，不笼统称作缓存。
+
+## 10.2 声明式 Skill
 
 Skill v1 是本地声明式指令，而不是动态脚本或插件。系统发现版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md`，校验名称、描述、触发词、大小和真实路径边界；同名时版本化仓库 Skill 优先。
 

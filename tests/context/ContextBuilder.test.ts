@@ -121,6 +121,24 @@ describe("ContextBuilder", () => {
     expect(context).toContain("贪吃蛇");
   });
 
+  it("does not mix historical task memory into explicit document knowledge-base queries", async () => {
+    await new LongTermMemoryStore({ repoPath }).remember({
+      title: "上传策略",
+      text: "旧任务错误地声称分片上传不需要校验。",
+    });
+    const session = await new SessionStore({ repoPath }).createSession({ title: "knowledge query" });
+    const state = new AgentState({
+      sessionId: session.sessionId,
+      repoPath,
+      userGoal: "根据已索引知识库回答上传策略是什么",
+    });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
+
+    expect(context).toContain("(disabled for indexed knowledge-base requests)");
+    expect(context).not.toContain("旧任务错误地声称");
+  });
+
   it("selects matching repository skills into bounded context", async () => {
     const skillPath = path.join(repoPath, "skills", "testing", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });

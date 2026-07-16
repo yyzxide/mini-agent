@@ -52,4 +52,32 @@ describe("FilePlacementAdvisor", () => {
     expect(advice.inferredLanguage).toBe("TypeScript");
     expect(advice.suggestedPaths[0]).toBe("src/median_finder.ts");
   });
+
+  it("places Chinese documentation requests in the existing localized docs directory", async () => {
+    await fs.mkdir(path.join(repoPath, "docs", "zh-CN"), { recursive: true });
+    const repoState = await new RepoStateAnalyzer({ repoPath }).analyze();
+
+    const advice = await new FilePlacementAdvisor({ repoPath }).advise(
+      "那你帮我写一个自身的设计文档",
+      repoState,
+    );
+
+    expect(advice.inferredLanguage).toBe("Markdown");
+    expect(advice.artifactKind).toBe("documentation");
+    expect(advice.suggestedPaths[0]).toBe("docs/zh-CN/self_structure_design.md");
+  });
+
+  it("keeps document-named implementation features in source files", async () => {
+    await fs.writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "ts-demo" }), "utf8");
+    await fs.mkdir(path.join(repoPath, "src"), { recursive: true });
+    await fs.writeFile(path.join(repoPath, "src", "index.ts"), "export {};\n", "utf8");
+    const repoState = await new RepoStateAnalyzer({ repoPath }).analyze();
+
+    for (const goal of ["创建一个报告导出功能", "写 README 解析器"]) {
+      const advice = await new FilePlacementAdvisor({ repoPath }).advise(goal, repoState);
+      expect(advice.artifactKind).toBe("source");
+      expect(advice.inferredLanguage).toBe("TypeScript");
+      expect(advice.suggestedPaths[0]).toMatch(/^src\/.+\.ts$/);
+    }
+  });
 });

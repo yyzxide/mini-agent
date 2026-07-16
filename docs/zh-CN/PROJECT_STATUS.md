@@ -28,7 +28,7 @@
 | Agent Loop 设计 | 15 | 13 | 除原有决策循环和质量闸门外，新增运行时硬约束的只读 Plan 模式；通用决策策略仍偏启发式。 |
 | 问答与上下文体验 | 15 | 12 | 已支持 direct/web/review/agent 四模式，且代码生成默认落文件；但追问理解和事实可靠性仍有限。 |
 | 代码结构 | 10 | 8 | 四种任务链、公共 Runtime、Tool 命令和 MCP 命令已拆出；`index.ts` 仍可继续拆交互命令与状态展示。 |
-| 测试与可回归性 | 10 | 10 | 当前正常环境回归基线为 39 个测试文件、288 个测试用例，覆盖 MCP 双 transport、Web 证据闸门、Memory 治理、文档 RAG 和 Eval 指标。 |
+| 测试与可回归性 | 10 | 10 | 当前正常环境回归基线为 40 个测试文件、303 个测试用例，覆盖 MCP 双 transport、Web 证据闸门、Memory 治理、文档 RAG、embedding cache 和 Eval 指标。 |
 | 产品化程度 | 5 | 4 | CLI、配置、日志、文档和演示材料比较完整；但仍缺少更强的评测体系、配置 profile、插件化、TUI/编辑器集成。 |
 
 ## 为什么说它已经“合格”
@@ -55,7 +55,7 @@
 - `read_file` 和 `search_code` 会拒绝读取或搜索 `.git`、`.mini-agent` 等内部元数据路径。
 - `search_code` 统一返回 POSIX 风格路径，并跳过异常的 ripgrep JSON 行，避免一个坏行拖垮整个搜索结果。
 - `CommandRunner` 和 `AgentLoop` 相关测试去掉了 `printf`、`sh`、`false`、`sleep` 等 Unix-only 假设，Windows / Linux 下更稳定。
-- 当前通过 `tsc --noEmit`、`tsc --noUnusedLocals --noUnusedParameters`；正常环境 Vitest 基线为 39 个测试文件、288 个测试用例。
+- 当前通过 `tsc --noEmit`、`tsc --noUnusedLocals --noUnusedParameters`；正常环境 Vitest 基线为 40 个测试文件、303 个测试用例。
 
 ## 为什么还不能算“优秀 Agent 产品”
 

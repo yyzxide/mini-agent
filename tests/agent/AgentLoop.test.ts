@@ -356,6 +356,67 @@ describe("AgentLoop", () => {
     expect(records.some((record) => JSON.stringify(record.payload).includes("REDUNDANT_FILE_WRITE_QUESTION"))).toBe(true);
   });
 
+  it("does not allow documentation creation tasks to finish before a file is written", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "FINAL", success: true, summary: "设计文档如下。" },
+        {
+          type: "APPLY_PATCH",
+          description: "Create the design document",
+          patch: [
+            "diff --git a/SELF_STRUCTURE_DESIGN.md b/SELF_STRUCTURE_DESIGN.md",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/SELF_STRUCTURE_DESIGN.md",
+            "@@ -0,0 +1,2 @@",
+            "+# 自身结构设计",
+            "+这是设计说明。",
+            "",
+          ].join("\n"),
+        },
+        { type: "FINAL", success: true, summary: "已创建 SELF_STRUCTURE_DESIGN.md。" },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "那你帮我写一个自身的设计文档",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "SELF_STRUCTURE_DESIGN.md"), "utf8"))
+      .resolves.toContain("自身结构设计");
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_REPOSITORY_CHANGE"))).toBe(true);
+  });
+
+  it("does not allow an indexed-knowledge answer to invent evidence after an empty search", async () => {
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "上传策略" } },
+        { type: "FINAL", success: true, summary: "上传必须校验 SHA-256。" },
+        { type: "FINAL", success: true, summary: "知识库中没有找到相关证据，无法回答。" },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "请用知识库查一下上传策略",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.summary).toContain("没有找到相关证据");
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(records.some((record) => JSON.stringify(record.payload)
+      .includes("FINAL_IGNORES_INSUFFICIENT_KNOWLEDGE"))).toBe(true);
+  });
+
   it("can use web_search for non-code research tasks", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       "<html><body>",

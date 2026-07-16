@@ -75,7 +75,11 @@ export function embedText(value: string): number[] {
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {
-  const length = Math.min(left.length, right.length);
+  if (left.length === 0 || left.length !== right.length) {
+    return 0;
+  }
+
+  const length = left.length;
   let total = 0;
   for (let index = 0; index < length; index += 1) {
     total += (left[index] ?? 0) * (right[index] ?? 0);

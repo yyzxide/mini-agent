@@ -51,6 +51,101 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).not.toContain("没有联网能力");
   });
 
+  it("answers RAG capability questions from product facts instead of historical memory", async () => {
+    process.chdir(tempRoot);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "run",
+        "你有rag系统吗",
+        "--model",
+        "test-model",
+        "--base-url",
+        "https://llm.example/v1",
+      ], { from: "user" });
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output).toContain("[answer]");
+    expect(output).toContain("文档知识库 RAG");
+    expect(output).toContain("knowledge_search");
+    expect(output).toContain(".mini-agent/rag/index.jsonl");
+    expect(output).toContain(".mini-agent/memory/index.jsonl");
+    expect(output).not.toContain("历史任务摘要被存入向量数据库");
+  });
+
+  it("routes explicit indexed-knowledge questions through knowledge_search", async () => {
+    process.chdir(tempRoot);
+    await fs.mkdir(path.join(tempRoot, "docs"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempRoot, "docs", "upload-policy.md"),
+      "# 上传策略\n\n所有分片上传都必须校验 SHA-256。\n",
+      "utf8",
+    );
+    await captureStdout(async () => {
+      await createProgram().parseAsync(["rag", "ingest", "docs"], { from: "user" });
+    });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      JSON.stringify({
+        type: "FINAL",
+        summary: "我记得历史任务里提到过上传策略。",
+        success: true,
+      }),
+      JSON.stringify({
+        type: "TOOL_CALL",
+        toolName: "knowledge_search",
+        input: { query: "上传策略 SHA-256" },
+      }),
+      JSON.stringify({
+        type: "FINAL",
+        summary: "知识库说明所有分片上传都必须校验 SHA-256。",
+        success: true,
+      }),
+      JSON.stringify({
+        type: "FINAL",
+        summary: "知识库说明所有分片上传都必须校验 SHA-256（docs/upload-policy.md#L1-L3）。",
+        success: true,
+      }),
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: responses.shift() ?? "" } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "根据已索引知识库回答上传策略是什么",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[tool] knowledge_search");
+      expect(output).toContain("docs/upload-policy.md#L1-L3");
+      expect(output).not.toContain("[answer]");
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+
+      const sessionId = output.match(/\[session\]\s+([^\s]+)/)?.[1];
+      expect(sessionId).toBeDefined();
+      const records = await new SessionStore({ repoPath: tempRoot }).readRecords(sessionId!);
+      expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_KNOWLEDGE_SEARCH")))
+        .toBe(true);
+      expect(records.some((record) => JSON.stringify(record.payload).includes("FINAL_WITHOUT_KNOWLEDGE_CITATION")))
+        .toBe(true);
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("diagnoses npm package.json ENOENT as a wrong working directory", async () => {
     process.chdir(tempRoot);
     await fs.writeFile(path.join(tempRoot, "package.json"), JSON.stringify({
@@ -89,8 +184,8 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).toContain("运行目录问题");
     expect(output).toContain(wrongDirectory);
     expect(output).toContain(tempRoot);
-    expect(output).toContain(`cd '${tempRoot}'`);
-    expect(output).toContain(`npm --prefix '${tempRoot}' run guess`);
+    expect(output).toContain(`cd ${tempRoot}`);
+    expect(output).toContain(`npm --prefix ${tempRoot} run guess`);
   });
 
   it("repairs web answers that contradict already executed web tools", async () => {
@@ -370,6 +465,74 @@ describe("mini-agent CLI regression scenarios", () => {
       };
       expect(secondBody.messages[1]?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
       expect(secondBody.messages[1]?.content).toContain("def two_sum(a: int, b: int) -> int:");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("keeps an explicit documentation write in agent mode even after a direct-answer turn", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    await fs.mkdir(path.join(tempRoot, "docs"), { recursive: true });
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const session = await sessionStore.createSession({ title: "Documentation routing regression" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "先介绍一下这个项目" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "这是一个本地 Coding Agent。" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: { summary: "这是一个本地 Coding Agent。", success: true, mode: "DIRECT_ANSWER" },
+    });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      JSON.stringify({
+        type: "APPLY_PATCH",
+        description: "Create the self design document",
+        patch: [
+          "diff --git a/docs/self_structure_design.md b/docs/self_structure_design.md",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/docs/self_structure_design.md",
+          "@@ -0,0 +1,2 @@",
+          "+# 自身结构设计",
+          "+本文说明 Agent 的路由、工具与记忆边界。",
+          "",
+        ].join("\n"),
+      }),
+      JSON.stringify({ type: "TOOL_CALL", toolName: "git_diff", input: {} }),
+      JSON.stringify({ type: "FINAL", summary: "已创建自身结构设计文档。", success: true }),
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: responses.shift() ?? "" } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "那你帮我写一个自身的设计文档",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[patch]");
+      expect(output).toContain("[summary]");
+      expect(output).not.toContain("[answer]");
+      await expect(fs.readFile(path.join(tempRoot, "docs", "self_structure_design.md"), "utf8"))
+        .resolves.toContain("自身结构设计");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

@@ -1,5 +1,10 @@
 import { hasHighConfidenceDiagnostic } from "../diagnostics/ErrorClassifier.js";
 import { extractLikelyReviewFilePath, looksLikeReviewableFilePath } from "../review/CodeReview.js";
+import {
+  hasExplicitChatOnlyConstraint,
+  looksLikeDocumentCreationTask,
+  mentionsDocumentArtifact,
+} from "./ArtifactIntent.js";
 import { looksLikeFileWriteConfirmation, looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
 
 export type TaskIntent = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP";
@@ -491,6 +496,27 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
+  if (looksLikeRagCapabilityQuestion(normalized)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task asks about the CLI's repository-local document RAG capability.",
+    };
+  }
+
+  if (looksLikeCacheImplementationRequest(normalized)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task explicitly asks to implement or repair Agent-owned cache behavior.",
+    };
+  }
+
+  if (looksLikeCacheResponsibilityQuestion(normalized)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task asks which product layer owns cache reads, writes, and hits.",
+    };
+  }
+
   if (looksLikeWebSwitchConfirmation(normalized)) {
     return {
       intent: "WEB_ANSWER",
@@ -502,6 +528,27 @@ export function routeTask(userGoal: string): TaskRoute {
     return {
       intent: "AGENT_LOOP",
       reason: "Task asks to save previously generated code into repository files.",
+    };
+  }
+
+  if (mentionsDocumentArtifact(userGoal) && hasExplicitChatOnlyConstraint(userGoal)) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task explicitly asks to keep a documentation draft in chat without editing files.",
+    };
+  }
+
+  if (looksLikeDocumentCreationTask(userGoal)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task asks to create a documentation artifact in the repository.",
+    };
+  }
+
+  if (looksLikeIndexedKnowledgeRequest(userGoal)) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Task explicitly asks to query the indexed repository knowledge base.",
     };
   }
 
@@ -601,6 +648,9 @@ export function looksLikeRepositoryAnalysisTask(userGoal: string): boolean {
 export function shouldPreserveAgentLoopIntent(userGoal: string): boolean {
   const normalized = normalizeTask(userGoal);
   return looksLikeStandaloneCodeGenerationTask(normalized, userGoal)
+    || looksLikeDocumentCreationTask(userGoal)
+    || looksLikeIndexedKnowledgeRequest(userGoal)
+    || looksLikeCacheImplementationRequest(userGoal)
     || looksLikeCodeContinuationFollowUp(normalized)
     || looksLikeSaveToFileFollowUp(userGoal)
     || containsAny(normalized, REPOSITORY_ACTION_KEYWORDS)
@@ -636,6 +686,69 @@ export function looksLikeWebCapabilityQuestion(normalized: string): boolean {
   ].some((phrase) => compact.includes(phrase))
     || /\b(can|could)\s+you\s+(access\s+the\s+internet|browse|search\s+the\s+web)\b/i.test(normalized)
     || /\bdo\s+you\s+have\s+(web|internet|browsing)\s+(access|capability)\b/i.test(normalized);
+}
+
+export function looksLikeRagCapabilityQuestion(value: string): boolean {
+  const normalized = normalizeTask(value);
+  const compact = normalized.replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】]/g, "");
+  const mentionsRag = /\brag\b/i.test(normalized)
+    || compact.includes("检索增强生成")
+    || compact.includes("知识库");
+  if (!mentionsRag) {
+    return false;
+  }
+
+  const chineseSubject = "(?:(?:你|这个项目|本项目|这个cli|这个agent|该agent))?";
+  const chineseTarget = "(?:rag(?:系统)?|知识库(?:系统)?|检索增强生成(?:系统)?)";
+  return new RegExp(`^${chineseSubject}(?:有|有没有|是否有|支持|具备)${chineseTarget}(?:功能|能力)?(?:吗)?$`, "i").test(compact)
+    || new RegExp(`^${chineseSubject}${chineseTarget}(?:能用|可以用|可用|支持吗|有吗)$`, "i").test(compact)
+    || new RegExp(`^${chineseSubject}(?:能|可以)用${chineseTarget}(?:吗)?$`, "i").test(compact)
+    || /^\s*(?:do|does)\s+(?:you|this (?:cli|project|agent))\s+(?:have|support)\s+(?:(?:a|an)\s+)?(?:rag(?:\s+system)?|knowledge\s+base)(?:\s+(?:feature|capability))?\s*[?.!]*$/i.test(value)
+    || /^\s*is\s+there\s+(?:(?:a|an|any)\s+)?(?:rag(?:\s+system)?|knowledge\s+base)\s*[?.!]*$/i.test(value);
+}
+
+export function looksLikeIndexedKnowledgeRequest(value: string): boolean {
+  if (looksLikeRagCapabilityQuestion(value)) {
+    return false;
+  }
+
+  const normalized = normalizeTask(value);
+  return [
+    /(?:根据|查询|检索|搜索|查找|从).{0,12}(?:已索引的?)?(?:知识库|知识文档|文档索引)/i,
+    /(?:知识库|已索引的?文档|文档索引)(?:里|中|内|里的|中的).+/i,
+    /(?:请)?(?:用|使用|通过|调用)(?:已索引的?)?(?:知识库|rag).{0,8}(?:查|查询|检索|搜索|回答)/i,
+    /(?:知识库|已索引的?文档|文档索引).{0,8}(?:查|查询|检索|搜索|回答).+/i,
+    /\b(?:search|query|look up|according to|from)\s+(?:the\s+)?(?:indexed\s+)?(?:knowledge base|knowledge documents?)\b/i,
+    /\b(?:knowledge base|indexed documents?)\s+(?:says?|contains?|search|query)\b/i,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+export function looksLikeCacheImplementationRequest(value: string): boolean {
+  const normalized = normalizeTask(value);
+  if (!/(?:缓存|\bcache\b|cached tokens?|kv cache|prompt cache|embedding cache)/i.test(normalized)) {
+    return false;
+  }
+
+  return /(?:补齐|补上|补全|新增|添加|接入|完善|开发|修复|改造|落地).{0,30}(?:缓存|\bcache\b)?/i.test(normalized)
+    || /(?:请|帮我|需要|必须|直接|把).{0,20}(?:实现|implement).{0,30}(?:缓存|\bcache\b)/i.test(normalized)
+    || /^(?:实现|implement)(?:\b|\s).{0,30}(?:缓存|cache)/i.test(normalized)
+    || /\b(?:please|need to|must|should)\s+(?:implement|add|fix|complete|build)\b[^.?!]{0,50}\bcach/i.test(normalized);
+}
+
+export function looksLikeCacheResponsibilityQuestion(value: string): boolean {
+  const normalized = normalizeTask(value);
+  if (!/(?:缓存|\bcache\b|cached tokens?|kv cache|prompt cache)/i.test(normalized)) {
+    return false;
+  }
+
+  const chineseOwnershipQuestion = /(?:谁|还是|是否|吗|[？?]|该不该|应该由|究竟)/.test(normalized)
+    && (
+      /(?:谁|模型|agent|代理|服务端).{0,16}(?:负责|该做|来做|职责|读写|命中)/i.test(normalized)
+      || /(?:负责|该做|来做|职责|读写|命中).{0,16}(?:谁|模型|agent|代理|服务端)/i.test(normalized)
+    );
+  return chineseOwnershipQuestion
+    || /\bwho\b[^?]{0,40}\b(?:owns?|handles?|manages?)\b[^?]{0,30}\bcach/i.test(normalized)
+    || /(?:\?|\b(?:who|which|should|whether)\b)[^?]{0,80}\bcach[^?]{0,30}\b(?:model|agent|provider|server)\b[^?]{0,30}\b(?:responsib|own|handle|manage)/i.test(normalized);
 }
 
 function looksLikeShortPlainChat(normalized: string, userGoal: string): boolean {

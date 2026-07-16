@@ -36,7 +36,7 @@ export class RagStore {
     defaultMaxContextChars?: number;
   }) {
     this.indexPath = resolveMiniAgentPath(options.repoPath, ...RAG_INDEX_PATH);
-    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment();
+    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment({ repoPath: options.repoPath });
     this.defaults = {
       topK: options.defaultTopK ?? DEFAULT_TOP_K,
       minScore: options.defaultMinScore ?? DEFAULT_MIN_SCORE,

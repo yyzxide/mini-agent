@@ -26,12 +26,14 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Calls real OpenAI-compatible chat completions APIs.
 - Answers general non-code questions in direct-answer mode.
 - Creates or updates repository files by default for code-generation tasks, instead of only printing code in chat.
+- Treats explicit documentation creation as a repository task, enforces a successful patch, and suggests an existing docs-style Markdown location.
 - Reuses the active session to resolve short repository follow-ups such as "写入一个文件里面" and can save the latest generated code into a real file.
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
 - Maintains governed long-term memory with confidence, TTL, same-topic supersession, secret redaction, and pluggable local or OpenAI-compatible embeddings.
 - Provides repository-local document RAG for Markdown/TXT with safe ingestion, line-aware chunking, incremental source replacement, hybrid retrieval, metadata filters, grounded citations, insufficient-evidence refusal, and offline evaluation metrics.
+- Caches remote embeddings by provider/vector-space and text hash with bounded in-process LRU, single-flight deduplication, and repository-local atomic persistence without storing source text.
 - Supports explicit long-term-memory control with `memory remember`, `memory forget`, `memory stats`, `memory clear --yes`, `/remember`, and `/forget`; failed task summaries are excluded and common secrets are redacted.
 - Discovers declarative `SKILL.md` files from `skills/<name>/SKILL.md` and `.mini-agent/skills/<name>/SKILL.md`, validates and selects relevant skills, and injects them into answer/task modes without allowing skills to bypass tool permissions. Ambiguous direct-answer follow-ups suppress fresh Skill selection so an older workflow cannot become the referent.
 - Provides a hard read-only plan mode through `mini-agent plan`, `/plan`, `/plan off`, and `/execute`; plan mode exposes only read-only tools and blocks patches and commands at runtime.
@@ -414,7 +416,7 @@ The current session records are used as short-term memory. Before each LLM call,
 
 Long-term memory is stored separately in `.mini-agent/memory/index.jsonl`. After tasks finish, the CLI indexes `TASK_SUMMARY` and `MEMORY_COMPACTION` records with keywords, confidence, provider identity, and vectors. Retrieval excludes expired and superseded entries, then applies query building, candidate retrieval, reranking, and evidence selection before `ContextBuilder` injects the final memories as untrusted historical evidence.
 
-The default provider remains a dependency-free deterministic local embedding. Set `MINI_AGENT_EMBEDDING_MODEL`, `MINI_AGENT_EMBEDDING_BASE_URL`, and `MINI_AGENT_EMBEDDING_API_KEY` to use a real OpenAI-compatible embedding endpoint. Storage is still repository-local JSONL rather than a production vector database.
+The default provider remains a dependency-free deterministic local embedding. Set `MINI_AGENT_EMBEDDING_MODEL`, `MINI_AGENT_EMBEDDING_BASE_URL`, and `MINI_AGENT_EMBEDDING_API_KEY` to use a real OpenAI-compatible embedding endpoint. Remote embedding results are content-addressed under `.mini-agent/cache/embeddings/v1/`; cache records contain vectors and hashes, not the original text. LLM KV/prompt caching remains provider-managed, while the CLI records returned cached-token metrics. Storage is still repository-local JSONL rather than a production vector database.
 
 Runtime logs and task change logs serve different purposes:
 

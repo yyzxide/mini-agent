@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeRepositoryAnalysisTask, routeTask } from "../../src/agent/TaskRouter.js";
+import { looksLikeDocumentCreationTask } from "../../src/agent/ArtifactIntent.js";
+import {
+  looksLikeRepositoryAnalysisTask,
+  routeTask,
+  shouldPreserveAgentLoopIntent,
+} from "../../src/agent/TaskRouter.js";
 
 describe("TaskRouter", () => {
   it("routes code implementation requests to the agent loop so files can be created", () => {
@@ -33,6 +38,27 @@ describe("TaskRouter", () => {
     expect(routeTask("保存一下")).toMatchObject({
       intent: "AGENT_LOOP",
     });
+  });
+
+  it("routes documentation creation requests to the agent loop on the first turn", () => {
+    const exactRegression = "那你帮我写一个自身的设计文档";
+    expect(routeTask(exactRegression)).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(shouldPreserveAgentLoopIntent(exactRegression)).toBe(true);
+    expect(routeTask("请撰写一份项目架构文档")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("帮我写设计文档")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("create README documentation")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("write a design document for this agent")).toMatchObject({ intent: "AGENT_LOOP" });
+  });
+
+  it("keeps documentation advice and chat-only drafts in direct answer mode", () => {
+    expect(routeTask("如何写一个设计文档")).toMatchObject({ intent: "DIRECT_ANSWER" });
+    expect(routeTask("how to write a design document")).toMatchObject({ intent: "DIRECT_ANSWER" });
+    expect(routeTask("写一个设计文档，只在这里展示，不要修改文件")).toMatchObject({ intent: "DIRECT_ANSWER" });
+  });
+
+  it("does not confuse features named after documents with documentation artifacts", () => {
+    expect(looksLikeDocumentCreationTask("创建一个报告导出功能")).toBe(false);
+    expect(looksLikeDocumentCreationTask("写 README 解析器")).toBe(false);
   });
 
   it("routes file-write confirmation questions to direct state answers", () => {
@@ -125,6 +151,32 @@ describe("TaskRouter", () => {
     expect(routeTask("你有联网能力吗？")).toMatchObject({
       intent: "DIRECT_ANSWER",
     });
+  });
+
+  it("separates RAG capability questions from indexed knowledge-base queries", () => {
+    expect(routeTask("你有rag系统吗")).toMatchObject({ intent: "DIRECT_ANSWER" });
+    expect(routeTask("这个项目支持知识库吗？")).toMatchObject({ intent: "DIRECT_ANSWER" });
+    expect(routeTask("根据已索引知识库回答上传策略是什么")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("请用知识库查一下上传策略")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("可以用知识库查询上传策略吗")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("请让这个项目支持 RAG 知识库")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(shouldPreserveAgentLoopIntent("查询知识库里的上传策略")).toBe(true);
+  });
+
+  it("routes cache ownership questions to deterministic product answers", () => {
+    expect(routeTask("缓存读写和命中是模型负责还是 agent 负责？"))
+      .toMatchObject({ intent: "DIRECT_ANSWER" });
+  });
+
+  it("lets explicit cache implementation requests override ownership questions", () => {
+    const exactRegression = [
+      "命中缓存比如写入缓存/读取缓存这是模型该做的事情还是agent该做的事情，",
+      "如果是agent该做的事情，我们是不是缺失这个功能，需要补齐",
+    ].join("");
+    expect(routeTask(exactRegression)).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(shouldPreserveAgentLoopIntent(exactRegression)).toBe(true);
+    expect(routeTask("请补齐 Agent 的缓存读写功能")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("Should the model or Agent own the cache?")).toMatchObject({ intent: "DIRECT_ANSWER" });
   });
 
   it("routes file review requests to code review mode", () => {

@@ -80,9 +80,20 @@ MINI_AGENT_EMBEDDING_API_KEY
 MINI_AGENT_EMBEDDING_MODEL
 ```
 
-索引记录 embedding provider id。切换 provider 后旧向量不会参与检索，查询会返回 `EMBEDDING_PROVIDER_MISMATCH`；需要重新执行 `rag ingest`。这样可以避免不同维度或不同向量空间被错误混算。
+索引记录 embedding provider id；远端 provider id 同时包含模型和服务端点的不可逆摘要。切换 provider 后旧向量不会参与检索，查询会返回 `EMBEDDING_PROVIDER_MISMATCH`；需要重新执行 `rag ingest`。这样可以避免不同维度或不同向量空间被错误混算。
 
-## 5. 评测数据集
+## 5. 缓存职责与实现
+
+缓存命中不是模型应该自行决定的动作，而是 Agent 基础设施和模型服务商各自负责的机制：
+
+- LLM 的 KV/Prompt Cache 由模型服务端维护。CLI 尽量保持稳定提示前缀，并记录服务端返回的 `cached_tokens`，但不会伪造通用的客户端读写协议。
+- 远端 embedding 结果由 Agent 缓存到 `.mini-agent/cache/embeddings/v1/`。缓存键包含 schema 版本、embedding provider/vector-space id 和原文 SHA-256；缓存文件只保存向量及必要元数据，不保存原文。
+- 同一进程内还有有界 LRU 和 single-flight，相同并发请求只会回源一次。磁盘项损坏、向量非法、provider 不一致或维度不一致都会按 miss 处理，不会拿错误向量继续计算。
+- `.mini-agent/rag/index.jsonl` 是可重建的文档派生索引，`.mini-agent/memory/index.jsonl` 是受治理的历史记忆数据；二者不能笼统地称为“缓存”。删除手工记忆会丢失业务数据，而清理 embedding cache 只会让后续请求重新计算。
+
+完整 LLM 回答和 `AgentDecision` 默认不缓存，因为它们依赖会话、仓库状态、时间和副作用；直接重放可能陈旧或不安全。
+
+## 6. 评测数据集
 
 数据集使用 JSON 数组或 `{ "cases": [...] }`：
 
@@ -117,7 +128,7 @@ mini-agent rag eval docs/rag-eval.example.json
 - `meanRecallAtK`：Top-K 覆盖相关来源的平均比例。
 - `meanReciprocalRank`：第一个相关来源排名倒数的平均值，越接近 1 越好。
 
-## 6. 安全与局限
+## 7. 安全与局限
 
 - 文档内容是不可信数据，不能因为文档写着“忽略系统指令”就改变 Agent 行为。
 - 路径校验只能保证不读取仓库外和内部元数据，不能证明文档事实本身正确。

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { looksLikeDocumentCreationTask } from "../agent/ArtifactIntent.js";
 import { pathExists, normalizeRepoPath, toPosixPath } from "../utils/fs.js";
 import type { RepoState } from "./RepoStateAnalyzer.js";
 
@@ -8,7 +9,7 @@ export interface FilePlacementAdvisorOptions {
 
 export interface FilePlacementAdvice {
   inferredLanguage: string;
-  artifactKind: "source" | "test" | "script" | "standalone_demo";
+  artifactKind: "source" | "test" | "script" | "standalone_demo" | "documentation";
   suggestedPaths: string[];
   reasons: string[];
 }
@@ -25,7 +26,13 @@ export class FilePlacementAdvisor {
     const artifactKind = detectArtifactKind(normalized);
     const inferredLanguage = detectLanguage(normalized, repoState, artifactKind);
     const baseName = inferBaseName(userGoal, inferredLanguage, artifactKind);
-    const candidateDirectories = await detectCandidateDirectories(this.repoPath, repoState, inferredLanguage, artifactKind);
+    const candidateDirectories = await detectCandidateDirectories(
+      this.repoPath,
+      repoState,
+      inferredLanguage,
+      artifactKind,
+      /[\u3400-\u9fff]/.test(userGoal),
+    );
     const suggestedPaths = buildSuggestedPaths(candidateDirectories, baseName, inferredLanguage, artifactKind);
     const reasons = buildReasons(repoState, inferredLanguage, artifactKind, candidateDirectories);
 
@@ -50,6 +57,10 @@ export function formatFilePlacementAdvice(advice: FilePlacementAdvice): string {
 }
 
 function detectArtifactKind(normalizedGoal: string): FilePlacementAdvice["artifactKind"] {
+  if (looksLikeDocumentCreationTask(normalizedGoal)) {
+    return "documentation";
+  }
+
   if (containsAnyText(normalizedGoal, ["单元测试", "测试", "test", "spec"])) {
     return "test";
   }
@@ -70,6 +81,10 @@ function detectLanguage(
   repoState: RepoState,
   artifactKind: FilePlacementAdvice["artifactKind"],
 ): string {
+  if (artifactKind === "documentation") {
+    return "Markdown";
+  }
+
   if (containsAnyText(normalizedGoal, ["c++", "cpp"])) {
     return "C++";
   }
@@ -113,7 +128,7 @@ function inferBaseName(
   inferredLanguage: string,
   artifactKind: FilePlacementAdvice["artifactKind"],
 ): string {
-  const explicitPathMatch = userGoal.match(/([A-Za-z0-9_.-]+\.(?:ts|tsx|js|jsx|py|java|go|cpp|c|cc|rs|kt|cs|html|css|sh))/);
+  const explicitPathMatch = userGoal.match(/([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|py|java|go|cpp|c|cc|rs|kt|cs|html|css|sh|md|markdown))/);
   if (explicitPathMatch?.[1]) {
     return path.basename(explicitPathMatch[1], path.extname(explicitPathMatch[1]));
   }
@@ -136,6 +151,18 @@ function inferBaseName(
     return inferredLanguage === "Java" || inferredLanguage === "Kotlin" || inferredLanguage === "C#"
       ? "LongestValidParentheses"
       : "longest_valid_parentheses";
+  }
+  if (artifactKind === "documentation") {
+    if (normalized.includes("architecture") || normalized.includes("架构")) {
+      return "architecture";
+    }
+    if (normalized.includes("自身") || normalized.includes("self structure") || normalized.includes("self design")) {
+      return "self_structure_design";
+    }
+    if (normalized.includes("api")) {
+      return "api_guide";
+    }
+    return "design_document";
   }
 
   const englishWords = [...normalized.matchAll(/[a-z0-9]+/g)]
@@ -174,6 +201,7 @@ async function detectCandidateDirectories(
   repoState: RepoState,
   inferredLanguage: string,
   artifactKind: FilePlacementAdvice["artifactKind"],
+  preferLocalizedChineseDocs: boolean,
 ): Promise<string[]> {
   const candidates: string[] = [];
   const pushIfExists = async (relativePath: string): Promise<void> => {
@@ -181,6 +209,18 @@ async function detectCandidateDirectories(
       candidates.push(toPosixPath(relativePath));
     }
   };
+
+  if (artifactKind === "documentation") {
+    if (preferLocalizedChineseDocs) {
+      await pushIfExists("docs/zh-CN");
+      await pushIfExists("docs/zh-cn");
+      await pushIfExists("docs/zh");
+    }
+    await pushIfExists("docs");
+    await pushIfExists("documentation");
+    candidates.push(".");
+    return uniqueStrings(candidates);
+  }
 
   if (artifactKind === "standalone_demo" && inferredLanguage === "HTML") {
     await pushIfExists("public");
@@ -309,6 +349,10 @@ function buildFileName(
 }
 
 function extensionForLanguage(inferredLanguage: string, artifactKind: FilePlacementAdvice["artifactKind"]): string {
+  if (artifactKind === "documentation" || inferredLanguage === "Markdown") {
+    return ".md";
+  }
+
   if (artifactKind === "standalone_demo" && inferredLanguage === "HTML") {
     return ".html";
   }
@@ -358,6 +402,10 @@ function buildReasons(
 
   if (artifactKind === "script" && directories.some((directory) => directory.includes("scripts"))) {
     reasons.push("the repository already has a scripts-style directory, so utility scripts should prefer that area");
+  }
+
+  if (artifactKind === "documentation" && directories.some((directory) => directory.startsWith("docs"))) {
+    reasons.push("the repository already has a docs-style directory, so Markdown documentation should stay with the existing documentation set");
   }
 
   if (inferredLanguage === "Java" && directories.includes("src/main/java")) {

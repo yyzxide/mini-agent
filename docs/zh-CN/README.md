@@ -62,6 +62,7 @@
 - `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
 - `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
 - `.mini-agent/rag/index.jsonl` 文档知识索引，支持 Markdown/TXT 安全导入、按行分块、来源增量替换、关键词与向量混合检索、来源/标签过滤、行号引用和证据不足拒答。
+- `.mini-agent/cache/embeddings/v1/` 远端 embedding 内容寻址缓存，按 provider/vector-space 和文本哈希隔离，不保存原文，并支持内存 LRU、并发 single-flight 与跨进程磁盘复用。
 - 长期记忆覆盖 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop；支持离线或 OpenAI-compatible embedding、TTL、confidence、同主题 supersession、显式 remember/forget、失败过滤和密钥脱敏。
 - 声明式 Skill：从版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md` 发现、校验、自动选择并注入所有执行模式；Skill 只能指导现有受控工具，不能执行任意脚本或绕过权限。
 - 真正的只读 Plan 模式：`mini-agent plan`、`/plan`、`/plan off`、`/execute`。Plan 状态会随 Session 保存，只向模型暴露只读工具，并在运行时硬拦 patch、命令和伪装成工具调用的写操作。
@@ -71,6 +72,7 @@
 - `mini-agent --help`、`mini-agent run`、`mini-agent review`、`mini-agent tool`、`mini-agent mcp`、`mini-agent doctor`、`mini-agent logs`、`mini-agent changes`、`mini-agent memory` 等调试命令。
 - `mini-agent session summary <sessionId>` 可以直接查看某个会话的压缩摘要。
 - 代码生成请求默认会创建或修改仓库文件；只有明确要求“代码片段 / 不要改文件”时才走纯回答模式。
+- 设计文档、README、技术报告等明确文档创建请求同样进入 `AGENT_LOOP`，必须真正应用 Markdown patch；咨询“如何写文档”或明确要求只在聊天展示时仍走纯回答。
 - 如果上一轮先给了代码片段，下一轮再说“写入一个文件里面”“写进去”“保存一下”“把刚才的代码保存到文件里”，CLI 会复用当前 session，把上一轮代码块补成明确写文件任务，再交给 `AGENT_LOOP` 落盘。
 - 如果上一轮是代码落盘任务，下一轮继续说“数据流的中位数呢”这类短算法追问，CLI 会继承上一轮的仓库编辑模式，而不是退回到纯聊天贴代码。
 - 如果用户问“你写入了嘛？”，CLI 会直接检查当前 session 里上一轮之后是否出现 `FILE_CHANGE` 记录；没有记录就明确说明没有查到本次落盘，不让模型凭记忆猜。
@@ -101,7 +103,7 @@ npm run test:regression
 npm run verify:regression
 ```
 
-当前正常环境回归基线：39 个测试文件、288 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+当前正常环境回归基线：40 个测试文件、303 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
 
 ## 快速验证
 

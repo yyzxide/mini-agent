@@ -683,6 +683,8 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" 
     "Use the provided runtime context as authoritative for current date and time questions. Never call its date 'future' merely because it is later than your training data.",
     "If the user asks what was discussed before, summarize only what appears in the conversation context.",
     "Do not claim that there is no memory when conversation context is present.",
+    "In this product, RAG or the knowledge base means the separately indexed repository Markdown/TXT document corpus queried through knowledge_search. It does not mean conversation history or long-term task memory.",
+    "Historical memory evidence comes from prior sessions and task summaries. Describe it as retrieval-based memory, never as the product's document RAG knowledge base.",
     "For short follow-up fragments such as '葡萄牙呢', '那这个呢', or 'and Portugal?', infer the omitted topic or predicate from the conversation context when it is clear.",
     "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
     "Prefer a complete, useful answer over a terse one-line summary.",

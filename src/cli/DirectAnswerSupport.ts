@@ -1,5 +1,9 @@
 import { looksLikeFileWriteConfirmation } from "../agent/TaskFollowUp.js";
-import { looksLikeWebCapabilityQuestion } from "../agent/TaskRouter.js";
+import {
+  looksLikeCacheResponsibilityQuestion,
+  looksLikeRagCapabilityQuestion,
+  looksLikeWebCapabilityQuestion,
+} from "../agent/TaskRouter.js";
 import { classifyErrorText } from "../diagnostics/ErrorClassifier.js";
 import type { DiagnosticResult } from "../diagnostics/ErrorClassifier.js";
 import type { JsonObject, SessionRecord } from "../session/SessionTypes.js";
@@ -61,6 +65,26 @@ export function resolveLocalDirectReply(
       "当前 CLI 可以通过 `web_search` 搜索公开网页结果，也可以通过 `fetch_url` 抓取公网 HTTP(S) 页面文本。它不是浏览器式常驻联网，也没有“联网按钮”；而是当任务被路由到 `WEB_ANSWER` 时，由本地工具按需发起网络请求。",
       "",
       "所以像“今天股市收盘情况”“最新版本”“赛事比分”这类问题，正常应该看到 `[tool] web_search`，必要时还会看到 `[tool] fetch_url`。如果资料源抓不到，我应该说“来源不足以核验”，而不是否认这个项目的联网能力。",
+    ].join("\n");
+  }
+
+  if (looksLikeRagCapabilityQuestion(userGoal)) {
+    return [
+      "有。Mini Coding Agent 实现的是仓库本地的文档知识库 RAG，不是把历史聊天记录换个名字叫 RAG。",
+      "",
+      "它先通过 `mini-agent rag ingest` 把仓库内的 Markdown/TXT 文档分块并索引到 `.mini-agent/rag/index.jsonl`，Agent 再用只读的 `knowledge_search` 做关键词与向量混合检索，返回文件行号引用；证据不足时会明确拒答。",
+      "",
+      "这与 `.mini-agent/memory/index.jsonl` 完全分开：后者保存任务摘要、会话压缩和显式记忆，用于历史上下文召回，不是文档知识库 RAG。当前 RAG 是单仓库、本地 JSONL 的轻量实现，不是大规模生产向量平台。",
+    ].join("\n");
+  }
+
+  if (looksLikeCacheResponsibilityQuestion(userGoal)) {
+    return [
+      "要分层看：缓存命中不是模型在对话里自行决定的工具动作。",
+      "",
+      "- LLM 的 KV/Prompt Cache 由模型服务端维护；Agent 保持可复用的提示前缀，并记录服务端返回的 `cached_tokens`。",
+      "- RAG/Memory 使用的远端 embedding 缓存由 Agent 基础设施维护，按 provider/vector-space 和文本哈希自动读写 `.mini-agent/cache/embeddings/v1/`。",
+      "- 文档 RAG 索引和长期记忆是索引或业务数据，不应混称为缓存；完整回答和 `AgentDecision` 也不会直接缓存重放，以免使用过期上下文或重复副作用。",
     ].join("\n");
   }
 

@@ -81,7 +81,7 @@ export class LongTermMemoryStore implements MemoryRetriever {
   constructor(options: { repoPath: string; embeddingProvider?: EmbeddingProvider }) {
     this.repoPath = options.repoPath;
     this.indexPath = resolveMiniAgentPath(this.repoPath, MEMORY_DIR, MEMORY_INDEX_FILE);
-    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment();
+    this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment({ repoPath: options.repoPath });
   }
 
   async init(): Promise<void> {
@@ -248,6 +248,7 @@ export class LongTermMemoryStore implements MemoryRetriever {
         && isMemoryActive(entry, now)
         && !isTransientDirectAnswer(entry)
         && entry.sessionId !== options.excludeSessionId
+        && isCompatibleEmbedding(entry, this.embeddingProvider.id, queryVector.length)
     ));
 
     const candidates = entries
@@ -392,6 +393,14 @@ function scoreMemoryEntry(
     vectorScore,
     matchedKeywords,
   };
+}
+
+function isCompatibleEmbedding(entry: LongTermMemoryEntry, providerId: string, dimensions: number): boolean {
+  const storedProviderId = entry.embeddingProvider ?? "local-hash-v2";
+  return storedProviderId === providerId
+    && entry.vector.length === dimensions
+    && entry.vector.length > 0
+    && entry.vector.every((item) => Number.isFinite(item));
 }
 
 function isMemoryExpired(entry: LongTermMemoryEntry, now: number): boolean {

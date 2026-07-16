@@ -6,7 +6,7 @@
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 基线：39 个测试文件、288 个测试用例。
+- 正常环境全量 Vitest 基线：40 个测试文件、303 个测试用例。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -84,7 +84,7 @@
 - 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果；代码审查任务还要记录 review file、supplementalFiles、findings、rejectedFindings 和 verdict。
 - `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
-### 1.4.2 Long-term Memory / RAG
+### 1.4.2 Long-term Memory
 
 覆盖：
 
@@ -102,7 +102,18 @@
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
 - 结构化 compaction 同时保留关键用户/助手事实和最近上下文。
 
-### 1.4.3 Skill
+### 1.4.3 Document Knowledge-base RAG
+
+覆盖：
+
+- Markdown/TXT 安全加载、按行分块、来源哈希和增量重建。
+- `.mini-agent/rag/index.jsonl` 与 `.mini-agent/memory/index.jsonl` 相互独立。
+- 关键词与向量混合检索、来源/标签过滤、Top-K、多来源和上下文预算。
+- `knowledge_search` 返回文件行号 citation，空索引、provider 不匹配和证据不足时拒答。
+- 自然语言知识库问题进入可调用 `knowledge_search` 的 Agent 路径；RAG 能力问题返回确定性的本地产品说明。
+- embedding 缓存的内存命中、跨实例磁盘命中、provider 隔离、损坏回源和并发 single-flight。
+
+### 1.4.4 Skill
 
 覆盖：
 

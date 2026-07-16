@@ -182,6 +182,26 @@ describe("LongTermMemoryStore", () => {
     await expect(store.stats()).resolves.toMatchObject({ embeddingProvider: "fixture-embedding" });
   });
 
+  it("does not compare memories from a different embedding provider or vector dimension", async () => {
+    const indexed = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "provider-a", embed: async () => [1, 0] },
+    });
+    await indexed.remember({ title: "upload policy", text: "Uploads require checksums." });
+
+    const differentProvider = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "provider-b", embed: async () => [1, 0] },
+    });
+    const differentDimensions = new LongTermMemoryStore({
+      repoPath,
+      embeddingProvider: { id: "provider-a", embed: async () => [1] },
+    });
+
+    await expect(differentProvider.search("upload policy", { minScore: 0 })).resolves.toEqual([]);
+    await expect(differentDimensions.search("upload policy", { minScore: 0 })).resolves.toEqual([]);
+  });
+
   it("can exclude the active session before ranking retrieval candidates", async () => {
     const store = new LongTermMemoryStore({ repoPath });
     await store.remember({ sessionId: "active", title: "五子棋", text: "active session result" });
