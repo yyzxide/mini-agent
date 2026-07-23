@@ -48,4 +48,16 @@ describe("RuntimeLogger", () => {
       },
     });
   });
+
+  it("preserves numeric token telemetry while still redacting token credentials", () => {
+    expect(redactSecrets({
+      promptTokens: 1200,
+      cacheReadTokens: 900,
+      accessToken: "secret-token",
+    })).toEqual({
+      promptTokens: 1200,
+      cacheReadTokens: 900,
+      accessToken: "<redacted>",
+    });
+  });
 });

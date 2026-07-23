@@ -9,6 +9,21 @@ export interface VerificationCommandClassification {
   scopePaths: string[];
 }
 
+export interface StructuredVerificationCommandInput {
+  executable?: string;
+  args?: string[];
+  command?: string;
+  shell?: boolean;
+}
+
+const VERIFICATION_EXECUTABLES = new Set([
+  "bash", "bun", "bunx", "c++", "cargo", "clang", "clang++", "cmake", "dotnet",
+  "g++", "gcc", "go", "gradle", "javac", "jest", "kotlinc", "make", "mvn",
+  "mypy", "node", "npm", "npx", "php", "pnpm", "pnpx", "pyright", "pytest",
+  "python", "python3", "ruby", "ruff", "rustc", "sh", "shellcheck", "swift",
+  "swiftc", "tsc", "unittest", "vitest", "yarn",
+]);
+
 const TEST_COMMAND_PATTERNS = [
   /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b/i,
   /\b(?:mvn|gradle|go|cargo)\s+test\b/i,
@@ -73,6 +88,24 @@ export function classifyVerificationCommand(command: string): VerificationComman
   };
 }
 
+export function classifyVerificationCommandInput(
+  input: StructuredVerificationCommandInput,
+): VerificationCommandClassification {
+  if (input.shell === true) {
+    return noVerification();
+  }
+  const executable = basename(input.executable ?? "");
+  if (executable === "git") {
+    return input.args?.[0] === "diff" && input.args.includes("--check")
+      ? classifyVerificationCommand(`git ${input.args.join(" ")}`)
+      : noVerification();
+  }
+  if (!VERIFICATION_EXECUTABLES.has(executable)) {
+    return noVerification();
+  }
+  return classifyVerificationCommand([executable, ...(input.args ?? [])].join(" "));
+}
+
 export function isTestCommand(command: string): boolean {
   return classifyVerificationCommand(command).level === "TEST";
 }
@@ -107,4 +140,12 @@ function extractScopePaths(command: string): string[] {
 
 function normalizePath(value: string): string {
   return value.replace(/^\.\//, "").replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function basename(value: string): string {
+  return value.trim().replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/, "") ?? "";
+}
+
+function noVerification(): VerificationCommandClassification {
+  return { level: "NONE", category: "none", repositoryWide: false, scopePaths: [] };
 }

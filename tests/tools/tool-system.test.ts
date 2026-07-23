@@ -12,6 +12,7 @@ import {
   ToolRegistry,
 } from "../../src/tools/ToolRegistry.js";
 import type { ToolResult } from "../../src/tools/Tool.js";
+import { createPinnedLookup } from "../../src/tools/FetchUrlTool.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,9 +23,17 @@ interface ListFilesData {
 interface ReadFileData {
   path: string;
   startLine: number;
+  startColumn: number;
   endLine: number;
+  endColumn?: number;
   totalLines: number;
   content: string;
+  hasMore: boolean;
+  nextStartLine?: number;
+  nextStartColumn?: number;
+  lineComplete: boolean;
+  estimatedTokens: number;
+  sourceVersion: string;
 }
 
 interface SearchCodeData {
@@ -56,6 +65,8 @@ interface FetchUrlData {
 interface WebSearchData {
   query: string;
   provider: "duckduckgo_html" | "duckduckgo_lite" | "auto";
+  candidateCount: number;
+  rankingApplied: boolean;
   results: Array<{ title: string; url: string; snippet: string }>;
 }
 
@@ -84,6 +95,19 @@ afterEach(async () => {
 });
 
 describe("ToolRegistry", () => {
+  it("pinned DNS lookup honors Node's all-addresses callback shape", () => {
+    const lookup = createPinnedLookup({ address: "93.184.216.34", family: 4 });
+    lookup("example.com", { all: true }, (error, addresses) => {
+      expect(error).toBeNull();
+      expect(addresses).toEqual([{ address: "93.184.216.34", family: 4 }]);
+    });
+    lookup("example.com", { all: false }, (error, address, family) => {
+      expect(error).toBeNull();
+      expect(address).toBe("93.184.216.34");
+      expect(family).toBe(4);
+    });
+  });
+
   it("registers and executes tools with input validation", async () => {
     const registry = new ToolRegistry();
     registry.register(new ListFilesTool());
@@ -199,6 +223,80 @@ describe("read-only repository tools", () => {
     expect(result.data.startLine).toBe(1);
     expect(result.data.endLine).toBe(2);
     expect(result.data.content).toContain("# Demo Repo");
+    expect(result.data.hasMore).toBe(true);
+    expect(result.data.nextStartLine).toBe(3);
+    expect(result.data.estimatedTokens).toBeGreaterThan(0);
+    expect(result.data.sourceVersion).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("read_file exposes deterministic pagination until EOF", async () => {
+    await fs.writeFile(
+      path.join(repoPath, "src", "large.ts"),
+      Array.from({ length: 8 }, (_, index) => `export const value${String(index + 1)} = ${String(index + 1)};`).join("\n"),
+      "utf8",
+    );
+    const registry = createDefaultToolRegistry();
+
+    const first = await registry.execute("read_file", {
+      path: "src/large.ts",
+      startLine: 1,
+      maxLines: 3,
+    }, { repoPath });
+    expectSuccess<ReadFileData>(first);
+    expect(first.data).toMatchObject({
+      startLine: 1,
+      endLine: 3,
+      totalLines: 8,
+      hasMore: true,
+      nextStartLine: 4,
+    });
+
+    const last = await registry.execute("read_file", {
+      path: "src/large.ts",
+      startLine: first.data.nextStartLine,
+      maxLines: 10,
+    }, { repoPath });
+    expectSuccess<ReadFileData>(last);
+    expect(last.data).toMatchObject({
+      startLine: 4,
+      endLine: 8,
+      totalLines: 8,
+      hasMore: false,
+    });
+    expect(last.data.nextStartLine).toBeUndefined();
+  });
+
+  it("read_file continues through a single line larger than the token budget", async () => {
+    const oversizedLine = "const payload = \"" + "x".repeat(8_000) + "\";";
+    await fs.writeFile(path.join(repoPath, "src", "one-line.ts"), oversizedLine, "utf8");
+    const tool = new ReadFileTool();
+    const chunks: string[] = [];
+    let startColumn = 1;
+    let calls = 0;
+
+    while (true) {
+      const result = await tool.execute({
+        path: "src/one-line.ts",
+        startLine: 1,
+        startColumn,
+        maxLines: 10,
+        maxTokens: 128,
+      }, { repoPath });
+      expectSuccess<ReadFileData>(result);
+      chunks.push(result.data.content);
+      calls += 1;
+      if (!result.data.hasMore) {
+        expect(result.data.lineComplete).toBe(true);
+        break;
+      }
+      expect(result.data.nextStartLine).toBe(1);
+      expect(result.data.nextStartColumn).toBeGreaterThan(startColumn);
+      startColumn = result.data.nextStartColumn!;
+      expect(calls).toBeLessThan(100);
+    }
+
+    expect(calls).toBeGreaterThan(1);
+    expect(chunks.join("")).toBe(oversizedLine);
   });
 
   it("read_file prevents access outside the repository", async () => {
@@ -413,6 +511,8 @@ describe("read-only repository tools", () => {
 
     expectSuccess<WebSearchData>(result);
     expect(result.data.provider).toBe("duckduckgo_html");
+    expect(result.data.candidateCount).toBe(1);
+    expect(result.data.rankingApplied).toBe(false);
     expect(result.data.results).toEqual([
       {
         title: "Example & Docs",
@@ -420,6 +520,40 @@ describe("read-only repository tools", () => {
         snippet: "A useful documentation result.",
       },
     ]);
+  });
+
+  it("web_search reranks the complete temporal candidate pool before limiting output", async () => {
+    const candidates = [
+      ["Introducing GPT-5.5 - OpenAI", "https://openai.com/index/introducing-gpt-5-5/", "OpenAI April 23, 2026 release."],
+      ["OpenAI releases", "https://openai.com/research/index/release/", "Release index."],
+      ["OpenAI roundup", "https://roundup.example/openai", "June 2026 roundup."],
+      ["AI releases", "https://tracker.example/latest", "July 2026 tracker."],
+      ["Model guide", "https://guide.example/models", "Old guide."],
+      ["GPT-5.6 frontier intelligence", "https://openai.com/index/gpt-5-6/", "OpenAI July 9, 2026 release."],
+    ];
+    const html = [
+      "<html><body>",
+      ...candidates.map(([title, url, snippet]) => [
+        "<div class=\"result\">",
+        `<a class="result__a" href="/l/?uddg=${encodeURIComponent(url ?? "")}">${title}</a>`,
+        `<a class="result__snippet">${snippet}</a>`,
+        "</div>",
+      ].join("")),
+      "</body></html>",
+    ].join("");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(html, { status: 200 })));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("web_search", {
+      query: "OpenAI latest model 2026",
+      maxResults: 5,
+    }, { repoPath });
+
+    expectSuccess<WebSearchData>(result);
+    expect(result.data.candidateCount).toBe(6);
+    expect(result.data.rankingApplied).toBe(true);
+    expect(result.data.results).toHaveLength(5);
+    expect(result.data.results[0]?.url).toBe("https://openai.com/index/gpt-5-6/");
   });
 
   it("web_search falls back to duckduckgo lite when html results are empty", async () => {

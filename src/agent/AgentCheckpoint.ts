@@ -1,10 +1,18 @@
 import { z } from "zod";
-import { classifyVerificationCommand, isTestCommand } from "../command/CommandClassification.js";
+import {
+  classifyVerificationCommand,
+  type VerificationCommandClassification,
+} from "../command/CommandClassification.js";
 import { buildWorkingSet } from "../context/WorkingSet.js";
 import type { JsonObject, SessionRecord } from "../session/SessionTypes.js";
 import type { AgentState, AgentStatus, AgentVerificationOutcome } from "./AgentState.js";
 import type { AgentOperatingMode } from "./AgentOperatingMode.js";
 import type { SubAgentBatchResult } from "./SubAgentTypes.js";
+import {
+  mergeFileReadCoverageList,
+  parseReadFileResultData,
+  type FileReadCoverage,
+} from "./FileReadCoverage.js";
 
 export const AGENT_CHECKPOINT_VERSION = 1 as const;
 
@@ -26,6 +34,7 @@ export interface AgentCheckpointEffects {
   verificationEvidenceAfterPatch?: AgentVerificationOutcome[];
   latestTest?: { command: string; success: boolean; exitCode: number | null };
   knowledgeSearch?: { found: boolean; citations: string[] };
+  fileReadCoverage?: FileReadCoverage[];
 }
 
 export interface AgentCheckpoint {
@@ -94,6 +103,22 @@ const checkpointSchema = z.object({
       found: z.boolean(),
       citations: z.array(z.string()).max(20),
     }).strict().optional(),
+    fileReadCoverage: z.array(z.object({
+      path: z.string(),
+      totalLines: z.number().int().nonnegative(),
+      ranges: z.array(z.object({
+        startLine: z.number().int().positive(),
+        endLine: z.number().int().positive(),
+      }).strict()).max(100),
+      complete: z.boolean(),
+      nextStartLine: z.number().int().positive().optional(),
+      sourceVersion: z.string().optional(),
+      partialLine: z.object({
+        line: z.number().int().positive(),
+        nextColumn: z.number().int().positive(),
+      }).strict().optional(),
+      readCalls: z.number().int().nonnegative(),
+    }).strict()).max(20).optional(),
   }).strict(),
   collaboration: z.object({
     batches: z.array(z.object({
@@ -184,6 +209,9 @@ export function createAgentCheckpoint(input: {
         : {}),
       ...(latestTest ? { latestTest } : {}),
       ...(knowledgeSearch ? { knowledgeSearch } : {}),
+      ...(state.getFileReadCoverage().length > 0
+        ? { fileReadCoverage: state.getFileReadCoverage() }
+        : {}),
     },
     ...(state.delegationBatches.length > 0
       ? { collaboration: { batches: structuredClone(state.delegationBatches.slice(-2)) } }
@@ -240,7 +268,13 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
     }
     if (record.type === "FILE_CHANGE") {
       const files = Array.isArray(record.payload.files)
-        ? record.payload.files.filter((file): file is string => typeof file === "string")
+        ? record.payload.files.flatMap((file) => {
+          if (typeof file === "string") return [file];
+          if (typeof file === "object" && file !== null && !Array.isArray(file) && typeof file.path === "string") {
+            return [file.path];
+          }
+          return [];
+        })
         : [];
       recovered.effects.successfulPatch = true;
       recovered.effects.verificationAttemptedAfterPatch = false;
@@ -249,6 +283,11 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
       recovered.workingSet.modifiedFiles = uniqueBounded([...recovered.workingSet.modifiedFiles, ...files], 20);
       recovered.workingSet.relevantFiles = uniqueBounded([...recovered.workingSet.relevantFiles, ...files], 20);
       recovered.workingSet.completedActions = uniqueBounded([...recovered.workingSet.completedActions, "patch:recovered file change"], 12);
+      if (files.length > 0 && recovered.effects.fileReadCoverage) {
+        const changed = new Set(files.map((file) => file.replaceAll("\\", "/")));
+        recovered.effects.fileReadCoverage = recovered.effects.fileReadCoverage
+          .filter((entry) => !changed.has(entry.path));
+      }
       delete recovered.inFlightAction;
       continue;
     }
@@ -256,7 +295,8 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
       const command = typeof record.payload.command === "string" ? record.payload.command : "";
       const success = record.payload.success === true;
       const exitCode = typeof record.payload.exitCode === "number" ? record.payload.exitCode : null;
-      const classification = classifyVerificationCommand(command);
+      const classification = parsePersistedVerification(record.payload.verification)
+        ?? classifyVerificationCommand(command);
       if (command && classification.level !== "NONE") {
         const outcome: AgentVerificationOutcome = {
           command,
@@ -277,7 +317,7 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
             .some((candidate) => candidate.success);
         }
       }
-      if (command && isTestCommand(command)) {
+      if (command && classification.level === "TEST") {
         recovered.effects.latestTest = { command, success, exitCode };
         recovered.workingSet.verificationStatus = uniqueBounded([
           ...recovered.workingSet.verificationStatus,
@@ -307,6 +347,15 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
           };
         }
       }
+      if (success && toolName === "read_file") {
+        const result = parseReadFileResultData(record.payload.result);
+        if (result) {
+          recovered.effects.fileReadCoverage = mergeFileReadCoverageList(
+            recovered.effects.fileReadCoverage ?? [],
+            result,
+          );
+        }
+      }
       if (recovered.inFlightAction === `tool:${toolName}`) delete recovered.inFlightAction;
       continue;
     }
@@ -331,8 +380,35 @@ function uniqueBounded(values: string[], limit: number): string[] {
 }
 
 function latestCurrentTest(state: AgentState): AgentCheckpointEffects["latestTest"] {
-  const result = state.commandResults.filter((candidate) => isTestCommand(candidate.command)).at(-1);
+  const result = state.commandResults.filter((candidate) => (
+    candidate.verification?.level === "TEST"
+    || (candidate.verification === undefined && classifyVerificationCommand(candidate.command).level === "TEST")
+  )).at(-1);
   return result ? { command: result.command, success: result.success, exitCode: result.exitCode } : undefined;
+}
+
+function parsePersistedVerification(value: unknown): VerificationCommandClassification | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const levels = new Set(["NONE", "DIFF_HYGIENE", "SYNTAX", "STATIC", "TEST"]);
+  const categories = new Set(["none", "diff_hygiene", "syntax", "static", "test"]);
+  if (
+    typeof record.level !== "string"
+    || !levels.has(record.level)
+    || typeof record.category !== "string"
+    || !categories.has(record.category)
+    || typeof record.repositoryWide !== "boolean"
+    || !Array.isArray(record.scopePaths)
+    || !record.scopePaths.every((path) => typeof path === "string")
+  ) {
+    return undefined;
+  }
+  return {
+    level: record.level as VerificationCommandClassification["level"],
+    category: record.category as VerificationCommandClassification["category"],
+    repositoryWide: record.repositoryWide,
+    scopePaths: record.scopePaths.slice(0, 20) as string[],
+  };
 }
 
 function latestCurrentKnowledgeSearch(state: AgentState): AgentCheckpointEffects["knowledgeSearch"] {

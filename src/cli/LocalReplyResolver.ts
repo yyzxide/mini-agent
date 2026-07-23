@@ -2,8 +2,14 @@ import { looksLikeFileWriteConfirmation } from "../agent/TaskFollowUp.js";
 import {
   looksLikeCacheResponsibilityQuestion,
   looksLikeRagCapabilityQuestion,
-  looksLikeWebCapabilityQuestion,
 } from "../agent/TaskRouter.js";
+import {
+  classifyProductMetaIntent,
+  detectResponseCapabilityDenials,
+  inferLocale,
+  renderProductCapabilityAnswer,
+  type ProductMetaTopic,
+} from "../agent/ProductCapability.js";
 import { classifyErrorText } from "../diagnostics/ErrorClassifier.js";
 import type { DiagnosticResult } from "../diagnostics/ErrorClassifier.js";
 import type { JsonObject, SessionRecord } from "../session/SessionTypes.js";
@@ -42,30 +48,25 @@ export function resolveLocalDirectReply(
     return "我叫 Mini Coding Agent，是运行在这个仓库里的本地代码助手。";
   }
 
+  const productMeta = classifyProductMetaIntent(userGoal);
+  if (productMeta && productMeta.confidence >= 0.65 && productMeta.act !== "EXPLAIN_LIMITATION") {
+    return renderProductCapabilityAnswer(productMeta, { locale: inferLocale(userGoal) });
+  }
+
   if (looksLikeModeInventoryQuestion(lower, normalized)) {
     return [
-      "Mini Coding Agent 有 5 条主要处理路径：`DIRECT_ANSWER`（普通问答）、`WEB_ANSWER`（联网检索）、`CODE_REVIEW`（代码审查）、`AGENT_LOOP`（仓库任务）和只读的 `PLAN`。",
+      "Mini Coding Agent 现在只有一个统一的 `AgentLoop` 运行时，不再为普通问答、联网检索、代码审查和仓库分析维护四套执行链。",
       "",
-      "它们不是需要退出会话后手动重开的聊天模式。CLI 会根据每一条输入自动路由；你也可以直接说“联网搜一下……”或使用相应命令明确意图。",
+      "每条请求会生成不同的任务契约，用来限定可用能力、证据门槛、输出格式和执行预算。`PLAN` 是只读运行模式；直接回答、Web 研究、代码审查和仓库分析只是契约配置，不是独立 Agent。",
     ].join("\n");
   }
 
   if (looksLikeWebAnswerModeQuestion(lower, normalized)) {
-    return "有 `WEB_ANSWER` 联网处理路径。它不是一个需要手动进入的独立聊天室；每条输入都会重新路由，实时信息或明确要求联网时会自动调用 `web_search`，必要时再调用 `fetch_url`。";
+    return "联网回答由统一 `AgentLoop` 的 `WEB_RESEARCH` 任务契约处理，不是独立执行器。契约只开放 `web_search` 和 `fetch_url`，并要求达到来源和引用门槛后才能完成。";
   }
 
   if (matchesAnyPhrase(normalized, ["你可以切换吗", "可以切换吗", "你能切换吗", "能切换吗"])) {
-    return "可以，但通常不用手动切换。CLI 会按每条输入自动选择普通问答、联网检索、代码审查或仓库任务路径；你直接说“联网搜一下上一问”即可。";
-  }
-
-  if (looksLikeWebCapabilityQuestion(userGoal.trim().toLowerCase())) {
-    return [
-      "我有受控联网能力，不是完全离线。",
-      "",
-      "当前 CLI 可以通过 `web_search` 搜索公开网页结果，也可以通过 `fetch_url` 抓取公网 HTTP(S) 页面文本。它不是浏览器式常驻联网，也没有“联网按钮”；而是当任务被路由到 `WEB_ANSWER` 时，由本地工具按需发起网络请求。",
-      "",
-      "所以像“今天股市收盘情况”“最新版本”“赛事比分”这类问题，正常应该看到 `[tool] web_search`，必要时还会看到 `[tool] fetch_url`。如果资料源抓不到，我应该说“来源不足以核验”，而不是否认这个项目的联网能力。",
-    ].join("\n");
+    return "通常不用手动切换。CLI 会为每条输入建立相应任务契约，再交给同一个 AgentLoop；你直接说“联网搜一下上一问”或“审查这个文件”即可。";
   }
 
   if (looksLikeRagCapabilityQuestion(userGoal)) {
@@ -142,9 +143,33 @@ function looksLikeWebAnswerModeQuestion(lower: string, normalized: string): bool
 }
 
 export function resolveLocalSessionReply(userGoal: string, records: SessionRecord[]): string | undefined {
-  return looksLikeFileWriteConfirmation(userGoal)
-    ? buildFileWriteConfirmationReply(records)
-    : undefined;
+  if (looksLikeFileWriteConfirmation(userGoal)) {
+    return buildFileWriteConfirmationReply(records, userGoal);
+  }
+
+  const productMeta = classifyProductMetaIntent(userGoal);
+  if (productMeta && productMeta.confidence >= 0.65 && productMeta.act === "EXPLAIN_LIMITATION") {
+    const priorDenialFound = records.some((record) => recordContainsCapabilityDenial(record, productMeta.topic));
+    return renderProductCapabilityAnswer(productMeta, {
+      priorDenialFound,
+      locale: inferLocale(userGoal),
+    });
+  }
+  return undefined;
+}
+
+function recordContainsCapabilityDenial(
+  record: SessionRecord,
+  topic: ProductMetaTopic,
+): boolean {
+  const value = record.type === "ASSISTANT_MESSAGE"
+    ? record.payload.content
+    : record.type === "TASK_SUMMARY" ? record.payload.summary : undefined;
+  if (typeof value !== "string") return false;
+  const denials = detectResponseCapabilityDenials(value);
+  return topic === "ALL"
+    ? denials.length > 0
+    : denials.includes(topic);
 }
 
 function renderDiagnosticReply(diagnostic: DiagnosticResult): string {
@@ -180,9 +205,14 @@ function formatDiagnosticCategory(category: DiagnosticResult["category"]): strin
   }
 }
 
-function buildFileWriteConfirmationReply(records: SessionRecord[]): string {
-  const currentUserIndex = findLastRecordIndex(records, (record) => record.type === "USER_MESSAGE");
-  const previousUserIndex = findLastRecordIndex(records, (record) => record.type === "USER_MESSAGE", currentUserIndex - 1);
+function buildFileWriteConfirmationReply(records: SessionRecord[], currentUserGoal: string): string {
+  const latestUserIndex = findLastRecordIndex(records, (record) => record.type === "USER_MESSAGE");
+  const currentAlreadyRecorded = latestUserIndex >= 0
+    && records[latestUserIndex]?.payload.content === currentUserGoal;
+  const currentUserIndex = currentAlreadyRecorded ? latestUserIndex : records.length;
+  const previousUserIndex = currentAlreadyRecorded
+    ? findLastRecordIndex(records, (record) => record.type === "USER_MESSAGE", currentUserIndex - 1)
+    : latestUserIndex;
   const latestChangeAfterPreviousUser = previousUserIndex >= 0
     ? findLastRecordIndex(records, (record) => record.type === "FILE_CHANGE", currentUserIndex - 1, previousUserIndex + 1)
     : -1;

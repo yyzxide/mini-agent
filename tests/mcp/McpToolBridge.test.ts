@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpServerConfigSchema } from "../../src/mcp/McpTypes.js";
 import { StdioMcpClient } from "../../src/mcp/StdioMcpClient.js";
 import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
-import { createServer } from "node:http";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("MCP tool bridge", () => {
   it("exports local tool descriptors with safety annotations", () => {
@@ -70,38 +73,34 @@ describe("MCP tool bridge", () => {
 
   it("supports Streamable HTTP JSON responses and session propagation", async () => {
     const seenSessions: Array<string | undefined> = [];
-    const server = createServer((request, response) => {
-      if (request.method === "DELETE") {
-        response.writeHead(204).end();
-        return;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seenSessions.push(headers.get("mcp-session-id") ?? undefined);
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      const message = JSON.parse(String(init?.body)) as {
+        id?: number;
+        method: string;
+        params?: { arguments?: unknown };
+      };
+      if (message.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
       }
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk) => { body += chunk; });
-      request.on("end", () => {
-        const message = JSON.parse(body) as { id?: number; method: string; params?: { arguments?: unknown } };
-        seenSessions.push(request.headers["mcp-session-id"] as string | undefined);
-        if (message.method === "notifications/initialized") {
-          response.writeHead(202).end();
-          return;
-        }
-        const result = message.method === "initialize"
-          ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "http", version: "1" } }
-          : message.method === "tools/list"
-            ? { tools: [{ name: "echo", inputSchema: { type: "object" } }] }
-            : { structuredContent: message.params?.arguments };
-        response.writeHead(200, {
+      const result = message.method === "initialize"
+        ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "http", version: "1" } }
+        : message.method === "tools/list"
+          ? { tools: [{ name: "echo", inputSchema: { type: "object" } }] }
+          : { structuredContent: message.params?.arguments };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
+        status: 200,
+        headers: {
           "content-type": "application/json",
           "mcp-session-id": "fixture-session",
-        }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+        },
       });
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("HTTP fixture did not bind");
+    }));
     const client = new HttpMcpClient(McpServerConfigSchema.parse({
       name: "http-fixture",
-      url: `http://127.0.0.1:${address.port}/mcp`,
+      url: "https://mcp.example.test/mcp",
       timeoutMs: 5_000,
     }));
     try {
@@ -110,7 +109,6 @@ describe("MCP tool bridge", () => {
       expect(seenSessions.slice(1)).toEqual(expect.arrayContaining(["fixture-session"]));
     } finally {
       await client.close();
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
 });

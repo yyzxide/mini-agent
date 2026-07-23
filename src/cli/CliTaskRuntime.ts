@@ -13,6 +13,8 @@ export interface AgentCliOptions {
   model?: string;
   baseUrl?: string;
   eventStream?: boolean;
+  verbose?: boolean;
+  trace?: boolean;
   agentLoop?: boolean;
   keepSessionActive?: boolean;
   operatingMode?: AgentOperatingMode;
@@ -118,7 +120,8 @@ export async function recordLlmUsageFromClient(
         promptTokens: metric.usage?.promptTokens ?? null,
         completionTokens: metric.usage?.completionTokens ?? null,
         totalTokens: metric.usage?.totalTokens ?? null,
-        cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
+          cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
+          cacheWriteTokens: metric.usage?.cacheWriteTokens ?? null,
         reasoningTokens: metric.usage?.reasoningTokens ?? null,
       }),
     });

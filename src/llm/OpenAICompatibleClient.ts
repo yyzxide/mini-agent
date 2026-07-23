@@ -1,8 +1,6 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
+import { formatCapabilityRegistryForPrompt } from "../agent/CapabilityRegistry.js";
 import { formatRuntimeContext } from "../context/RuntimeContext.js";
-import { CodeReviewResponseSchema } from "../review/CodeReview.js";
-import { CodeReviewVerificationResponseSchema } from "../review/CodeReview.js";
-import type { CodeReviewResponse, CodeReviewVerificationResponse } from "../review/CodeReview.js";
 import { errorToMessage } from "../utils/errors.js";
 import { DecisionParser } from "./DecisionParser.js";
 import type { LlmClient, LlmInput } from "./LlmClient.js";
@@ -24,7 +22,7 @@ export interface LlmTextInput {
   userGoal: string;
   context?: string | undefined;
   conversation?: ConversationMessage[] | undefined;
-  mode?: "direct" | "web" | "web_rewrite" | "review_json" | "review_verify_json" | undefined;
+  mode?: "direct" | "web" | "web_rewrite" | undefined;
 }
 
 export interface LlmTextResult {
@@ -43,36 +41,13 @@ export interface LlmUsageMetrics {
   totalTokens?: number;
   reasoningTokens?: number;
   cachedPromptTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface LlmCallMetrics {
   model?: string;
   finishReason?: string;
   usage?: LlmUsageMetrics;
-}
-
-export interface LlmReviewInput {
-  userGoal: string;
-  context: string;
-}
-
-export interface LlmReviewResult {
-  success: boolean;
-  review?: CodeReviewResponse;
-  error?: string;
-  rawText?: string;
-}
-
-export interface LlmReviewVerificationInput {
-  userGoal: string;
-  context: string;
-}
-
-export interface LlmReviewVerificationResult {
-  success: boolean;
-  verification?: CodeReviewVerificationResponse;
-  error?: string;
-  rawText?: string;
 }
 
 export class OpenAICompatibleClient implements LlmClient {
@@ -162,112 +137,6 @@ export class OpenAICompatibleClient implements LlmClient {
     return {
       success: true,
       text: accumulated,
-    };
-  }
-
-  async completeReview(input: LlmReviewInput): Promise<LlmReviewResult> {
-    const configurationError = this.validateConfiguration();
-    if (configurationError) {
-      return { success: false, error: configurationError };
-    }
-
-    const firstAttempt = await this.requestTextCompletion({
-      userGoal: input.userGoal,
-      context: input.context,
-      mode: "review_json",
-    });
-    if (!firstAttempt.success || !firstAttempt.text) {
-      return { success: false, error: firstAttempt.error ?? "Review request failed" };
-    }
-
-    const firstParsed = parseCodeReviewResponse(firstAttempt.text);
-    if (firstParsed.success) {
-      return { success: true, review: firstParsed.review, rawText: firstAttempt.text };
-    }
-
-    const repairContext = [
-      input.context,
-      "",
-      "Previous review JSON was invalid.",
-      `Validation error: ${firstParsed.error}`,
-      `Previous response preview:\n${firstAttempt.text.slice(0, 1200)}`,
-    ].join("\n");
-
-    const secondAttempt = await this.requestTextCompletion({
-      userGoal: input.userGoal,
-      context: repairContext,
-      mode: "review_json",
-    });
-    if (!secondAttempt.success || !secondAttempt.text) {
-      return { success: false, error: secondAttempt.error ?? firstParsed.error };
-    }
-
-    const secondParsed = parseCodeReviewResponse(secondAttempt.text);
-    if (!secondParsed.success) {
-      return {
-        success: false,
-        error: secondParsed.error,
-        rawText: secondAttempt.text,
-      };
-    }
-
-    return {
-      success: true,
-      review: secondParsed.review,
-      rawText: secondAttempt.text,
-    };
-  }
-
-  async verifyReview(input: LlmReviewVerificationInput): Promise<LlmReviewVerificationResult> {
-    const configurationError = this.validateConfiguration();
-    if (configurationError) {
-      return { success: false, error: configurationError };
-    }
-
-    const firstAttempt = await this.requestTextCompletion({
-      userGoal: input.userGoal,
-      context: input.context,
-      mode: "review_verify_json",
-    });
-    if (!firstAttempt.success || !firstAttempt.text) {
-      return { success: false, error: firstAttempt.error ?? "Review verification failed" };
-    }
-
-    const firstParsed = parseReviewVerificationResponse(firstAttempt.text);
-    if (firstParsed.success) {
-      return { success: true, verification: firstParsed.verification, rawText: firstAttempt.text };
-    }
-
-    const repairContext = [
-      input.context,
-      "",
-      "Previous verification JSON was invalid.",
-      `Validation error: ${firstParsed.error}`,
-      `Previous response preview:\n${firstAttempt.text.slice(0, 1200)}`,
-    ].join("\n");
-
-    const secondAttempt = await this.requestTextCompletion({
-      userGoal: input.userGoal,
-      context: repairContext,
-      mode: "review_verify_json",
-    });
-    if (!secondAttempt.success || !secondAttempt.text) {
-      return { success: false, error: secondAttempt.error ?? firstParsed.error };
-    }
-
-    const secondParsed = parseReviewVerificationResponse(secondAttempt.text);
-    if (!secondParsed.success) {
-      return {
-        success: false,
-        error: secondParsed.error,
-        rawText: secondAttempt.text,
-      };
-    }
-
-    return {
-      success: true,
-      verification: secondParsed.verification,
-      rawText: secondAttempt.text,
     };
   }
 
@@ -382,6 +251,7 @@ export class OpenAICompatibleClient implements LlmClient {
               role: "system",
               content: CODING_AGENT_SYSTEM_PROMPT,
             },
+            ...(input.conversation ?? []),
             {
               role: "user",
               content: buildDecisionPrompt(userPrompt, retry),
@@ -670,15 +540,19 @@ function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
   return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
 }
 
-function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" | "review_json" | "review_verify_json"): string {
+function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite"): string {
   const commonRules = [
     "You are Mini Coding Agent, a helpful local assistant inside the mini-agent coding CLI.",
     "If the user asks your name or identity, identify yourself as Mini Coding Agent. Do not claim that you have no name.",
-    "The CLI has five main processing paths: DIRECT_ANSWER, WEB_ANSWER, CODE_REVIEW, AGENT_LOOP, and read-only PLAN. They are selected per request; do not invent other product modes.",
-    "Do not tell the user to exit, restart, or open a separate chat to switch processing paths. The CLI routes each new request automatically.",
+    "The CLI uses one AgentLoop runtime. Direct responses, web research, code review, repository analysis, repository changes, and read-only planning are task contracts, not separate agents or chat modes.",
+    "Do not tell the user to exit, restart, or open a separate chat to switch modes. The CLI builds a task contract for each request automatically.",
+    formatCapabilityRegistryForPrompt(),
     "Answer in the same language as the user unless the user asks otherwise.",
     "The current user request is authoritative. Do not answer or repeat an older request unless the current request clearly refers to it.",
     "Use the provided conversation context when it is relevant.",
+    "Conversation assistant turns are authoritative evidence of what you previously output, but they are not evidence that the external-world claims in those turns are true.",
+    "When the user challenges your earlier answer, inspect the visible original wording first. If it conflicts with your current answer, acknowledge and retract it; do not deny it, minimize it, or rewrite what you meant.",
+    "If the disputed original wording is not visible, say that the available conversation record is insufficient. Never infer from missing context that you did not say something.",
     "If Context contains Active skills, follow those skill instructions when relevant unless they conflict with the current user request, repository evidence, safety rules, or this system prompt.",
     "Use the provided runtime context as authoritative for current date and time questions. Never call its date 'future' merely because it is later than your training data.",
     "If the user asks what was discussed before, summarize only what appears in the conversation context.",
@@ -688,13 +562,16 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" 
     "For short follow-up fragments such as '葡萄牙呢', '那这个呢', or 'and Portugal?', infer the omitted topic or predicate from the conversation context when it is clear.",
     "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
     "Prefer a complete, useful answer over a terse one-line summary.",
+    "Without tool or source evidence, present model memory only as unverified general knowledge. Do not fabricate a complete-looking list or precise names, locations, dates, quantities, rewards, mechanics, or other details to fill a knowledge gap.",
+    "If the user exposes one unsupported or contradictory detail, re-evaluate the related claims as a group. Do not preserve the rest by default and do not replace the error with new unverified specifics.",
+    "Do not say that you checked, verified, searched, or confirmed an external fact unless evidence for that action is present in the current context.",
     "For casual acknowledgements, corrections, cancellations, or 'never mind / I clicked the wrong thing' style messages, reply naturally like a person in one short sentence.",
     "Do not turn casual chat into a ticket note, task log, operator summary, or third-person report.",
     "Avoid phrases like '用户误触', '未做任何操作', 'the user mis-clicked', or 'no action was taken' unless the user explicitly asks for a formal log entry.",
     "Use short paragraphs or bullets when they improve clarity.",
     "For explicit snippet-only requests, provide complete code in a fenced code block and add only brief notes when useful.",
-    "Do not falsely claim that the overall CLI lacks file-writing capability. If the user asks why a file was not created, explain that this chat-style answer path does not apply repository edits, while repository-editing tasks do.",
-    "Do not falsely claim that the overall CLI lacks web capability. If a current-data question reaches this chat-style path without web evidence, say that the answer path has no gathered web evidence and suggest using the web-answer mode, rather than saying the product cannot network.",
+    "Do not falsely claim that the overall CLI lacks file-writing capability. Explain that the current task contract may intentionally disable repository writes.",
+    "Do not falsely claim that the overall CLI lacks web capability. If the current contract has no gathered web evidence, say that limitation instead of saying the product cannot network.",
   ];
 
   if (mode === "web") {
@@ -731,37 +608,6 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" 
     ].join("\n");
   }
 
-  if (mode === "review_json") {
-    return [
-      "You are a code review specialist inside a local coding-agent CLI.",
-      "Return JSON only. Do not return markdown, bullets, headings, or prose outside JSON.",
-      "Review the provided primary file first. Supplemental related files may appear as supporting context.",
-      "Do not invent lines, code snippets, APIs, or behavior not present in the provided file content.",
-      "Every finding must quote an exact code fragment from the primary file in codeQuote.",
-      "Only report a finding when the quoted code supports the claim.",
-      "Use certainty=confirmed only when the issue is directly supported by the provided code.",
-      "Use certainty=possible when the code suggests a risk but more context would be needed to prove it.",
-      "If there are no grounded findings, return an empty findings array and explain that clearly in summary.",
-      "Prefer fewer high-signal findings over many weak ones.",
-      "The JSON shape must be:",
-      "{\"summary\":\"string\",\"overallVerdict\":\"issues_found|no_confirmed_issues|needs_more_context\",\"findings\":[{\"severity\":\"high|medium|low\",\"certainty\":\"confirmed|possible\",\"file\":\"string\",\"line\":123,\"title\":\"string\",\"codeQuote\":\"string\",\"reasoning\":\"string\",\"suggestedFix\":\"string optional\"}],\"followUp\":[\"string\"]}",
-    ].join("\n");
-  }
-
-  if (mode === "review_verify_json") {
-    return [
-      "You are a second-pass code review verifier inside a local coding-agent CLI.",
-      "Return JSON only. Do not return markdown or prose outside JSON.",
-      "You will receive a primary repository file, optional supplemental related files, and a list of preliminary findings.",
-      "Your job is to decide which findings are actually supported by the provided code.",
-      "Each kept finding must remain grounded in the quoted code from the primary file.",
-      "Drop a finding when its claim is not justified by the quoted code or when the reasoning overreaches the evidence.",
-      "Keep only high-confidence grounded findings.",
-      "The JSON shape must be:",
-      "{\"summary\":\"string\",\"findings\":[{\"index\":0,\"keep\":true,\"certainty\":\"confirmed|possible\",\"reasoning\":\"string\",\"suggestedFix\":\"string optional\",\"dropReason\":\"string optional\"}],\"followUp\":[\"string\"]}",
-    ].join("\n");
-  }
-
   return commonRules.join("\n");
 }
 
@@ -775,10 +621,12 @@ function extractUsageMetrics(body: OpenAIChatCompletionResponse): LlmUsageMetric
   const totalTokens = readOptionalNumber(body.usage.total_tokens);
   const promptDetails = isRecord(body.usage.prompt_tokens_details) ? body.usage.prompt_tokens_details : undefined;
   const completionDetails = isRecord(body.usage.completion_tokens_details) ? body.usage.completion_tokens_details : undefined;
-  const cachedPromptTokens = promptDetails ? readOptionalNumber(promptDetails.cached_tokens) : undefined;
+  const cachedPromptTokens = (promptDetails ? readOptionalNumber(promptDetails.cached_tokens) : undefined)
+    ?? readOptionalNumber(body.usage.cache_read_input_tokens);
+  const cacheWriteTokens = readOptionalNumber(body.usage.cache_creation_input_tokens);
   const reasoningTokens = completionDetails ? readOptionalNumber(completionDetails.reasoning_tokens) : undefined;
 
-  if ([promptTokens, completionTokens, totalTokens, cachedPromptTokens, reasoningTokens].every((value) => value === undefined)) {
+  if ([promptTokens, completionTokens, totalTokens, cachedPromptTokens, cacheWriteTokens, reasoningTokens].every((value) => value === undefined)) {
     return undefined;
   }
 
@@ -788,72 +636,7 @@ function extractUsageMetrics(body: OpenAIChatCompletionResponse): LlmUsageMetric
     ...(totalTokens === undefined ? {} : { totalTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
     ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
-  };
-}
-
-function parseCodeReviewResponse(text: string): {
-  success: true;
-  review: CodeReviewResponse;
-} | {
-  success: false;
-  error: string;
-} {
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    return {
-      success: false,
-      error: `Review JSON parse failed: ${errorToMessage(error)}`,
-    };
-  }
-
-  const result = CodeReviewResponseSchema.safeParse(parsed);
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    return {
-      success: false,
-      error: `Review schema validation failed${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`,
-    };
-  }
-
-  return {
-    success: true,
-    review: result.data,
-  };
-}
-
-function parseReviewVerificationResponse(text: string): {
-  success: true;
-  verification: CodeReviewVerificationResponse;
-} | {
-  success: false;
-  error: string;
-} {
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    return {
-      success: false,
-      error: `Review verification JSON parse failed: ${errorToMessage(error)}`,
-    };
-  }
-
-  const result = CodeReviewVerificationResponseSchema.safeParse(parsed);
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    return {
-      success: false,
-      error: `Review verification schema validation failed${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`,
-    };
-  }
-
-  return {
-    success: true,
-    verification: result.data,
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
 

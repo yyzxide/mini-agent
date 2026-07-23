@@ -123,6 +123,45 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toBe("写个五子棋小游戏吧");
     expect(body.messages[2]?.content).toBe("已创建 gobang.html。");
     expect(body.messages[3]?.content).toContain("你觉得这个有难度吗");
+    expect(body.messages[0]?.content).toContain("authoritative evidence of what you previously output");
+    expect(body.messages[0]?.content).toContain("Do not fabricate a complete-looking list");
+    expect(body.messages[0]?.content).toContain("do not deny it");
+  });
+
+  it("preserves selected conversation evidence for iterative task contracts", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "{\"type\":\"FINAL\",\"summary\":\"已核对。\",\"success\":true}" } }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.chat({
+      ...sampleInput(),
+      conversation: [
+        { role: "user", content: "之前的问题" },
+        { role: "assistant", content: "此前的相关原话" },
+      ],
+    });
+
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(body.messages[1]?.content).toBe("之前的问题");
+    expect(body.messages[2]?.content).toBe("此前的相关原话");
+    expect(body.messages[3]?.content).toContain("\"userGoal\": \"inspect repository\"");
   });
 
   it("records usage metrics that can be drained later", async () => {
@@ -139,6 +178,7 @@ describe("OpenAICompatibleClient", () => {
           prompt_tokens_details: {
             cached_tokens: 4,
           },
+          cache_creation_input_tokens: 3,
           completion_tokens_details: {
             reasoning_tokens: 2,
           },
@@ -163,6 +203,7 @@ describe("OpenAICompatibleClient", () => {
           completionTokens: 6,
           totalTokens: 16,
           cachedPromptTokens: 4,
+          cacheWriteTokens: 3,
           reasoningTokens: 2,
         },
       },
@@ -419,85 +460,6 @@ describe("OpenAICompatibleClient", () => {
     }
   });
 
-  it("parses structured code review JSON", async () => {
-    const client = new OpenAICompatibleClient({
-      baseUrl: "https://llm.example/v1",
-      apiKey: "secret-key",
-      model: "agent-model",
-      fetchFn: async () => new Response(JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                summary: "Found one grounded issue.",
-                overallVerdict: "issues_found",
-                findings: [
-                  {
-                    severity: "medium",
-                    certainty: "confirmed",
-                    file: "src/tools/WebSearchTool.ts",
-                    line: 139,
-                    title: "Hex entities are not decoded",
-                    codeQuote: "replace(/&#(\\d+);/g",
-                    reasoning: "The decoder only handles decimal numeric entities.",
-                  },
-                ],
-                followUp: [],
-              }),
-            },
-          },
-        ],
-      }), { status: 200 }),
-    });
-
-    const result = await client.completeReview({
-      userGoal: "Review src/tools/WebSearchTool.ts for bugs",
-      context: "file content here",
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.review?.findings[0]?.title).toBe("Hex entities are not decoded");
-  });
-
-  it("parses structured code review verification JSON", async () => {
-    const client = new OpenAICompatibleClient({
-      baseUrl: "https://llm.example/v1",
-      apiKey: "secret-key",
-      model: "agent-model",
-      fetchFn: async () => new Response(JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                summary: "Keep only the grounded finding.",
-                findings: [
-                  {
-                    index: 0,
-                    keep: true,
-                    certainty: "possible",
-                    reasoning: "The quoted code supports a decoder limitation, but impact still depends on actual input.",
-                  },
-                ],
-                followUp: ["Check real HTML samples."],
-              }),
-            },
-          },
-        ],
-      }), { status: 200 }),
-    });
-
-    const result = await client.verifyReview({
-      userGoal: "Verify review findings",
-      context: "review verification context",
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.verification?.findings[0]).toMatchObject({
-      index: 0,
-      keep: true,
-      certainty: "possible",
-    });
-  });
 });
 
 function restoreEnv(name: string, value: string | undefined): void {

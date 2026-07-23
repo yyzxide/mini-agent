@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
+import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
 import { LongTermMemoryStore } from "../../src/memory/LongTermMemoryStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
@@ -211,6 +212,45 @@ describe("ContextBuilder", () => {
     expect(context).not.toContain("Repository state summary:");
     expect(trace?.sections.find((section) => section.id === "readme")?.selected).toBe(false);
     expect(trace?.sections.find((section) => section.id === "tree")?.selected).toBe(false);
+  });
+
+  it("keeps the latest file chunk directly visible and reports coverage separately", async () => {
+    const state = new AgentState({
+      sessionId: "complete-read-session",
+      repoPath,
+      userGoal: "完整读取 src/index.ts",
+      taskContract: buildAgentTaskContract({
+        userGoal: "完整读取 src/index.ts",
+        route: { intent: "AGENT_LOOP", reason: "test" },
+      }),
+    });
+    const source = "const firstChunkMarker = true;\nconst secondLine = true;";
+    state.addToolResult({
+      toolName: "read_file",
+      input: { path: "src/index.ts", startLine: 1 },
+      result: {
+        success: true,
+        data: {
+          path: "src/index.ts",
+          startLine: 1,
+          endLine: 2,
+          totalLines: 4,
+          content: source,
+          hasMore: true,
+          nextStartLine: 3,
+          estimatedTokens: 20,
+          sourceVersion: "v1",
+        },
+      },
+    });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 20_000, maxTokens: 5_000 }).build(state);
+
+    expect(context).toContain("Active file chunk:");
+    expect(context).toContain(source);
+    expect(context).toContain("File read coverage:");
+    expect(context).toContain("partial; next unread line 3");
+    expect(context.match(/firstChunkMarker/g)).toHaveLength(1);
   });
 
   it("injects runtime information only for time-sensitive tasks", async () => {

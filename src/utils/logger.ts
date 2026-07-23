@@ -38,6 +38,7 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 };
 
 const SECRET_KEY_PATTERN = /(api[-_]?key|token|secret|password|authorization|cookie)/i;
+const SAFE_TOKEN_METRIC_KEY_PATTERN = /^(?:promptTokens|completionTokens|totalTokens|cachedPromptTokens|reasoningTokens|cacheReadTokens|cacheWriteTokens|maxTokens|estimatedTokens|includedTokens|estimatedInputTokens|estimatedOutputTokens)$/;
 
 export class RuntimeLogger {
   private readonly repoPath: string;
@@ -85,7 +86,7 @@ export class RuntimeLogger {
     };
 
     try {
-      await ensureDir(logsDir(this.repoPath));
+      await ensureDir(logsDir(this.repoPath), 0o700);
       await appendJsonLine(logFilePath(this.repoPath, record.timestamp), record);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -153,7 +154,9 @@ export function redactSecrets(value: JsonValue): JsonValue {
   if (typeof value === "object" && value !== null) {
     const output: JsonObject = {};
     for (const [key, nestedValue] of Object.entries(value)) {
-      output[key] = SECRET_KEY_PATTERN.test(key) ? "<redacted>" : redactSecrets(nestedValue);
+      output[key] = SECRET_KEY_PATTERN.test(key) && !SAFE_TOKEN_METRIC_KEY_PATTERN.test(key)
+        ? "<redacted>"
+        : redactSecrets(nestedValue);
     }
     return output;
   }

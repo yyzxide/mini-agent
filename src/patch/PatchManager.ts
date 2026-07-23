@@ -216,7 +216,7 @@ export class PatchManager {
 
   private async writeTempPatch(patch: string): Promise<string> {
     const tmpDir = resolveMiniAgentPath(this.repoPath, "tmp");
-    await ensureDir(tmpDir);
+    await ensureDir(tmpDir, 0o700);
     const patchFile = resolveMiniAgentPath(this.repoPath, "tmp", `${randomUUID()}.patch`);
     await fs.writeFile(patchFile, patch, "utf8");
     return patchFile;

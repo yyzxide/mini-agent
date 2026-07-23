@@ -12,6 +12,7 @@ import {
   resolveRepoPath,
   truncateText,
 } from "../utils/fs.js";
+import type { VerificationCommandClassification } from "./CommandClassification.js";
 
 export interface CommandRunnerOptions {
   repoPath: string;
@@ -29,6 +30,10 @@ export interface CommandInput {
   env?: Record<string, string>;
 }
 
+export interface CommandRunObserver {
+  onOutput?: (event: { stream: "stdout" | "stderr"; chunk: string }) => void;
+}
+
 export interface CommandResult {
   command: string;
   cwd: string;
@@ -40,6 +45,7 @@ export interface CommandResult {
   timedOut: boolean;
   truncated: boolean;
   error?: string;
+  verification?: VerificationCommandClassification;
 }
 
 const SHELL_EXECUTABLES = new Set([
@@ -80,6 +86,16 @@ const INLINE_CODE_FLAGS_BY_EXECUTABLE = new Map<string, Set<string>>([
   ["perl.exe", new Set(["-e"])],
 ]);
 
+const EXPLICIT_APPROVAL_EXECUTABLES = new Set([
+  "curl", "curl.exe", "dd", "docker", "docker.exe", "kubectl", "kubectl.exe",
+  "mv", "mv.exe", "npm", "npm.cmd", "pnpm", "pnpm.cmd", "rm", "rm.exe",
+  "rmdir", "rmdir.exe", "rsync", "rsync.exe", "scp", "scp.exe", "shred",
+  "ssh", "ssh.exe", "terraform", "terraform.exe", "unlink", "wget", "wget.exe",
+]);
+
+const SENSITIVE_ENV_KEY_PATTERN = /(?:api[-_]?key|access[-_]?key|token|secret|password|authorization|cookie|credential)/i;
+const UNSAFE_CHILD_ENV_KEY_PATTERN = /^(?:NODE_OPTIONS|NODE_V8_COVERAGE|VITEST.*|JEST_WORKER_ID)$/i;
+
 export class CommandRunner {
   readonly repoPath: string;
   readonly defaultTimeoutMs: number;
@@ -119,7 +135,7 @@ export class CommandRunner {
     return cwdRealPath;
   }
 
-  async run(input: CommandInput): Promise<CommandResult> {
+  async run(input: CommandInput, observer: CommandRunObserver = {}): Promise<CommandResult> {
     const preparedCommand = prepareCommand(input);
 
     const cwd = await this.resolveCwd(input.cwd);
@@ -127,6 +143,13 @@ export class CommandRunner {
     const startedAt = Date.now();
 
     try {
+      let streamedOutputChars = 0;
+      const emitOutput = (stream: "stdout" | "stderr", message: string): void => {
+        if (!observer.onOutput || streamedOutputChars >= this.maxOutputChars) return;
+        const chunk = `${message}\n`.slice(0, this.maxOutputChars - streamedOutputChars);
+        streamedOutputChars += chunk.length;
+        observer.onOutput({ stream, chunk });
+      };
       const options: Options = {
         cwd,
         timeout: timeoutMs,
@@ -136,11 +159,25 @@ export class CommandRunner {
         stderr: "pipe",
         forceKillAfterDelay: 500,
         ...(process.platform === "win32" ? {} : { detached: true }),
-        ...(input.env ? { env: input.env } : {}),
+        env: sanitizeChildProcessEnv(input.env),
+        extendEnv: false,
       };
 
       let timedOut = false;
       const subprocess = execa(preparedCommand.file, preparedCommand.args, options);
+      let observedStdout = "";
+      let observedStderr = "";
+      const captureLimit = this.maxOutputChars + 1;
+      subprocess.stdout?.on("data", (chunk: Buffer | string) => {
+        const text = chunk.toString();
+        observedStdout = `${observedStdout}${text}`.slice(0, captureLimit);
+        emitOutput("stdout", text);
+      });
+      subprocess.stderr?.on("data", (chunk: Buffer | string) => {
+        const text = chunk.toString();
+        observedStderr = `${observedStderr}${text}`.slice(0, captureLimit);
+        emitOutput("stderr", text);
+      });
       const timeout = setTimeout(() => {
         timedOut = true;
         killSubprocessTree(subprocess.pid);
@@ -152,8 +189,8 @@ export class CommandRunner {
       });
 
       const output = truncateCommandOutput(
-        outputToString(result.stdout),
-        outputToString(result.stderr),
+        observedStdout || outputToString(result.stdout),
+        observedStderr || outputToString(result.stderr),
         this.maxOutputChars,
       );
 
@@ -198,11 +235,43 @@ export function isHighRiskCommandInput(input: CommandInput): boolean {
     return true;
   }
 
+  if (EXPLICIT_APPROVAL_EXECUTABLES.has(executableName)) {
+    if (["npm", "npm.cmd", "pnpm", "pnpm.cmd"].includes(executableName)) {
+      const subcommand = input.args?.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+      return subcommand === "publish" || subcommand === "install" || subcommand === "add"
+        || subcommand === "remove" || subcommand === "uninstall" || subcommand === "exec";
+    }
+    return true;
+  }
+
+  if (executableName === "git" || executableName === "git.exe") {
+    const subcommand = input.args?.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return subcommand === "push" || subcommand === "clean" || subcommand === "reset"
+      || subcommand === "checkout" || subcommand === "restore" || subcommand === "remote";
+  }
+
   if (!INLINE_CODE_EXECUTABLES.has(executableName)) {
     return false;
   }
 
   return (input.args ?? []).some((arg) => isInlineCodeFlag(executableName, arg));
+}
+
+export function sanitizeChildProcessEnv(overrides: Record<string, string> | undefined): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      value !== undefined
+      && !SENSITIVE_ENV_KEY_PATTERN.test(key)
+      && !UNSAFE_CHILD_ENV_KEY_PATTERN.test(key)
+    ) {
+      environment[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    environment[key] = value;
+  }
+  return environment;
 }
 
 function executableBasename(executable: string): string {

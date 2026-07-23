@@ -58,6 +58,22 @@ describe("EventStore", () => {
     });
     await expect(eventStore.readEvents(sessionId)).rejects.toThrow(/:1/);
   });
+
+  it("recovers complete events before a trailing partial JSONL write", async () => {
+    await eventStore.appendEvent(sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "durable" },
+    });
+    await fs.appendFile(
+      path.join(repoPath, ".mini-agent", "events", `${sessionId}.jsonl`),
+      "{\"id\":\"partial",
+      "utf8",
+    );
+
+    const events = await eventStore.readEvents(sessionId);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload.content).toBe("durable");
+  });
 });
 
 describe("ToolRegistry session/event integration", () => {
@@ -78,6 +94,8 @@ describe("ToolRegistry session/event integration", () => {
 
     expect(events.map((event) => event.type)).toEqual(["TOOL_CALL_STARTED", "TOOL_CALL_FINISHED"]);
     expect(records.map((record) => record.type)).toEqual(["TOOL_CALL", "TOOL_RESULT"]);
+    expect(JSON.stringify(records.at(-1)?.payload)).toContain("omitted from audit log");
+    expect(JSON.stringify(records.at(-1)?.payload)).not.toContain("# Test Repo");
   });
 
   it("writes failed events for tool failures", async () => {

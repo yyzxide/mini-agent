@@ -38,6 +38,9 @@ describe("TaskRouter", () => {
     expect(routeTask("保存一下")).toMatchObject({
       intent: "AGENT_LOOP",
     });
+    expect(routeTask("修改 src/a.ts")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("修复 src/a.ts 中的 bug")).toMatchObject({ intent: "AGENT_LOOP" });
+    expect(routeTask("删除 src/a.ts")).toMatchObject({ intent: "AGENT_LOOP" });
   });
 
   it("routes documentation creation requests to the agent loop on the first turn", () => {
@@ -144,12 +147,81 @@ describe("TaskRouter", () => {
     });
   });
 
+  it("requires evidence for precise or exhaustive external facts even when they are not current", () => {
+    expect(routeTask("列出这套小说全部作品及首次出版年份")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("这座桥建于哪一年？")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("Which actors appeared in every season of this series?")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+  });
+
+  it("keeps broad general-knowledge introductions as direct answers", () => {
+    expect(routeTask("你知道《百年孤独》吗？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("解释一下光合作用的基本原理")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("kanye west有哪些知名的歌曲")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+  });
+
+  it("uses conversation evidence first for audits of an earlier assistant answer", () => {
+    expect(routeTask("这个游戏哪来的龙变身？以及你说的各种变身")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("你自己看看你的回答中，是不是有")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("请联网核实你刚才说的出版年份是否正确")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+  });
+
   it("routes questions about web capability to direct local answers", () => {
     expect(routeTask("你不能联网吗")).toMatchObject({
       intent: "DIRECT_ANSWER",
     });
+    expect(routeTask("你不能联网？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("那你为什么说自己不能联网？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
     expect(routeTask("你有联网能力吗？")).toMatchObject({
       intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("你可以干啥")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("你不能写文件吗？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("你为什么说自己不能修改文件？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("所以这个助手以后也没法碰外网了吗？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("所以你只能聊天，不能动代码？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("刚才那个权限限制是永久的吗？")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+  });
+
+  it("distinguishes requesting web execution from discussing web capability", () => {
+    expect(routeTask("请联网查一下 Node 24 的 release notes")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("Please search the web for Node 24 release notes")).toMatchObject({
+      intent: "WEB_ANSWER",
     });
   });
 
@@ -230,6 +302,9 @@ describe("TaskRouter", () => {
     });
     expect(routeTask("算了")).toMatchObject({
       intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("不要算了，继续修改文件")).toMatchObject({
+      intent: "AGENT_LOOP",
     });
   });
 });

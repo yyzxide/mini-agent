@@ -6,6 +6,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createProgram } from "../src/cli/index.js";
+import { TaskDiffStore } from "../src/diff/TaskDiffStore.js";
+import { EventStore } from "../src/session/EventStore.js";
 import { SessionStore } from "../src/session/SessionStore.js";
 
 const execFileAsync = promisify(execFile);
@@ -21,21 +23,196 @@ beforeEach(async () => {
 afterEach(async () => {
   process.chdir(originalCwd);
   process.exitCode = undefined;
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await fs.rm(tempRoot, { recursive: true, force: true });
 });
 
 describe("mini-agent CLI regression scenarios", () => {
+  it("retrieves an older disputed assistant claim and repairs a denial before output", async () => {
+    process.chdir(tempRoot);
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const eventStore = new EventStore({ repoPath: tempRoot });
+    const session = await sessionStore.createSession({ title: "conversation audit" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "第三章有什么特殊能力？" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "击败守门者以后会获得星核变身。" },
+    });
+    for (let index = 0; index < 18; index += 1) {
+      await sessionStore.appendRecord(session.sessionId, {
+        type: index % 2 === 0 ? "USER_MESSAGE" : "ASSISTANT_MESSAGE",
+        payload: { content: `无关历史消息 ${String(index)}` },
+      });
+    }
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "钥匙不是在下一章吗？" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "对，钥匙是在下一章获得的。" },
+    });
+
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      "我之前没有说过会获得星核变身，我只是说可以击败守门者。",
+      "我确实说过“会获得星核变身”。这条说法没有可靠证据，我撤回它。",
+    ];
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: responses.shift() ?? "" } }],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "这个作品哪来的星核变身？以及你说的各种变身",
+          "--session",
+          session.sessionId,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("prior-response audit");
+      expect(output).toContain("matched 1 prior assistant message(s)");
+      expect(output).toContain("我确实说过");
+      expect(output).toContain("撤回");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(requestBodies[0]?.messages.some((message) =>
+        message.role === "assistant" && message.content.includes("获得星核变身"),
+      )).toBe(true);
+      expect(requestBodies[1]?.messages.at(-1)?.content)
+        .toContain("Conversation consistency revision required");
+      expect((await eventStore.readEvents(session.sessionId)).map((event) => event.type))
+        .toContain("PRIOR_RESPONSE_CONSISTENCY_RETRY");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("creates a clickable task changes artifact for newly written documents", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    const responses = [
+      JSON.stringify({
+        type: "APPLY_PATCH",
+        description: "Create the requested notes document",
+        patch: [
+          "diff --git a/docs/notes.md b/docs/notes.md",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/docs/notes.md",
+          "@@ -0,0 +1,3 @@",
+          "+# Notes",
+          "+",
+          "+Created by Mini Agent.",
+          "",
+        ].join("\n"),
+      }),
+      JSON.stringify({ type: "TOOL_CALL", toolName: "git_diff", input: {} }),
+      JSON.stringify({ type: "FINAL", summary: "已创建 docs/notes.md。", success: true }),
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: responses.shift() ?? "" } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "创建 docs/notes.md 文档",
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      const sessionId = output.match(/\[session\]\s+([^\s]+)/)?.[1];
+      expect(sessionId).toBeDefined();
+      expect(output).toContain("[changes] 1 file · +3 -0");
+      expect(output).toContain("A docs/notes.md");
+      expect(output).toContain(`mini-agent diff --session ${sessionId}`);
+      expect(output).not.toContain("+Created by Mini Agent.");
+
+      const artifact = await new TaskDiffStore(tempRoot).latest(sessionId!);
+      expect(artifact?.files[0]).toEqual(expect.objectContaining({
+        path: "docs/notes.md",
+        changeType: "ADDED",
+      }));
+      expect(artifact?.unifiedDiff).toContain("+Created by Mini Agent.");
+
+      const diffOutput = await captureStdout(async () => {
+        await createProgram().parseAsync(["diff", "--session", sessionId!], { from: "user" });
+      });
+      expect(diffOutput).toContain("diff --git a/docs/notes.md b/docs/notes.md");
+      expect(diffOutput).toContain("+Created by Mini Agent.");
+
+      const events = await new EventStore({ repoPath: tempRoot }).readEvents(sessionId!);
+      expect(events.map((event) => event.type)).toContain("CHANGES_READY");
+      const records = await new SessionStore({ repoPath: tempRoot }).readRecords(sessionId!);
+      expect(records.map((record) => record.type)).toContain("TASK_DIFF");
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
   it("answers web capability questions locally without pretending there is no networking", async () => {
     process.chdir(tempRoot);
 
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
+    const outputs: string[] = [];
+    for (const task of ["你不能联网吗", "你不能联网？"]) {
+      outputs.push(await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          task,
+          "--model",
+          "test-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      }));
+    }
+    const output = outputs.join("\n");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output).toContain("[answer]");
+    expect(output).toContain("支持受控联网研究");
+    expect(output).toContain("web_search");
+    expect(output).toContain("fetch_url");
+    expect(output).not.toContain("没有联网能力");
+  });
+
+  it("reports overall capabilities locally instead of generalizing a direct-response contract", async () => {
+    process.chdir(tempRoot);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
     const output = await captureStdout(async () => {
       await createProgram().parseAsync([
         "run",
-        "你不能联网吗",
+        "你可以干啥",
         "--model",
         "test-model",
         "--base-url",
@@ -44,11 +221,48 @@ describe("mini-agent CLI regression scenarios", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(output).toContain("[answer]");
-    expect(output).toContain("我有受控联网能力");
     expect(output).toContain("web_search");
-    expect(output).toContain("fetch_url");
-    expect(output).not.toContain("没有联网能力");
+    expect(output).toContain("仓库文件修改");
+    expect(output).toContain("apply_patch");
+    expect(output).not.toContain("不能修改文件");
+    expect(output).not.toContain("不能上网搜索");
+  });
+
+  it("explains a previous false capability denial without entering web research", async () => {
+    process.chdir(tempRoot);
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const session = await sessionStore.createSession({ title: "capability correction" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "你可以干啥" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content: "我不能修改文件，也不能上网搜索。" },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "run",
+        "那你为什么说自己不能联网？",
+        "--session",
+        session.sessionId,
+        "--model",
+        "test-model",
+        "--base-url",
+        "https://llm.example/v1",
+      ], { from: "user" });
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output).toContain("上一轮回答错了");
+    expect(output).toContain("Capability Registry 才是权威事实源");
+    expect(output).toContain("不应该为了证明联网能力");
+    expect(output).toContain("搜索天气");
+    expect(output).not.toContain("[tool] web_search");
+    expect(output).not.toContain("FINAL_WITHOUT_WEB_SEARCH");
   });
 
   it("answers RAG capability questions from product facts instead of historical memory", async () => {
@@ -188,17 +402,28 @@ describe("mini-agent CLI regression scenarios", () => {
     expect(output).toContain(`npm --prefix ${tempRoot} run guess`);
   });
 
-  it("repairs web answers that contradict already executed web tools", async () => {
+  it("keeps web research inside AgentLoop and rejects an ungrounded final answer", async () => {
     process.chdir(tempRoot);
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "今天 A股 三大指数 收盘", maxResults: 6 } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/market-close" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://finance.example/close-report" } },
+      { type: "FINAL", summary: "抱歉，我没有联网能力。", success: true },
+      {
+        type: "FINAL",
+        summary: "本轮 CLI 已经联网检索。上证指数上涨0.30%，来源：https://example.com/market-close",
+        success: true,
+      },
+    ];
 
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         return new Response([
           "<html><body>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/market-close\">A股收盘：三大指数涨跌情况</a>",
@@ -226,44 +451,8 @@ describe("mini-agent CLI regression scenarios", () => {
         });
       }
 
-      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
-      const system = body.messages[0]?.content ?? "";
-      const user = body.messages[1]?.content ?? "";
-
-      if (system.includes("web question planner")) {
-        return new Response(JSON.stringify({
-          choices: [{
-            message: {
-              content: JSON.stringify({
-                standaloneQuestion: "今天中国股市收盘后大盘指数涨跌情况",
-                searchQueries: ["今天 A股 三大指数 收盘 涨跌 上证指数 深证成指 创业板指"],
-                answerScope: "回答今天 A 股主要指数收盘涨跌。",
-                sourceHints: ["major finance quote page"],
-                answerInstructions: ["区分指数和涨跌幅。"],
-                needsLiveData: true,
-                confidence: "high",
-              }),
-            },
-          }],
-        }), { status: 200 });
-      }
-
-      if (user.includes("Previous answer was invalid")) {
-        return new Response(JSON.stringify({
-          choices: [{
-            message: {
-              content: "根据已抓取的网页内容，本轮 CLI 已经联网检索并读取来源。来源显示：上证指数上涨0.30%，深证成指下跌0.10%，创业板指上涨0.20%。",
-            },
-          }],
-        }), { status: 200 });
-      }
-
       return new Response(JSON.stringify({
-        choices: [{
-          message: {
-            content: "抱歉，我没有联网能力，需要你手动开启联网搜索按钮才能查看实时行情。",
-          },
-        }],
+        choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
       }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -285,7 +474,6 @@ describe("mini-agent CLI regression scenarios", () => {
       expect(output).toContain("本轮 CLI 已经联网检索");
       expect(output).toContain("上证指数上涨0.30%");
       expect(output).not.toContain("没有联网能力");
-      expect(output).not.toContain("联网搜索按钮");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -475,8 +663,12 @@ describe("mini-agent CLI regression scenarios", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages[1]?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
-      expect(secondBody.messages[1]?.content).toContain("def two_sum(a: int, b: int) -> int:");
+      expect(secondBody.messages.at(-1)?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
+      expect(secondBody.messages.at(-1)?.content).toContain("def two_sum(a: int, b: int) -> int:");
+      expect(secondBody.messages).toContainEqual({
+        role: "assistant",
+        content: expect.stringContaining("def two_sum(a: int, b: int) -> int:"),
+      });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -620,6 +812,59 @@ describe("mini-agent CLI regression scenarios", () => {
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
+  });
+
+  it("answers artifact-location follow-ups from the latest FILE_CHANGE without calling the model", async () => {
+    process.chdir(tempRoot);
+    await execFileAsync("git", ["init"], { cwd: tempRoot });
+    await fs.writeFile(path.join(tempRoot, "demo_app.html"), "<!doctype html>\n", "utf8");
+
+    const sessionStore = new SessionStore({ repoPath: tempRoot });
+    const session = await sessionStore.createSession({ title: "Artifact location regression" });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "写一个贪吃蛇游戏的代码文件" },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "FILE_CHANGE",
+      payload: {
+        files: [{ path: "demo_app.html", changeType: "ADDED", additions: 1, deletions: 0 }],
+      },
+    });
+    await sessionStore.appendRecord(session.sessionId, {
+      type: "TASK_SUMMARY",
+      payload: {
+        summary: "已成功创建贪吃蛇游戏文件 demo_app.html。",
+        success: true,
+        mode: "AGENT_LOOP",
+      },
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const output = await captureStdout(async () => {
+      await createProgram().parseAsync([
+        "run",
+        "在哪里",
+        "--session",
+        session.sessionId,
+        "--model",
+        "test-model",
+        "--base-url",
+        "https://llm.example/v1",
+      ], { from: "user" });
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output).toContain("[follow-up] artifact location · source=FILE_CHANGE");
+    expect(output).toContain("demo_app.html · LLM skipped");
+    expect(output).toContain(`[answer]\n上一轮创建的文件在 \`${path.join(tempRoot, "demo_app.html")}\`。`);
+    expect(output).not.toContain("我就在你面前的终端里");
+    const events = await new EventStore({ repoPath: tempRoot }).readEvents(session.sessionId);
+    expect(events.map((event) => event.type)).toContain("FOLLOW_UP_RESOLVED");
+    const records = await sessionStore.readRecords(session.sessionId);
+    expect(records.some((record) => record.type === "LLM_USAGE" && record.payload.mode === "agent_single_shot"))
+      .toBe(false);
   });
 
   it("keeps short algorithm follow-ups in repository-editing mode after an agent-loop task", async () => {
@@ -804,19 +1049,24 @@ describe("mini-agent CLI regression scenarios", () => {
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     const requestBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
-    const fetchMock = vi.fn()
-      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
-        requestBodies.push(JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string; content?: string }> });
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: "这是一个 TypeScript CLI 项目。" } }],
-        }), { status: 200 });
-      })
-      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
-        requestBodies.push(JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string; content?: string }> });
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: "CLI 入口在 `src/cli/index.ts`，README.md 和 package.json 说明了项目定位。" } }],
-        }), { status: 200 });
-      });
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "list_files", input: { path: ".", maxDepth: 3 } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "README.md" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "package.json" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/cli/index.ts" } },
+      { type: "TOOL_CALL", toolName: "git_status", input: {} },
+      {
+        type: "FINAL",
+        summary: "CLI 入口在 `src/cli/index.ts`，README.md 和 package.json 说明了项目定位。",
+        success: true,
+      },
+    ];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string; content?: string }> });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
+      }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -836,11 +1086,15 @@ describe("mini-agent CLI regression scenarios", () => {
       expect(output).toContain("[tool] git_status");
       expect(output).toContain("[summary]");
 
-      const firstPrompt = requestBodies[0]?.messages?.find((message) => message.role === "user")?.content ?? "";
-      expect(firstPrompt).toContain("Repository analysis instructions:");
-      expect(firstPrompt).toContain("File: README.md");
-      expect(firstPrompt).toContain("File: package.json");
-      expect(firstPrompt).toContain("File: src/cli/index.ts");
+      const prompts = requestBodies.flatMap((body) => body.messages ?? [])
+        .filter((message) => message.role === "user")
+        .map((message) => message.content ?? "")
+        .join("\n");
+      expect(prompts).toContain("Task kind: REPOSITORY_INVESTIGATION");
+      expect(prompts).toContain("Output kind: REPOSITORY_ANALYSIS");
+      expect(prompts).toContain("README.md");
+      expect(prompts).toContain("package.json");
+      expect(prompts).toContain("src/cli/index.ts");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

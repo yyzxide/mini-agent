@@ -70,6 +70,40 @@ describe("SessionStore", () => {
     expect(meta.messageCount).toBe(1);
   });
 
+  it("serializes concurrent index updates across store instances", async () => {
+    const creator = new SessionStore({ repoPath });
+    const session = await creator.createSession({ title: "Concurrent" });
+    const stores = Array.from({ length: 4 }, () => new SessionStore({ repoPath }));
+
+    await Promise.all(Array.from({ length: 20 }, async (_, index) => {
+      await stores[index % stores.length]!.appendRecord(session.sessionId, {
+        type: "USER_MESSAGE",
+        payload: { content: `message-${String(index)}` },
+      });
+    }));
+
+    await expect(creator.readRecords(session.sessionId)).resolves.toHaveLength(20);
+    await expect(creator.getSessionMeta(session.sessionId)).resolves.toMatchObject({ messageCount: 20 });
+  });
+
+  it("stores private runtime state with owner-only permissions", async () => {
+    const store = new SessionStore({ repoPath });
+    const session = await store.createSession({ title: "Private" });
+    await store.appendRecord(session.sessionId, {
+      type: "USER_MESSAGE",
+      payload: { content: "secret-adjacent state" },
+    });
+
+    if (process.platform !== "win32") {
+      const rootMode = (await fs.stat(path.join(repoPath, ".mini-agent"))).mode & 0o777;
+      const indexMode = (await fs.stat(path.join(repoPath, ".mini-agent", "index.json"))).mode & 0o777;
+      const recordMode = (await fs.stat(path.join(repoPath, ".mini-agent", "sessions", `${session.sessionId}.jsonl`))).mode & 0o777;
+      expect(rootMode).toBe(0o700);
+      expect(indexMode).toBe(0o600);
+      expect(recordMode).toBe(0o600);
+    }
+  });
+
   it("updates session status", async () => {
     const store = new SessionStore({ repoPath });
     const session = await store.createSession({ title: "Status" });

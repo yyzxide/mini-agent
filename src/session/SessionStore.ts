@@ -6,12 +6,14 @@ import { MiniAgentError } from "../utils/errors.js";
 import {
   appendJsonLine,
   ensureDir,
+  hardenPrivateTree,
   normalizeRepoPath,
   pathExists,
   readJsonFile,
   readJsonLines,
   resolveMiniAgentPath,
   writeJsonFileAtomic,
+  withFileLock,
 } from "../utils/fs.js";
 import type {
   CreateSessionInput,
@@ -33,28 +35,47 @@ export interface SessionStoreOptions {
 
 export class SessionStore {
   readonly repoPath: string;
+  private initialized = false;
+  private initialization: Promise<void> | undefined;
 
   constructor(options: SessionStoreOptions) {
     this.repoPath = normalizeRepoPath(options.repoPath);
   }
 
   async init(): Promise<void> {
-    await ensureDir(this.rootPath());
-    await ensureDir(this.sessionsDir());
-    await ensureDir(this.eventsDir());
-
-    if (!(await pathExists(this.configPath()))) {
-      const config: MiniAgentConfig = {
-        version: 1,
-        repoPath: this.repoPath,
-        createdAt: new Date().toISOString(),
-      };
-      await writeJsonFileAtomic(this.configPath(), config);
+    if (this.initialized) return;
+    if (!this.initialization) {
+      this.initialization = this.initialize();
     }
-
-    if (!(await pathExists(this.indexPath()))) {
-      await this.writeIndex({ version: 1, sessions: [] });
+    try {
+      await this.initialization;
+    } catch (error) {
+      this.initialization = undefined;
+      throw error;
     }
+  }
+
+  private async initialize(): Promise<void> {
+    await ensureDir(this.rootPath(), 0o700);
+    await ensureDir(this.sessionsDir(), 0o700);
+    await ensureDir(this.eventsDir(), 0o700);
+
+    await withFileLock(this.indexLockPath(), async () => {
+      if (!(await pathExists(this.configPath()))) {
+        const config: MiniAgentConfig = {
+          version: 1,
+          repoPath: this.repoPath,
+          createdAt: new Date().toISOString(),
+        };
+        await writeJsonFileAtomic(this.configPath(), config);
+      }
+
+      if (!(await pathExists(this.indexPath()))) {
+        await this.writeIndex({ version: 1, sessions: [] });
+      }
+    });
+    await hardenPrivateTree(this.rootPath());
+    this.initialized = true;
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<SessionMeta> {
@@ -78,10 +99,12 @@ export class SessionStore {
     await this.touchFile(this.sessionFilePath(sessionId));
     await this.touchFile(this.eventFilePath(sessionId));
 
-    const index = await this.readIndex();
-    await this.writeIndex({
-      ...index,
-      sessions: [meta, ...index.sessions.filter((session) => session.sessionId !== sessionId)],
+    await withFileLock(this.indexLockPath(), async () => {
+      const index = await this.readIndex();
+      await this.writeIndex({
+        ...index,
+        sessions: [meta, ...index.sessions.filter((session) => session.sessionId !== sessionId)],
+      });
     });
 
     return meta;
@@ -202,6 +225,10 @@ export class SessionStore {
     return resolveMiniAgentPath(this.repoPath, "index.json");
   }
 
+  private indexLockPath(): string {
+    return resolveMiniAgentPath(this.repoPath, "index.lock");
+  }
+
   private sessionFilePath(sessionId: string): string {
     this.assertValidSessionId(sessionId);
     return resolveMiniAgentPath(this.repoPath, "sessions", `${sessionId}.jsonl`);
@@ -213,7 +240,7 @@ export class SessionStore {
   }
 
   private async touchFile(filePath: string): Promise<void> {
-    const handle = await fs.open(filePath, "a");
+    const handle = await fs.open(filePath, "a", 0o600);
     await handle.close();
   }
 
@@ -234,24 +261,20 @@ export class SessionStore {
     sessionId: string,
     updater: (meta: SessionMeta) => SessionMeta,
   ): Promise<SessionMeta> {
-    const index = await this.readIndex();
-    let updatedMeta: SessionMeta | undefined;
-
-    const sessions = index.sessions.map((session) => {
-      if (session.sessionId !== sessionId) {
-        return session;
+    return await withFileLock(this.indexLockPath(), async () => {
+      const index = await this.readIndex();
+      let updatedMeta: SessionMeta | undefined;
+      const sessions = index.sessions.map((session) => {
+        if (session.sessionId !== sessionId) return session;
+        updatedMeta = updater(session);
+        return updatedMeta;
+      });
+      if (!updatedMeta) {
+        throw new MiniAgentError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`, { sessionId });
       }
-
-      updatedMeta = updater(session);
+      await this.writeIndex({ ...index, sessions });
       return updatedMeta;
     });
-
-    if (!updatedMeta) {
-      throw new MiniAgentError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`, { sessionId });
-    }
-
-    await this.writeIndex({ ...index, sessions });
-    return updatedMeta;
   }
 
   private async readBaseCommit(): Promise<string | null> {

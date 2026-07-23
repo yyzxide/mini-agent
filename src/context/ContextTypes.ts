@@ -50,6 +50,33 @@ export interface ContextTrace {
   totalChars: number;
   totalEstimatedTokens: number;
   sections: ContextSectionTrace[];
+  sessionMemory?: {
+    totalRecords: number;
+    selectedRecords: number;
+    estimatedInputTokens: number;
+    estimatedOutputTokens: number;
+    compacted: boolean;
+    excludedCurrentRunRecords?: number;
+    strategy?: "passthrough" | "structured-salience-v2";
+    candidateRecords?: number;
+    droppedRecords?: number;
+    clippedRecords?: number;
+    pinnedRecords?: number;
+    selections?: Array<{
+      sourceId: string;
+      bucket: "PINNED" | "CONVERSATION" | "EVIDENCE";
+      reason: string;
+      clipped: boolean;
+      estimatedTokens: number;
+    }>;
+  };
+  embeddingCache?: {
+    memoryHits: number;
+    diskHits: number;
+    misses: number;
+    writes: number;
+    coalescedRequests: number;
+  };
 }
 
 export interface ContextPlan {

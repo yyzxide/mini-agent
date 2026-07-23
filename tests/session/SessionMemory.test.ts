@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSessionMemory } from "../../src/session/SessionMemory.js";
+import { buildSessionMemory, buildSessionMemoryWithTrace } from "../../src/session/SessionMemory.js";
 import type { JsonObject, SessionRecord, SessionRecordType } from "../../src/session/SessionTypes.js";
 
 describe("SessionMemory", () => {
@@ -84,9 +84,115 @@ describe("SessionMemory", () => {
 
     const memory = buildSessionMemory(records, { maxRecords: 10, maxChars: 600 });
 
-    expect(memory).toContain("[structured session compaction]");
+    expect(memory).toContain("[structured session compaction v2]");
     expect(memory).toContain("最新决定：保持公开 API 不变");
     expect(memory).toContain("收到，将保留公开 API");
+    expect(memory).toContain("source:latest-");
+  });
+
+  it("reports measured compaction telemetry", () => {
+    const records: SessionRecord[] = [
+      record("old", "USER_MESSAGE", { content: `历史内容 ${"x".repeat(2_000)}` }),
+      record("latest", "ASSISTANT_MESSAGE", { content: "保留最近结论" }),
+    ];
+
+    const result = buildSessionMemoryWithTrace(records, { maxChars: 300 });
+
+    expect(result.trace).toMatchObject({
+      totalRecords: 2,
+      selectedRecords: 2,
+      compacted: true,
+      strategy: "structured-salience-v2",
+      candidateRecords: 2,
+      droppedRecords: 0,
+    });
+    expect(result.trace.inputChars).toBeGreaterThan(result.trace.outputChars);
+    expect(result.trace.estimatedInputTokens).toBeGreaterThan(result.trace.estimatedOutputTokens);
+    expect(result.memory).toContain("[structured session compaction v2]");
+    expect(result.trace.selections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: "latest", bucket: "CONVERSATION" }),
+    ]));
+  });
+
+  it("clips oversized tool payloads and preserves auditable source reasons", () => {
+    const records: SessionRecord[] = [
+      record("constraint", "USER_MESSAGE", { content: "必须保持公开 API 不变" }),
+      record("tool-large", "TOOL_RESULT", {
+        toolName: "read_file",
+        result: { content: "x".repeat(8_000) },
+      }),
+      record("summary", "TASK_SUMMARY", { summary: "目标文件已经定位" }),
+      record("latest", "USER_MESSAGE", { content: "继续处理" }),
+    ];
+
+    const result = buildSessionMemoryWithTrace(records, { maxChars: 700, maxTokens: 175 });
+
+    expect(result.memory).toContain("必须保持公开 API 不变");
+    expect(result.memory).toContain("目标文件已经定位");
+    expect(result.memory).toContain("source:constrai");
+    expect(result.trace).toMatchObject({
+      strategy: "structured-salience-v2",
+      pinnedRecords: 2,
+    });
+    expect(result.trace.clippedRecords).toBeGreaterThan(0);
+    expect(result.trace.selections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: "constrai",
+        bucket: "PINNED",
+        reason: "explicit user constraint",
+      }),
+    ]));
+  });
+
+  it("compacts when the token budget is exceeded even if the character budget fits", () => {
+    const records: SessionRecord[] = [
+      record("background", "ASSISTANT_MESSAGE", { content: "历史背景".repeat(120) }),
+      record("constraint", "USER_MESSAGE", { content: "必须继续保留当前公开接口" }),
+    ];
+
+    const result = buildSessionMemoryWithTrace(records, { maxChars: 2_000, maxTokens: 120 });
+
+    expect(result.trace.inputChars).toBeLessThan(2_000);
+    expect(result.trace.compacted).toBe(true);
+    expect(result.trace.estimatedOutputTokens).toBeLessThanOrEqual(120);
+    expect(result.memory).toContain("必须继续保留当前公开接口");
+  });
+
+  it("treats user preferences as pinned constraints during compaction", () => {
+    const records: SessionRecord[] = [
+      record("preference", "USER_MESSAGE", { content: "我更倾向于保留从 A 到 B 的演进记录" }),
+      record("noise", "ASSISTANT_MESSAGE", { content: "x".repeat(2_000) }),
+    ];
+
+    const result = buildSessionMemoryWithTrace(records, { maxChars: 360, maxTokens: 90 });
+
+    expect(result.memory).toContain("我更倾向于保留从 A 到 B 的演进记录");
+    expect(result.trace.selections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: "preferen",
+        bucket: "PINNED",
+        reason: "explicit user constraint",
+      }),
+    ]));
+  });
+
+  it("excludes records produced by the active run because AgentState already carries them", () => {
+    const records: SessionRecord[] = [
+      record("prior-user", "USER_MESSAGE", { content: "上一轮问题" }),
+      record("prior-answer", "ASSISTANT_MESSAGE", { content: "上一轮回答" }),
+      record("current-user", "USER_MESSAGE", { content: "当前问题", runId: "run-current" }),
+      record("current-error", "ERROR", { message: "当前 guardrail 错误" }),
+      record("current-tool", "TOOL_RESULT", { toolName: "web_search", result: { success: true } }),
+    ];
+
+    const result = buildSessionMemoryWithTrace(records, { excludeRunId: "run-current" });
+
+    expect(result.memory).toContain("上一轮问题");
+    expect(result.memory).toContain("上一轮回答");
+    expect(result.memory).not.toContain("当前问题");
+    expect(result.memory).not.toContain("当前 guardrail 错误");
+    expect(result.memory).not.toContain("web_search");
+    expect(result.trace).toMatchObject({ totalRecords: 2, excludedCurrentRunRecords: 3 });
   });
 });
 

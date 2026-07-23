@@ -8,14 +8,15 @@ import { Command } from "commander";
 import { execa } from "execa";
 import {
   looksLikeCodeContinuationFollowUp,
-  looksLikeRepositoryAnalysisTask,
   routeTask,
   shouldPreserveAgentLoopIntent,
 } from "../agent/TaskRouter.js";
+import type { TaskRoute } from "../agent/TaskRouter.js";
+import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
 import { findLatestAgentCheckpoint, recoverLatestAgentCheckpoint } from "../agent/AgentCheckpoint.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
-import { isTestCommand } from "../command/CommandClassification.js";
+import { classifyVerificationCommandInput } from "../command/CommandClassification.js";
 import {
   initAgentConfig,
   loadAgentConfig,
@@ -24,6 +25,8 @@ import {
 } from "../config/AgentConfig.js";
 import { MessageCompressor } from "../context/MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
+import { TaskDiffStore } from "../diff/TaskDiffStore.js";
+import { promptTaskDiffAction, renderChangesCard, showTaskDiffViewer } from "../diff/TerminalDiffViewer.js";
 import { GitManager } from "../git/GitManager.js";
 import { formatLongTermMemoryResults, LongTermMemoryStore } from "../memory/LongTermMemoryStore.js";
 import { PatchManager } from "../patch/PatchManager.js";
@@ -48,15 +51,11 @@ import { resolveRepoPath } from "../utils/fs.js";
 import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger, readRuntimeLogs } from "../utils/logger.js";
 import type { LogLevel, LogRecord } from "../utils/logger.js";
-import { isShortFollowUpQuestion } from "../web/WebQuestionPlanner.js";
+import { isShortFollowUpQuestion } from "../agent/FollowUpQuestionResolver.js";
 import { SkillStore } from "../skills/SkillStore.js";
 import { createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
 import { runAgentLoopTask } from "./AgentLoopTask.js";
-import { runCodeReviewTask } from "./CodeReviewTask.js";
-import { runDirectAnswerTask } from "./DirectAnswerTask.js";
-import { runRepositoryAnalysisTask } from "./RepositoryAnalysisTask.js";
-import { runWebAnswerTask } from "./WebAnswerTask.js";
 import { registerMcpCommands } from "./McpCommands.js";
 import { registerRagCommands } from "./RagCommands.js";
 import { registerToolCommands } from "./ToolCommands.js";
@@ -86,7 +85,7 @@ const INTERACTIVE_SLASH_COMMANDS = [
   { command: "/skills", usage: "/skills [name]", description: "List skills or show one skill." },
   { command: "/status", usage: "/status", description: "Show current agent/session status." },
   { command: "/repo", usage: "/repo", description: "Show repository state summary." },
-  { command: "/diff", usage: "/diff", description: "Show git diff." },
+  { command: "/diff", usage: "/diff", description: "Open the latest task changes." },
   { command: "/clear", usage: "/clear", description: "Clear the terminal." },
   { command: "/exit", usage: "/exit", description: "Finish this session and exit." },
 ] as const;
@@ -145,6 +144,7 @@ interface SessionAgentStatusOutput {
     completionTokens: number | null;
     totalTokens: number | null;
     cachedPromptTokens: number | null;
+    cacheWriteTokens: number | null;
     reasoningTokens: number | null;
     remainingContextTokens: null;
     usageAvailable: boolean;
@@ -181,7 +181,9 @@ export function createProgram(): Command {
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
-    .option("--agent-loop", "Force the repository-editing agent loop even for direct-answer tasks")
+    .option("--verbose", "Show tool inputs, context compaction, cache, and token details")
+    .option("--trace", "Show complete redacted runtime decisions and context allocation traces")
+    .option("--agent-loop", "Use the iterative decision protocol for direct-answer tasks")
     .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
@@ -205,6 +207,8 @@ export function createProgram(): Command {
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines")
+    .option("--verbose", "Show detailed planning telemetry")
+    .option("--trace", "Show complete redacted planning traces")
     .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
@@ -226,6 +230,8 @@ export function createProgram(): Command {
     .option("--model <model>", "Override MINI_AGENT_MODEL for OpenAI-compatible clients")
     .option("--base-url <url>", "Override MINI_AGENT_BASE_URL for OpenAI-compatible clients")
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
+    .option("--verbose", "Show detailed review telemetry")
+    .option("--trace", "Show complete redacted review traces")
     .action(async (filePath: string, options: AgentCliOptions) => {
       const trimmedPath = filePath.trim();
       if (trimmedPath.length === 0) {
@@ -373,8 +379,22 @@ export function createProgram(): Command {
 
   program
     .command("diff")
-    .description("Print git diff for the current repository")
-    .action(async () => {
+    .description("Open a task diff, or print the current repository diff")
+    .option("--session <sessionId>", "Open the latest task diff from a session")
+    .option("--artifact <artifactId>", "Open a specific task diff artifact; requires --session")
+    .action(async (options: { session?: string; artifact?: string }) => {
+      if (options.session) {
+        const store = new TaskDiffStore(process.cwd());
+        const artifact = options.artifact
+          ? await store.read(options.session, options.artifact)
+          : await store.latest(options.session);
+        if (!artifact) {
+          process.stdout.write("[diff] No task changes found for that session.\n");
+          return;
+        }
+        await showTaskDiffViewer(artifact);
+        return;
+      }
       const diff = await readGitDiff(process.cwd());
       process.stdout.write(diff.length > 0 ? diff : "[diff] No changes.\n");
     });
@@ -724,6 +744,7 @@ export function createProgram(): Command {
           cwd,
           timeoutMs,
         });
+        result.verification = classifyVerificationCommandInput({ command, shell: true });
 
         await logger[result.success ? "info" : "error"]("command", "Command finished", {
           command: result.command,
@@ -750,7 +771,7 @@ export function createProgram(): Command {
             },
           });
 
-          if (isTestCommand(result.command)) {
+          if (result.verification.level === "TEST") {
             await stores.eventStore.appendEvent(options.session, {
               type: result.success ? "TEST_PASSED" : "TEST_FAILED",
               payload: {
@@ -866,11 +887,7 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
   process.stdout.write(`Current session: ${currentSessionId}\n`);
   process.stdout.write("Type your coding task, or use /help, /review, /pause, /exit, /new, /resume, /status, /repo, /sessions.\n\n");
 
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    completer: completeInteractiveInput,
-  });
+  let rl = createInteractiveReadline();
 
   try {
     while (true) {
@@ -891,22 +908,47 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
         });
 
         currentSessionId = slashResult.sessionId;
+        if (slashResult.diffArtifactId) {
+          const artifact = await new TaskDiffStore(repoPath).read(currentSessionId, slashResult.diffArtifactId);
+          if (artifact) {
+            rl.close();
+            await showTaskDiffViewer(artifact);
+            rl = createInteractiveReadline();
+          }
+        }
         if (slashResult.exit) {
           return;
         }
         continue;
       }
 
-      await runAgentTask(repoPath, answer, {
+      const result = await runAgentTask(repoPath, answer, {
         session: currentSessionId,
         nonInteractive: false,
         keepSessionActive: true,
         ...(meta.operatingMode === "PLAN" ? { agentLoop: true, operatingMode: "PLAN" as const } : {}),
       }, async (message) => await rl.question(message));
+      const diffArtifactId = result.metadata ? readPayloadString(result.metadata, "diffArtifactId") : undefined;
+      if (diffArtifactId && result.sessionId && process.stdin.isTTY && process.stdout.isTTY) {
+        const artifact = await new TaskDiffStore(repoPath).read(result.sessionId, diffArtifactId);
+        if (artifact) {
+          rl.close();
+          await promptTaskDiffAction(artifact);
+          rl = createInteractiveReadline();
+        }
+      }
     }
   } finally {
     rl.close();
   }
+}
+
+function createInteractiveReadline(): ReturnType<typeof createInterface> {
+  return createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    completer: completeInteractiveInput,
+  });
 }
 
 async function handleInteractiveSlashCommand(input: {
@@ -915,7 +957,7 @@ async function handleInteractiveSlashCommand(input: {
   stores: { sessionStore: SessionStore; eventStore: EventStore };
   currentSessionId: string;
   prompt?: (message: string) => Promise<string>;
-}): Promise<{ sessionId: string; exit: boolean }> {
+}): Promise<{ sessionId: string; exit: boolean; diffArtifactId?: string }> {
   const [name = "", ...args] = input.command.trim().split(/\s+/);
   const logger = createRuntimeLogger(input.repoPath);
 
@@ -1081,8 +1123,12 @@ async function handleInteractiveSlashCommand(input: {
     }
 
     case "/diff": {
+      const artifact = await new TaskDiffStore(input.repoPath).latest(input.currentSessionId);
+      if (artifact) {
+        return { sessionId: input.currentSessionId, exit: false, diffArtifactId: artifact.artifactId };
+      }
       const diff = await readGitDiff(input.repoPath);
-      process.stdout.write(diff.length > 0 ? diff : "[diff] No changes.\n");
+      process.stdout.write(diff.length > 0 ? diff : "[diff] No task changes.\n");
       return { sessionId: input.currentSessionId, exit: false };
     }
 
@@ -1455,6 +1501,7 @@ async function buildSessionAgentStatus(
       completionTokens: usageSummary.completionTokens,
       totalTokens: usageSummary.totalTokens,
       cachedPromptTokens: usageSummary.cachedPromptTokens,
+      cacheWriteTokens: usageSummary.cacheWriteTokens,
       reasoningTokens: usageSummary.reasoningTokens,
       remainingContextTokens: null,
       usageAvailable: usageSummary.usageAvailable,
@@ -1481,6 +1528,7 @@ function summarizeLlmUsageRecords(
     completionTokens: number | null;
     totalTokens: number | null;
     cachedPromptTokens: number | null;
+    cacheWriteTokens: number | null;
     reasoningTokens: number | null;
     usageAvailable: boolean;
   } {
@@ -1488,11 +1536,13 @@ function summarizeLlmUsageRecords(
   let completionTokens = 0;
   let totalTokens = 0;
   let cachedPromptTokens = 0;
+  let cacheWriteTokens = 0;
   let reasoningTokens = 0;
   let hasPromptTokens = false;
   let hasCompletionTokens = false;
   let hasTotalTokens = false;
   let hasCachedPromptTokens = false;
+  let hasCacheWriteTokens = false;
   let hasReasoningTokens = false;
   let usageAvailable = false;
   let calls = 0;
@@ -1527,6 +1577,12 @@ function summarizeLlmUsageRecords(
       hasCachedPromptTokens = true;
     }
 
+    const cacheWrite = readPayloadNumber(record.payload, "cacheWriteTokens");
+    if (cacheWrite !== undefined) {
+      cacheWriteTokens += cacheWrite;
+      hasCacheWriteTokens = true;
+    }
+
     const reasoning = readPayloadNumber(record.payload, "reasoningTokens");
     if (reasoning !== undefined) {
       reasoningTokens += reasoning;
@@ -1540,6 +1596,7 @@ function summarizeLlmUsageRecords(
     completionTokens: hasCompletionTokens ? completionTokens : null,
     totalTokens: hasTotalTokens ? totalTokens : null,
     cachedPromptTokens: hasCachedPromptTokens ? cachedPromptTokens : null,
+    cacheWriteTokens: hasCacheWriteTokens ? cacheWriteTokens : null,
     reasoningTokens: hasReasoningTokens ? reasoningTokens : null,
     usageAvailable,
   };
@@ -1554,6 +1611,7 @@ function formatSessionAgentStatus(status: SessionAgentStatusOutput): string {
   ].join(", ");
   const advancedUsageLine = [
     `cached_prompt=${status.llm.cachedPromptTokens ?? "unavailable"}`,
+    `cache_write=${status.llm.cacheWriteTokens ?? "unavailable"}`,
     `reasoning=${status.llm.reasoningTokens ?? "unavailable"}`,
   ].join(", ");
 
@@ -1695,12 +1753,16 @@ async function runAgentTask(
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
   const route = await resolveTaskRoute(repoPath, userGoal, options.session);
-  const forceAgentLoop = options.agentLoop === true || (options.agents ?? 1) > 1;
   const multiAgentConfigured = route.intent === "AGENT_LOOP"
     && await loadAgentConfig(repoPath).then((config) => config.multiAgent?.mode === "auto").catch(() => false);
-  const mode: TaskChangeMode = options.operatingMode === "PLAN"
-    ? "PLAN"
-    : forceAgentLoop ? "AGENT_LOOP" : route.intent;
+  const taskContract = buildAgentTaskContract({
+    userGoal,
+    route,
+    ...(options.operatingMode ? { operatingMode: options.operatingMode } : {}),
+    forceIterative: options.operatingMode !== "PLAN" && options.agentLoop === true,
+    multiAgentEnabled: (options.agents ?? 1) > 1 || multiAgentConfigured,
+  });
+  const mode: TaskChangeMode = taskContract.resultMode;
   const logger = createRuntimeLogger(repoPath);
   const beforeSnapshot = await readGitSnapshot(repoPath);
   let taskResult: CliTaskResult;
@@ -1714,20 +1776,7 @@ async function runAgentTask(
   }).catch(() => undefined);
 
   try {
-    if (options.operatingMode === "PLAN") {
-      taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt);
-    } else if (route.intent === "DIRECT_ANSWER" && !forceAgentLoop) {
-      taskResult = await runDirectAnswerTask(repoPath, userGoal, options);
-    } else if (route.intent === "WEB_ANSWER" && !forceAgentLoop) {
-      taskResult = await runWebAnswerTask(repoPath, userGoal, options);
-    } else if (route.intent === "CODE_REVIEW" && !forceAgentLoop) {
-      taskResult = await runCodeReviewTask(repoPath, userGoal, options);
-    } else if (route.intent === "AGENT_LOOP" && looksLikeRepositoryAnalysisTask(userGoal)
-      && !forceAgentLoop && !multiAgentConfigured) {
-      taskResult = await runRepositoryAnalysisTask(repoPath, userGoal, options);
-    } else {
-      taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt);
-    }
+    taskResult = await runAgentLoopTask(repoPath, userGoal, options, prompt, taskContract);
   } catch (error) {
     await logger.error("cli", "Task crashed", {
       task: userGoal,
@@ -1740,6 +1789,21 @@ async function runAgentTask(
   }
 
   if (taskResult.sessionId) {
+    const taskSessionId = taskResult.sessionId;
+    const diffArtifactId = typeof taskResult.metadata?.diffArtifactId === "string"
+      ? taskResult.metadata.diffArtifactId
+      : undefined;
+    const artifact = diffArtifactId
+      ? await new TaskDiffStore(repoPath).read(taskSessionId, diffArtifactId).catch(() => undefined)
+      : undefined;
+    if (artifact) {
+      process.stdout.write(`${renderChangesCard(
+        artifact,
+        process.stdout.isTTY === true,
+        options.keepSessionActive === true && process.stdin.isTTY === true && process.stdout.isTTY === true,
+      )}\n`);
+    }
+
     await appendTaskChangeLog(repoPath, {
       userGoal,
       result: taskResult,
@@ -1752,7 +1816,7 @@ async function runAgentTask(
       }).catch(() => undefined);
     });
 
-    await indexLongTermMemoryForSession(repoPath, taskResult.sessionId, logger).catch(async (error: unknown) => {
+    await indexLongTermMemoryForSession(repoPath, taskSessionId, logger).catch(async (error: unknown) => {
       await logger.warn("memory", "Failed to index long-term memory", {
         sessionId: taskResult.sessionId,
         task: userGoal,
@@ -1790,7 +1854,7 @@ async function resolveTaskRoute(
   repoPath: string,
   userGoal: string,
   sessionId: string | undefined,
-): Promise<{ intent: TaskChangeMode; reason: string }> {
+): Promise<TaskRoute> {
   const baseRoute = routeTask(userGoal);
   const activatedSkill = await new SkillStore({ repoPath }).matchExactActivation(userGoal).catch(() => undefined);
   if (activatedSkill) {
@@ -1901,17 +1965,28 @@ async function appendTaskChangeLog(
     return undefined;
   }
 
-  const afterSnapshot = await readGitSnapshot(repoPath);
   const tests = await readTaskTests(repoPath, input.result.sessionId);
+  const artifactId = typeof input.result.metadata?.diffArtifactId === "string"
+    ? input.result.metadata.diffArtifactId
+    : undefined;
+  const taskArtifact = artifactId
+    ? await new TaskDiffStore(repoPath).read(input.result.sessionId, artifactId).catch(() => undefined)
+    : undefined;
+  const changedFiles = taskArtifact
+    ? taskArtifact.files.map((file) => file.path)
+    : [];
+  const diffStat = taskArtifact
+    ? `${String(taskArtifact.fileCount)} files changed, ${String(taskArtifact.additions)} insertions(+), ${String(taskArtifact.deletions)} deletions(-)`
+    : "";
   return await new TaskChangeLogStore({ repoPath }).append({
     sessionId: input.result.sessionId,
     task: input.userGoal,
     mode: input.result.mode,
     success: input.result.success,
     summary: limitText(input.result.summary, 2_000),
-    beforeChangedFiles: input.beforeSnapshot.changedFiles,
-    currentChangedFiles: afterSnapshot.changedFiles,
-    diffStat: afterSnapshot.diffStat,
+    beforeChangedFiles: [],
+    currentChangedFiles: changedFiles,
+    diffStat,
     tests,
     ...(input.result.error ? { error: input.result.error } : {}),
     metadata: {

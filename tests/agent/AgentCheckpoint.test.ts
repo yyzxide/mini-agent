@@ -56,6 +56,82 @@ describe("AgentCheckpoint", () => {
     expect(recoverLatestAgentCheckpoint([checkpointRecord("3", { status: "FINISHED" })])).toBeUndefined();
   });
 
+  it("persists compact file coverage without copying source chunks", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      runId: "read-run",
+      repoPath: "/repo",
+      userGoal: "完整读取 src/large.ts",
+    });
+    state.addToolResult({
+      toolName: "read_file",
+      input: { path: "src/large.ts", startLine: 1 },
+      result: {
+        success: true,
+        data: {
+          path: "src/large.ts",
+          startLine: 1,
+          endLine: 300,
+          totalLines: 800,
+          content: "private source body must not enter checkpoint",
+          hasMore: true,
+          nextStartLine: 301,
+          sourceVersion: "1000:2000",
+        },
+      },
+    });
+
+    const checkpoint = createAgentCheckpoint({ state });
+    expect(checkpoint.effects.fileReadCoverage).toEqual([expect.objectContaining({
+      path: "src/large.ts",
+      ranges: [{ startLine: 1, endLine: 300 }],
+      complete: false,
+      nextStartLine: 301,
+    })]);
+    expect(JSON.stringify(checkpoint)).not.toContain("private source body");
+    expect(parseAgentCheckpoint(checkpointToPayload(checkpoint))).toEqual(checkpoint);
+  });
+
+  it("invalidates recovered coverage when a durable file change follows the checkpoint", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      runId: "read-run",
+      repoPath: "/repo",
+      userGoal: "完整读取并修改 src/large.ts",
+    });
+    state.addToolResult({
+      toolName: "read_file",
+      input: { path: "src/large.ts" },
+      result: {
+        success: true,
+        data: {
+          path: "src/large.ts",
+          startLine: 1,
+          endLine: 800,
+          totalLines: 800,
+          content: "source",
+          sourceVersion: "old",
+        },
+      },
+    });
+    const active: SessionRecord = {
+      id: "1",
+      sessionId: "session",
+      timestamp: "2026-07-16T00:00:00.000Z",
+      type: "AGENT_CHECKPOINT",
+      payload: checkpointToPayload(createAgentCheckpoint({ state, inFlightAction: "patch:update" })),
+    };
+    const changed: SessionRecord = {
+      id: "2",
+      sessionId: "session",
+      timestamp: "2026-07-16T00:00:01.000Z",
+      type: "FILE_CHANGE",
+      payload: { files: [{ path: "src/large.ts", changeType: "MODIFIED" }] },
+    };
+
+    expect(recoverLatestAgentCheckpoint([active, changed])?.effects.fileReadCoverage).toEqual([]);
+  });
+
   it("reconciles durable side-effect records written after an in-flight checkpoint", () => {
     const active = checkpointRecord("1", { status: "RUNNING", inFlightAction: "patch:Update app", successfulPatch: false });
     const fileChange: SessionRecord = {
@@ -87,6 +163,32 @@ describe("AgentCheckpoint", () => {
       },
     });
     expect(recoverLatestAgentCheckpoint([active, fileChange, command])?.inFlightAction).toBeUndefined();
+  });
+
+  it("does not turn a persisted non-verification command into test evidence after recovery", () => {
+    const active = checkpointRecord("1", { status: "RUNNING", successfulPatch: true });
+    const spoofed: SessionRecord = {
+      id: "2",
+      sessionId: "session",
+      timestamp: "2026-07-16T00:00:01.000Z",
+      type: "COMMAND_RESULT",
+      payload: {
+        command: "echo npm test",
+        success: true,
+        exitCode: 0,
+        verification: {
+          level: "NONE",
+          category: "none",
+          repositoryWide: false,
+          scopePaths: [],
+        },
+      },
+    };
+
+    const recovered = recoverLatestAgentCheckpoint([active, spoofed]);
+    expect(recovered?.effects.latestVerification).toBeUndefined();
+    expect(recovered?.effects.latestTest).toBeUndefined();
+    expect(recovered?.effects.verificationAfterPatch).not.toBe(true);
   });
 
   it("invalidates recovered verification when a later durable file change is observed", () => {

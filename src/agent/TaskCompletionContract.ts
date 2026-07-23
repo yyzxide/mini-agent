@@ -3,6 +3,7 @@ import type { AgentState, AgentCompletionEvidence } from "./AgentState.js";
 import { looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
 import { looksLikeIndexedKnowledgeRequest } from "./TaskRouter.js";
 import type { VerificationLevel } from "../command/CommandClassification.js";
+import { extractChangedPathsFromUnifiedDiff } from "../diff/ChangedPaths.js";
 
 export type TaskCompletionKind =
   | "PLAN"
@@ -60,23 +61,29 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
     };
   }
 
-  const requiresKnowledgeEvidence = looksLikeIndexedKnowledgeRequest(state.userGoal);
-  const requiresRepositoryChange = requiresRepositoryFileChange(state.userGoal)
-    || state.getCompletionEvidence().repositoryChanged;
+  const requiresKnowledgeEvidence = state.taskContract.evidence.knowledgeSearch
+    || looksLikeIndexedKnowledgeRequest(state.userGoal);
+  const requiresRepositoryChange = state.taskContract.capabilities.repositoryWrite && (
+    requiresRepositoryFileChange(state.userGoal)
+    || state.getCompletionEvidence().repositoryChanged
+  );
   const targetFiles = extractTargetFiles(state);
   const hasSourceTarget = targetFiles.some((file) => SOURCE_EXTENSION_PATTERN.test(file));
   const hasConfigTarget = targetFiles.some(isConfigurationFile);
   const hasDocumentTarget = targetFiles.length > 0 && targetFiles.every((file) => DOCUMENT_EXTENSION_PATTERN.test(file));
-  const explicitVerification = EXPLICIT_VERIFICATION_PATTERN.test(state.userGoal);
+  const explicitVerification = state.taskContract.capabilities.commandExecution
+    && EXPLICIT_VERIFICATION_PATTERN.test(state.userGoal);
   const inferredSourceTask = requiresRepositoryChange && targetFiles.length === 0 && SOURCE_TASK_PATTERN.test(state.userGoal);
-  const requiredVerificationLevel = determineRequiredVerificationLevel({
-    userGoal: state.userGoal,
-    targetFiles,
-    explicitVerification,
-    hasSourceTarget,
-    hasConfigTarget,
-    inferredSourceTask,
-  });
+  const requiredVerificationLevel = requiresRepositoryChange || explicitVerification
+    ? determineRequiredVerificationLevel({
+      userGoal: state.userGoal,
+      targetFiles,
+      explicitVerification,
+      hasSourceTarget,
+      hasConfigTarget,
+      inferredSourceTask,
+    })
+    : "NONE";
   const requiresVerification = requiredVerificationLevel !== "NONE";
 
   let kind: TaskCompletionKind = "ANSWER";
@@ -188,9 +195,7 @@ export function hasEnoughContextForFileWrite(userGoal: string): boolean {
 function extractTargetFiles(state: AgentState): string[] {
   const currentModifiedFiles = state.patchResults
     .filter((result) => result.result.success)
-    .flatMap((result) => [...result.patch.matchAll(/^\+\+\+ b\/(.+)$/gm)]
-      .map((match) => match[1])
-      .filter((file): file is string => Boolean(file) && file !== "/dev/null"));
+    .flatMap((result) => extractChangedPathsFromUnifiedDiff(result.patch));
   const modifiedFiles = unique([...(state.recoveredCheckpoint?.workingSet.modifiedFiles ?? []), ...currentModifiedFiles]);
   if (modifiedFiles.length > 0) return modifiedFiles;
   return unique([...state.userGoal.matchAll(FILE_PATH_PATTERN)]

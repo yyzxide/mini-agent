@@ -10,6 +10,8 @@ import {
   ToolInputError,
 } from "../utils/errors.js";
 import { toJsonValue } from "../utils/json.js";
+import { redactSecrets } from "../utils/logger.js";
+import { truncateText } from "../utils/fs.js";
 import type { EventType, JsonObject, SessionRecordType } from "../session/SessionTypes.js";
 import { ApplyPatchTool } from "./ApplyPatchTool.js";
 import { KnowledgeSearchTool } from "../rag/KnowledgeSearchTool.js";
@@ -113,21 +115,15 @@ export class ToolRegistry {
       return toolFailure("TOOL_NOT_FOUND", `Tool not found: ${name}`, { name });
     }
 
-    const startedResult = await this.recordEvent(context, "TOOL_CALL_STARTED", {
+    const auditWarnings: string[] = [];
+    await this.recordEvent(context, "TOOL_CALL_STARTED", {
       toolName: name,
-      input: toJsonValue(input),
-    });
-    if (startedResult) {
-      return startedResult;
-    }
-
-    const callRecordResult = await this.recordSession(context, "TOOL_CALL", {
+      input: redactSecrets(toJsonValue(input)),
+    }).catch((error: unknown) => auditWarnings.push(`event-start: ${errorToMessage(error)}`));
+    await this.recordSession(context, "TOOL_CALL", {
       toolName: name,
-      input: toJsonValue(input),
-    });
-    if (callRecordResult) {
-      return callRecordResult;
-    }
+      input: redactSecrets(toJsonValue(input)),
+    }).catch((error: unknown) => auditWarnings.push(`session-call: ${errorToMessage(error)}`));
 
     let result: ToolResult<unknown>;
 
@@ -143,68 +139,93 @@ export class ToolRegistry {
       }
     }
 
-    const resultRecord = await this.recordSession(context, "TOOL_RESULT", {
+    await this.recordSession(context, "TOOL_RESULT", {
       toolName: name,
       success: result.success,
-      result: toJsonValue(result.data ?? null),
-      error: toJsonValue(result.error ?? null),
-      metadata: toJsonValue(result.metadata ?? null),
-    });
-    if (resultRecord) {
-      return resultRecord;
-    }
+      result: compactPersistedToolResult(name, result.data ?? null),
+      error: redactSecrets(toJsonValue(result.error ?? null)),
+      metadata: redactSecrets(toJsonValue(result.metadata ?? null)),
+    }).catch((error: unknown) => auditWarnings.push(`session-result: ${errorToMessage(error)}`));
 
-    const finishedEvent = await this.recordEvent(
+    await this.recordEvent(
       context,
       result.success ? "TOOL_CALL_FINISHED" : "TOOL_CALL_FAILED",
       {
         toolName: name,
         success: result.success,
-        result: toJsonValue(result.data ?? null),
-        error: toJsonValue(result.error ?? null),
-        metadata: toJsonValue(result.metadata ?? null),
+        resultPreview: auditPreview(result.data ?? null),
+        error: redactSecrets(toJsonValue(result.error ?? null)),
+        metadata: redactSecrets(toJsonValue(result.metadata ?? null)),
       },
-    );
-    if (finishedEvent) {
-      return finishedEvent;
-    }
+    ).catch((error: unknown) => auditWarnings.push(`event-finish: ${errorToMessage(error)}`));
 
-    return result;
+    return auditWarnings.length === 0
+      ? result
+      : {
+        ...result,
+        metadata: {
+          ...(result.metadata ?? {}),
+          auditWarnings,
+        },
+      };
   }
 
   private async recordSession(
     context: ToolContext,
     type: SessionRecordType,
     payload: JsonObject,
-  ): Promise<ToolResult<never> | undefined> {
+  ): Promise<void> {
     if (!context.sessionId || !context.sessionStore) {
-      return undefined;
+      return;
     }
-
-    try {
-      await context.sessionStore.appendRecord(context.sessionId, { type, payload });
-      return undefined;
-    } catch (error) {
-      return toolFailure(errorToCode(error, "SESSION_RECORD_WRITE_FAILED"), errorToMessage(error), errorToDetails(error));
-    }
+    await context.sessionStore.appendRecord(context.sessionId, { type, payload });
   }
 
   private async recordEvent(
     context: ToolContext,
     type: EventType,
     payload: JsonObject,
-  ): Promise<ToolResult<never> | undefined> {
+  ): Promise<void> {
     if (!context.sessionId || !context.eventStore) {
-      return undefined;
+      return;
     }
-
-    try {
-      await context.eventStore.appendEvent(context.sessionId, { type, payload });
-      return undefined;
-    } catch (error) {
-      return toolFailure(errorToCode(error, "EVENT_WRITE_FAILED"), errorToMessage(error), errorToDetails(error));
-    }
+    await context.eventStore.appendEvent(context.sessionId, { type, payload });
   }
+}
+
+function auditPreview(value: unknown): string {
+  const json = JSON.stringify(redactSecrets(toJsonValue(value)));
+  return truncateText(json, 4_000).text;
+}
+
+function compactPersistedToolResult(toolName: string, value: unknown) {
+  const redacted = redactSecrets(toJsonValue(value));
+  if (typeof redacted !== "object" || redacted === null || Array.isArray(redacted)) {
+    return redacted;
+  }
+
+  if (toolName === "read_file") {
+    const content = typeof redacted.content === "string" ? redacted.content : "";
+    return {
+      ...redacted,
+      content: content.length > 0 ? `[omitted from audit log: ${String(content.length)} chars]` : "",
+    };
+  }
+
+  if (toolName === "knowledge_search") {
+    return {
+      found: redacted.found ?? false,
+      ...(Array.isArray(redacted.citations) ? { citations: redacted.citations.slice(0, 20) } : {}),
+    };
+  }
+
+  const serialized = JSON.stringify(redacted);
+  return serialized.length <= 4_000
+    ? redacted
+    : {
+      truncated: true,
+      resultPreview: truncateText(serialized, 4_000).text,
+    };
 }
 
 export function createDefaultToolRegistry(): ToolRegistry {

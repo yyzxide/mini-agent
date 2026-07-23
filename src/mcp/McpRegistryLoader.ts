@@ -25,7 +25,15 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
     const client = createClient(server);
     try {
       const tools = await client.listTools();
-      for (const tool of tools) registry.register(new McpRemoteTool(server, tool, client));
+      const staged = tools.map((tool) => new McpRemoteTool(server, tool, client));
+      const stagedNames = new Set<string>();
+      for (const tool of staged) {
+        if (stagedNames.has(tool.name) || registry.get(tool.name)) {
+          throw new Error(`MCP tool name collision after normalization: ${tool.name}`);
+        }
+        stagedNames.add(tool.name);
+      }
+      for (const tool of staged) registry.register(tool);
       registry.addDisposer(async () => await client.close());
       diagnostics.push({ server: server.name, success: true, toolCount: tools.length });
     } catch (error) {

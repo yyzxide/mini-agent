@@ -6,6 +6,7 @@ import {
   requiresRepositoryFileChange,
   validateAgentDecisionGuardrails,
 } from "../../src/agent/TaskGuardrails.js";
+import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
 
 describe("TaskGuardrails", () => {
   it("requires a repository change for common configuration and text artifacts", () => {
@@ -137,10 +138,218 @@ describe("TaskGuardrails", () => {
       code: "FINAL_WITH_STALE_VERIFICATION",
     });
   });
+
+  it("blocks a web query that silently strengthens a representative request into a ranking", () => {
+    const state = webStateFor("Kanye West 有哪些知名的歌曲？");
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: "Kanye West 最知名的歌曲" },
+    })).toMatchObject({
+      code: "WEB_QUERY_SCOPE_STRENGTHENED",
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: "Kanye West 知名歌曲" },
+    })).toBeUndefined();
+  });
+
+  it("blocks guessed fetch URLs and permits exact search-result URLs", () => {
+    const state = webStateFor("核实某项公开事实");
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "fetch_url",
+      input: { url: "https://example.com/guessed" },
+    })).toMatchObject({
+      code: "FETCH_URL_WITHOUT_GROUNDED_URL",
+    });
+
+    state.addToolResult({
+      toolName: "web_search",
+      input: { query: "公开事实" },
+      result: {
+        success: true,
+        data: {
+          results: [{ title: "Source", url: "https://example.com/source", snippet: "Evidence" }],
+        },
+      },
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "fetch_url",
+      input: { url: "https://example.com/guessed" },
+    })).toMatchObject({
+      code: "FETCH_URL_NOT_FROM_SEARCH_RESULTS",
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "fetch_url",
+      input: { url: "https://example.com/source" },
+    })).toBeUndefined();
+  });
+
+  it("allows a grounded limitation after web search transport failure", () => {
+    const state = webStateFor("核实某项公开事实");
+    state.addToolResult({
+      toolName: "web_search",
+      input: { query: "某项公开事实" },
+      result: {
+        success: false,
+        error: { code: "WEB_SEARCH_FAILED", message: "fetch failed" },
+      },
+    });
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: "public fact" },
+    })).toMatchObject({
+      code: "WEB_SEARCH_TRANSPORT_UNAVAILABLE",
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "本轮 web_search 连接失败，当前来源不足，无法核验这项事实。",
+    })).toBeUndefined();
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "这项事实肯定是真的。",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_WEB_SEARCH",
+    });
+  });
+
+  it("requires a second non-equivalent search before asserting a latest model", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    addWebSearch(state, "OpenAI latest model 2026", [
+      {
+        title: "Introducing GPT-5.5",
+        url: "https://openai.com/index/introducing-gpt-5-5/",
+        snippet: "April 23, 2026 release.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/introducing-gpt-5-5/",
+      "Introducing GPT-5.5. April 23, 2026.",
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新模型是 GPT-5.5。https://openai.com/index/introducing-gpt-5-5/",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_FRESHNESS_COMPARISON",
+    });
+  });
+
+  it("requires one authority-targeted search among latest-model comparisons", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    const stale = [{
+      title: "Introducing GPT-5.5",
+      url: "https://openai.com/index/introducing-gpt-5-5/",
+      snippet: "April 23, 2026 release.",
+    }];
+    addWebSearch(state, "OpenAI latest model 2026", stale);
+    addWebSearch(state, "OpenAI newest model July 2026", stale);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/introducing-gpt-5-5/",
+      "Introducing GPT-5.5. April 23, 2026.",
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新模型是 GPT-5.5。https://openai.com/index/introducing-gpt-5-5/",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_AUTHORITATIVE_FRESHNESS_SEARCH",
+    });
+  });
+
+  it("blocks a latest-version conclusion when evidence contains a higher same-family candidate", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    addWebSearch(state, "OpenAI latest model 2026", [
+      {
+        title: "Introducing GPT-5.5",
+        url: "https://openai.com/index/introducing-gpt-5-5/",
+        snippet: "April 23, 2026 product release.",
+      },
+    ]);
+    addWebSearch(state, "site:openai.com OpenAI latest model official release", [
+      {
+        title: "GPT-5.6: Frontier intelligence",
+        url: "https://openai.com/index/gpt-5-6/",
+        snippet: "July 9, 2026 product release.",
+      },
+      {
+        title: "Introducing GPT-5.5",
+        url: "https://openai.com/index/introducing-gpt-5-5/",
+        snippet: "April 23, 2026 product release.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/introducing-gpt-5-5/",
+      "Introducing GPT-5.5. GPT-5.6 is a newer candidate.",
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新模型是 GPT-5.5。https://openai.com/index/introducing-gpt-5-5/",
+    })).toMatchObject({
+      code: "FINAL_IGNORES_HIGHER_VERSION_CANDIDATE",
+    });
+  });
+
+  it("accepts a latest-version answer grounded in an authoritative freshness search", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    addWebSearch(state, "OpenAI latest model 2026", [
+      {
+        title: "GPT-5.6: Frontier intelligence",
+        url: "https://openai.com/index/gpt-5-6/",
+        snippet: "July 9, 2026 product release.",
+      },
+    ]);
+    addWebSearch(state, "site:openai.com OpenAI latest model official release", [
+      {
+        title: "GPT-5.6: Frontier intelligence",
+        url: "https://openai.com/index/gpt-5-6/",
+        snippet: "July 9, 2026 product release.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/gpt-5-6/",
+      "GPT-5.6 launches for general availability on July 9, 2026.",
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/",
+    })).toBeUndefined();
+  });
 });
 
 function stateFor(userGoal: string): AgentState {
   return new AgentState({ sessionId: "session", repoPath: "/repo", userGoal });
+}
+
+function webStateFor(userGoal: string): AgentState {
+  return new AgentState({
+    sessionId: "session",
+    repoPath: "/repo",
+    userGoal,
+    taskContract: buildAgentTaskContract({
+      userGoal,
+      route: { intent: "WEB_ANSWER", reason: "test" },
+    }),
+  });
 }
 
 function addSuccessfulPatch(state: AgentState, file: string): void {
@@ -161,6 +370,32 @@ function addCommand(state: AgentState, command: string, success: boolean): void 
     success,
     timedOut: false,
     truncated: false,
+  });
+}
+
+function addWebSearch(
+  state: AgentState,
+  query: string,
+  results: Array<{ title: string; url: string; snippet: string }>,
+): void {
+  state.addToolResult({
+    toolName: "web_search",
+    input: { query },
+    result: {
+      success: true,
+      data: { query, provider: "duckduckgo_html", results },
+    },
+  });
+}
+
+function addFetchedPage(state: AgentState, url: string, text: string): void {
+  state.addToolResult({
+    toolName: "fetch_url",
+    input: { url },
+    result: {
+      success: true,
+      data: { finalUrl: url, text },
+    },
   });
 }
 

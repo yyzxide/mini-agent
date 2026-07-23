@@ -1,11 +1,17 @@
 import { hasHighConfidenceDiagnostic } from "../diagnostics/ErrorClassifier.js";
-import { extractLikelyReviewFilePath, looksLikeReviewableFilePath } from "../review/CodeReview.js";
+import { extractLikelyReviewFilePath, looksLikeReviewableFilePath } from "./RepositoryInvestigation.js";
 import {
   hasExplicitChatOnlyConstraint,
   looksLikeDocumentCreationTask,
   mentionsDocumentArtifact,
 } from "./ArtifactIntent.js";
 import { looksLikeFileWriteConfirmation, looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
+import {
+  classifyProductMetaIntent,
+  looksLikeExplicitWebAction,
+} from "./ProductCapability.js";
+import { classifyExternalFactPolicy } from "./ExternalFactPolicy.js";
+import { isPriorResponseAuditRequest } from "../session/ConversationHistory.js";
 
 export type TaskIntent = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP";
 
@@ -13,51 +19,6 @@ export interface TaskRoute {
   intent: TaskIntent;
   reason: string;
 }
-
-const REPOSITORY_KEYWORDS = [
-  "仓库",
-  "项目",
-  "文件",
-  "目录",
-  "当前仓库",
-  "当前项目",
-  "当前目录",
-  "当前文件",
-  "这里的仓库",
-  "这里的项目",
-  "这个 repo",
-  "这个代码",
-  "修改",
-  "新增",
-  "创建",
-  "删除",
-  "保存",
-  "写入",
-  "补充",
-  "修复",
-  "重构",
-  "测试",
-  "readme",
-  "src/",
-  ".ts",
-  ".js",
-  ".java",
-  ".go",
-  ".py",
-  ".cpp",
-  "repo",
-  "repository",
-  "project",
-  "file",
-  "directory",
-  "modify",
-  "add",
-  "create",
-  "delete",
-  "fix",
-  "refactor",
-  "test",
-];
 
 const REPOSITORY_ACTION_KEYWORDS = [
   "仓库",
@@ -96,6 +57,16 @@ const REPOSITORY_ACTION_KEYWORDS = [
   "fix",
   "refactor",
   "test",
+];
+
+const REPOSITORY_KEYWORDS = [
+  ...REPOSITORY_ACTION_KEYWORDS,
+  ".ts",
+  ".js",
+  ".java",
+  ".go",
+  ".py",
+  ".cpp",
 ];
 
 const DIRECT_SNIPPET_KEYWORDS = [
@@ -289,23 +260,12 @@ const CASUAL_DIRECT_REPLY_PHRASES = [
 ];
 
 const WEB_RESEARCH_KEYWORDS = [
-  "联网",
-  "网上",
-  "搜一下",
-  "搜索一下",
-  "查一下",
-  "查找",
-  "资料",
   "最新",
   "最近",
   "热门",
   "热榜",
   "趋势榜",
   "新闻",
-  "网址",
-  "网页",
-  "来源",
-  "资料来源",
   "比分",
   "赛果",
   "赛程",
@@ -341,10 +301,6 @@ const WEB_RESEARCH_KEYWORDS = [
   "金融市场",
   "汇率",
   "价格",
-  "search the web",
-  "web search",
-  "look up",
-  "browse",
   "latest",
   "recent",
   "trending",
@@ -463,10 +419,15 @@ const REPOSITORY_MUTATION_KEYWORDS = [
 
 export function routeTask(userGoal: string): TaskRoute {
   const normalized = normalizeTask(userGoal);
-  const needsWeb = containsAny(normalized, WEB_RESEARCH_KEYWORDS);
+  const productMeta = classifyProductMetaIntent(userGoal);
+  const externalFactPolicy = classifyExternalFactPolicy(userGoal);
+  const needsWeb = looksLikeExplicitWebAction(userGoal)
+    || containsAny(normalized, WEB_RESEARCH_KEYWORDS);
   const reviewTarget = extractLikelyReviewFilePath(userGoal);
   const reviewRequest = containsAny(normalized, CODE_REVIEW_KEYWORDS)
     && (containsAny(normalized, FILE_CONTEXT_KEYWORDS) || reviewTarget !== undefined || normalized.includes("当前") || normalized.includes("打开"));
+  const repositoryMutationRequest = containsAny(normalized, REPOSITORY_MUTATION_KEYWORDS)
+    && (containsAny(normalized, REPOSITORY_ACTION_KEYWORDS) || reviewTarget !== undefined);
 
   if (matchesCasualDirectReply(normalized)) {
     return {
@@ -489,10 +450,17 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
-  if (looksLikeWebCapabilityQuestion(normalized)) {
+  if (isPriorResponseAuditRequest(userGoal) && looksLikeExplicitWebAction(userGoal)) {
+    return {
+      intent: "WEB_ANSWER",
+      reason: "Task explicitly asks to research the truth of a previously discussed external claim.",
+    };
+  }
+
+  if (productMeta && productMeta.confidence >= 0.65) {
     return {
       intent: "DIRECT_ANSWER",
-      reason: "Task asks about the CLI's web capability, which should be answered from local product knowledge.",
+      reason: "Task asks about the CLI's product capabilities, which should be answered from local product knowledge.",
     };
   }
 
@@ -500,6 +468,18 @@ export function routeTask(userGoal: string): TaskRoute {
     return {
       intent: "DIRECT_ANSWER",
       reason: "Task asks about the CLI's repository-local document RAG capability.",
+    };
+  }
+
+  if (
+    isPriorResponseAuditRequest(userGoal)
+    && !looksLikeExplicitWebAction(userGoal)
+    && !externalFactPolicy.signals.includes("explicit-research")
+    && !externalFactPolicy.signals.includes("explicit-verification")
+  ) {
+    return {
+      intent: "DIRECT_ANSWER",
+      reason: "Task audits an earlier assistant response, so the conversation record is the primary evidence source.",
     };
   }
 
@@ -552,6 +532,13 @@ export function routeTask(userGoal: string): TaskRoute {
     };
   }
 
+  if (repositoryMutationRequest) {
+    return {
+      intent: "AGENT_LOOP",
+      reason: "Explicit repository mutation intent takes precedence over file review or path inspection.",
+    };
+  }
+
   if (looksLikeReviewableFilePath(userGoal.trim())) {
     return {
       intent: "CODE_REVIEW",
@@ -563,6 +550,16 @@ export function routeTask(userGoal: string): TaskRoute {
     return {
       intent: "CODE_REVIEW",
       reason: "Task appears to request a file-focused code review or bug inspection.",
+    };
+  }
+
+  if (
+    externalFactPolicy.policy === "VERIFICATION_REQUIRED"
+    && !containsAny(normalized, REPOSITORY_KEYWORDS)
+  ) {
+    return {
+      intent: "WEB_ANSWER",
+      reason: `Precise external facts require evidence (${externalFactPolicy.signals.join(", ")}).`,
     };
   }
 
@@ -668,24 +665,10 @@ export function looksLikeCodeContinuationFollowUp(userGoal: string): boolean {
 }
 
 export function looksLikeWebCapabilityQuestion(normalized: string): boolean {
-  const compact = normalized.replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】]/g, "");
-  return [
-    "你不能联网吗",
-    "你能联网吗",
-    "你可以联网吗",
-    "能联网吗",
-    "可以联网吗",
-    "有没有联网能力",
-    "有联网能力吗",
-    "不能联网吗",
-    "不能上网吗",
-    "能上网吗",
-    "可以上网吗",
-    "能访问网页吗",
-    "可以访问网页吗",
-  ].some((phrase) => compact.includes(phrase))
-    || /\b(can|could)\s+you\s+(access\s+the\s+internet|browse|search\s+the\s+web)\b/i.test(normalized)
-    || /\bdo\s+you\s+have\s+(web|internet|browsing)\s+(access|capability)\b/i.test(normalized);
+  const intent = classifyProductMetaIntent(normalized);
+  return Boolean(intent && intent.confidence >= 0.65 && (
+    intent.topic === "WEB_RESEARCH" || intent.topic === "ALL"
+  ));
 }
 
 export function looksLikeRagCapabilityQuestion(value: string): boolean {
@@ -811,7 +794,7 @@ function normalizeTask(value: string): string {
 
 function matchesCasualDirectReply(value: string): boolean {
   const compact = value.replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】]/g, "");
-  return CASUAL_DIRECT_REPLY_PHRASES.some((phrase) => compact.includes(phrase));
+  return CASUAL_DIRECT_REPLY_PHRASES.some((phrase) => compact === phrase);
 }
 
 function containsAny(value: string, keywords: string[]): boolean {

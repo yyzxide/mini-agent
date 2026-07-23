@@ -59,7 +59,7 @@ export class TaskChangeLogStore {
   }
 
   async append(input: AppendTaskChangeLogInput): Promise<TaskChangeLogEntry> {
-    await ensureDir(resolveMiniAgentPath(this.repoPath));
+    await ensureDir(resolveMiniAgentPath(this.repoPath), 0o700);
     const currentChangedFiles = sortUnique(input.currentChangedFiles ?? []);
     const beforeChangedFiles = new Set(input.beforeChangedFiles ?? []);
     const entry: TaskChangeLogEntry = {

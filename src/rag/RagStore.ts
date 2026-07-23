@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from "../memory/EmbeddingProvider.js";
+import {
+  createEmbeddingProviderFromEnvironment,
+  type EmbeddingCacheStats,
+  type EmbeddingProvider,
+} from "../memory/EmbeddingProvider.js";
 import { cosineSimilarity, extractKeywords, unique } from "../memory/MemoryText.js";
 import { ensureDir, readJsonLines, resolveMiniAgentPath, truncateText } from "../utils/fs.js";
 import { RagDocumentLoader } from "./DocumentLoader.js";
@@ -48,8 +52,12 @@ export class RagStore {
   private readonly repoPath: string;
 
   async init(): Promise<void> {
-    await ensureDir(path.dirname(this.indexPath));
+    await ensureDir(path.dirname(this.indexPath), 0o700);
     await fs.appendFile(this.indexPath, "", "utf8");
+  }
+
+  getEmbeddingCacheStats(): EmbeddingCacheStats | undefined {
+    return this.embeddingProvider.getCacheStats?.();
   }
 
   async ingest(inputPaths: string[], options: {
@@ -202,7 +210,7 @@ export class RagStore {
   }
 
   private async writeAll(entries: RagChunk[]): Promise<void> {
-    await ensureDir(path.dirname(this.indexPath));
+    await ensureDir(path.dirname(this.indexPath), 0o700);
     const tempPath = `${this.indexPath}.${process.pid}.${Date.now()}.tmp`;
     const body = entries.map((entry) => JSON.stringify(entry)).join("\n");
     await fs.writeFile(tempPath, body ? `${body}\n` : "", "utf8");

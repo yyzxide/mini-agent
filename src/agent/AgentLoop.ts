@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
 import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
-import { isTestCommand } from "../command/CommandClassification.js";
+import { classifyVerificationCommandInput } from "../command/CommandClassification.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
-import { GitManager } from "../git/GitManager.js";
-import type { LlmClient, ToolSpec } from "../llm/LlmClient.js";
-import { PatchManager } from "../patch/PatchManager.js";
+import type {
+  LlmClient,
+  LlmTextCompletionResult,
+  ToolSpec,
+} from "../llm/LlmClient.js";
+import type { PatchManager } from "../patch/PatchManager.js";
+import { TaskDiffService } from "../diff/TaskDiffService.js";
+import { TaskDiffStore } from "../diff/TaskDiffStore.js";
+import type { TaskDiffArtifact, WorkingTreeSnapshot } from "../diff/TaskDiffTypes.js";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { EventStore } from "../session/EventStore.js";
@@ -31,6 +37,31 @@ import { isPlanModeReadOnlyTool, selectToolsForOperatingMode } from "./AgentOper
 import { checkpointToPayload, createAgentCheckpoint } from "./AgentCheckpoint.js";
 import { AgentStateReducer } from "./AgentStateReducer.js";
 import type { MultiAgentPolicy, SubAgentBatchResult, SubAgentCoordinator } from "./SubAgentTypes.js";
+import type { AgentTaskContract } from "./AgentTaskContract.js";
+import type { ArtifactFollowUpResolution } from "./ArtifactFollowUp.js";
+import { enforceCapabilityTruth } from "./CapabilityTruthGuard.js";
+import {
+  buildPriorResponseRevisionContext,
+  inferPriorResponseLocale,
+  inspectPriorResponseConsistency,
+  renderPriorResponseSafeFallback,
+  type PriorResponseConsistencyViolation,
+} from "./PriorResponseTruthGuard.js";
+import {
+  createDefaultAgentTaskContract,
+  isToolAllowedByTaskContract,
+  selectToolsForTaskContract,
+} from "./AgentTaskContract.js";
+import { buildAgentTaskContract } from "./TaskContractBuilder.js";
+import { routeTask } from "./TaskRouter.js";
+import type { ConversationMessage } from "../session/ConversationHistory.js";
+import { redactSecrets } from "../utils/logger.js";
+import type {
+  AgentRuntimeEvent,
+  AgentRuntimeEventHandler,
+  RuntimeConversationTrace,
+  RuntimeLlmUsage,
+} from "../observability/AgentRuntimeEvent.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -57,6 +88,10 @@ export interface AgentRunInput {
   keepSessionActive?: boolean;
   operatingMode?: AgentOperatingMode;
   multiAgent?: MultiAgentPolicy;
+  taskContract?: AgentTaskContract;
+  conversation?: ConversationMessage[];
+  conversationTrace?: RuntimeConversationTrace;
+  followUpResolution?: ArtifactFollowUpResolution;
 }
 
 export interface AgentRunResult {
@@ -68,21 +103,16 @@ export interface AgentRunResult {
   error?: string;
   delegationBatches?: number;
   subAgents?: number;
+  taskKind: AgentTaskContract["kind"];
+  outputKind: AgentTaskContract["outputKind"];
+  diffArtifactId?: string;
+  diffFileCount?: number;
+  diffAdditions?: number;
+  diffDeletions?: number;
 }
 
-export type AgentProgressEvent =
-  | { type: "session"; sessionId: string }
-  | { type: "plan"; message: string }
-  | { type: "tool"; toolName: string; input: JsonObject }
-  | { type: "agents"; phase: "started" | "finished" | "failed"; tasks: number; message: string }
-  | { type: "patch"; description: string }
-  | { type: "command"; command: string }
-  | { type: "ask_user"; message: string }
-  | { type: "diff"; generated: boolean }
-  | { type: "summary"; summary: string; success: boolean }
-  | { type: "error"; message: string };
-
-export type AgentProgressHandler = (event: AgentProgressEvent) => void | Promise<void>;
+export type AgentProgressEvent = AgentRuntimeEvent;
+export type AgentProgressHandler = AgentRuntimeEventHandler;
 
 interface StepOutcome {
   result?: AgentRunResult;
@@ -100,12 +130,15 @@ export class AgentLoop {
   private readonly eventStore: EventStore;
   private readonly commandRunner: CommandRunner;
   private readonly permissionManager: PermissionManager;
-  private readonly patchManager: PatchManager;
   private readonly contextBuilder: ContextBuilder;
   private readonly onProgress: AgentProgressHandler | undefined;
   private readonly askUser: ((message: string) => Promise<string>) | undefined;
   private readonly availableTools: ToolSpec[];
   private readonly subAgentCoordinator: SubAgentCoordinator | undefined;
+  private activeState: AgentState | undefined;
+  private activeTaskDiffBaseline: WorkingTreeSnapshot | undefined;
+  private activeTaskDiffArtifact: TaskDiffArtifact | undefined;
+  private progressSequence = 0;
 
   constructor(options: AgentLoopOptions) {
     this.repoPath = options.repoPath;
@@ -115,7 +148,6 @@ export class AgentLoop {
     this.eventStore = options.eventStore;
     this.commandRunner = options.commandRunner ?? new CommandRunner({ repoPath: options.repoPath });
     this.permissionManager = options.permissionManager ?? new PermissionManager();
-    this.patchManager = options.patchManager ?? new PatchManager({ repoPath: options.repoPath });
     this.contextBuilder = options.contextBuilder ?? new ContextBuilder({ repoPath: options.repoPath });
     this.onProgress = options.onProgress;
     this.askUser = options.askUser;
@@ -124,6 +156,10 @@ export class AgentLoop {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    this.activeState = undefined;
+    this.activeTaskDiffBaseline = undefined;
+    this.activeTaskDiffArtifact = undefined;
+    this.progressSequence = 0;
     const userGoal = input.userGoal.trim();
     const originalUserGoal = input.originalUserGoal?.trim() || userGoal;
     if (userGoal.length === 0) {
@@ -131,11 +167,31 @@ export class AgentLoop {
     }
 
     const operatingMode = input.operatingMode ?? "EXECUTE";
+    const inferredContract = buildAgentTaskContract({
+      userGoal,
+      route: routeTask(originalUserGoal),
+      operatingMode,
+      multiAgentEnabled: input.multiAgent?.enabled === true,
+    });
+    // The CLI always supplies an explicit contract. Keep the lower-level AgentLoop
+    // compatible with programmatic/evaluation callers whose terse goals do not
+    // carry enough routing intent, while still inferring specialized web,
+    // knowledge, investigation, and delegation contracts.
+    const taskContract = input.taskContract
+      ?? (inferredContract.kind === "DIRECT_RESPONSE"
+        ? {
+          ...createDefaultAgentTaskContract(),
+          capabilities: {
+            ...createDefaultAgentTaskContract().capabilities,
+            delegation: input.multiAgent?.enabled === true,
+          },
+        }
+        : inferredContract);
     const sessionId = await this.ensureSession(originalUserGoal, input.sessionId, operatingMode);
     await this.emit({ type: "session", sessionId });
 
     const recoveredCheckpoint = input.sessionId
-      ? await new AgentStateReducer(this.sessionStore).recover(sessionId, operatingMode)
+      ? await new AgentStateReducer(this.sessionStore).recover(sessionId, operatingMode, userGoal)
       : undefined;
 
     const state = new AgentState({
@@ -143,11 +199,28 @@ export class AgentLoop {
       runId: recoveredCheckpoint?.runId ?? randomUUID(),
       repoPath: this.repoPath,
       userGoal,
-      ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
+      maxSteps: input.maxSteps ?? taskContract.maxSteps,
       operatingMode,
       ...(recoveredCheckpoint ? { recoveredCheckpoint } : {}),
-      multiAgentEnabled: input.multiAgent?.enabled === true && this.subAgentCoordinator !== undefined,
+      multiAgentEnabled: input.multiAgent?.enabled === true
+        && taskContract.capabilities.delegation
+        && this.subAgentCoordinator !== undefined,
+      taskContract,
     });
+    this.activeState = state;
+    if (taskContract.capabilities.repositoryWrite) {
+      this.activeTaskDiffBaseline = await new TaskDiffService({ repoPath: this.repoPath })
+        .captureWorkingTree()
+        .catch(() => undefined);
+    }
+
+    if (input.conversationTrace) {
+      await this.eventStore.appendEvent(sessionId, {
+        type: "CONVERSATION_CONTEXT_BUILT",
+        payload: toJsonObject({ ...input.conversationTrace }),
+      });
+      await this.emit({ type: "conversation", trace: input.conversationTrace });
+    }
 
     if (recoveredCheckpoint) {
       state.setLastError(recoveredCheckpoint.inFlightAction
@@ -166,24 +239,70 @@ export class AgentLoop {
     }
 
     await this.recordUserMessage(state, originalUserGoal);
+    if (input.followUpResolution) {
+      const resolution = input.followUpResolution;
+      const files = resolution.files.map((file) => file.relativePath);
+      await this.eventStore.appendEvent(sessionId, {
+        type: "FOLLOW_UP_RESOLVED",
+        payload: {
+          intent: resolution.intent,
+          source: resolution.source,
+          files,
+          llmSkipped: taskContract.deterministicAnswer !== undefined,
+        },
+      });
+      await this.emit({
+        type: "follow_up",
+        intent: resolution.intent,
+        source: resolution.source,
+        files,
+        llmSkipped: taskContract.deterministicAnswer !== undefined,
+      });
+    }
     await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
 
     while (!state.isStepLimitReached()) {
-      const availableTools = selectToolsForOperatingMode(this.availableTools, state.operatingMode);
-      const context = await this.contextBuilder.build(state, availableTools);
-      const contextTrace = this.contextBuilder.getLastTrace();
-      if (contextTrace) {
-        await this.eventStore.appendEvent(state.sessionId, {
-          type: "CONTEXT_BUILT",
-          payload: { trace: toJsonValue(contextTrace) },
-        });
+      const contractTools = selectToolsForTaskContract(this.availableTools, state.taskContract);
+      const availableTools = selectToolsForOperatingMode(contractTools, state.operatingMode);
+      const deterministicDecision = state.step === 0 && state.taskContract.deterministicAnswer
+        ? { type: "FINAL", summary: state.taskContract.deterministicAnswer, success: true } as const
+        : undefined;
+      let context = "";
+      if (!deterministicDecision) {
+        context = await this.contextBuilder.build(state);
+        const contextTrace = this.contextBuilder.getLastTrace();
+        if (contextTrace) {
+          await this.eventStore.appendEvent(state.sessionId, {
+            type: "CONTEXT_BUILT",
+            payload: { trace: toJsonValue(contextTrace) },
+          });
+          await this.emit({ type: "context", trace: contextTrace });
+          if (contextTrace.embeddingCache) {
+            await this.emit({ type: "cache", cache: "embedding", ...contextTrace.embeddingCache });
+          }
+        }
       }
-      const decision = await this.readDecision(state, userGoal, context, availableTools);
+      const decision = deterministicDecision
+        ?? await this.readDecision(
+          state,
+          userGoal,
+          context,
+          availableTools,
+          input.conversation,
+          originalUserGoal,
+          input.conversationTrace?.truncated === true,
+        );
 
       state.addDecision(decision);
+      await this.emit({
+        type: "decision",
+        decisionType: decision.type,
+        message: decisionToMessage(decision),
+        decision,
+      });
       await this.recordDecision(state.sessionId, decision);
       state.addAssistantMessage(decisionToMessage(decision));
       await this.recordDecisionCheckpoint(state, decision);
@@ -232,6 +351,7 @@ export class AgentLoop {
     if (planViolation) {
       state.setLastError(planViolation);
       await this.recordError(state.sessionId, planViolation);
+      await this.emit({ type: "guardrail", code: planViolation.split(":", 1)[0] ?? "PLAN_MODE_VIOLATION", message: planViolation });
       return { failed: true };
     }
 
@@ -241,15 +361,53 @@ export class AgentLoop {
         return { failed: false };
 
       case "TOOL_CALL":
+        if (this.availableTools.some((tool) => tool.name === decision.toolName)
+          && !isToolAllowedByTaskContract(
+            this.availableTools.find((tool) => tool.name === decision.toolName),
+            state.taskContract,
+          )) {
+          return { failed: await this.recordCapabilityViolation(
+            state,
+            `TASK_CAPABILITY_TOOL_BLOCKED: tool ${decision.toolName} is not enabled for ${state.taskContract.kind}`,
+          ) };
+        }
+        {
+          const guardrail = await this.guardDecisionThenContinue(state, decision);
+          if (guardrail) return guardrail;
+        }
+        if (isRedundantSuccessfulWebToolCall(state, decision.toolName, decision.input)) {
+          return { failed: await this.recordCapabilityViolation(
+            state,
+            `REDUNDANT_WEB_TOOL_CALL: ${decision.toolName} already succeeded with the same input in this run; use the gathered evidence or choose a materially different source`,
+          ) };
+        }
         return { failed: await this.executeToolDecision(state, decision.toolName, decision.input, input) };
 
       case "DELEGATE_READONLY":
+        if (!state.taskContract.capabilities.delegation) {
+          return { failed: await this.recordCapabilityViolation(
+            state,
+            `TASK_CAPABILITY_DELEGATION_BLOCKED: delegation is not enabled for ${state.taskContract.kind}`,
+          ) };
+        }
         return await this.executeDelegationDecision(state, decision, input);
 
       case "APPLY_PATCH":
+        if (!state.taskContract.capabilities.repositoryWrite) {
+          return { failed: await this.recordCapabilityViolation(
+            state,
+            `TASK_CAPABILITY_PATCH_BLOCKED: repository writes are not enabled for ${state.taskContract.kind}`,
+          ) };
+        }
         return await this.executePatchDecision(state, decision, input);
 
       case "RUN_COMMAND":
+        if (!state.taskContract.capabilities.commandExecution) {
+          return { failed: await this.recordCapabilityViolation(
+            state,
+            `TASK_CAPABILITY_COMMAND_BLOCKED: command execution is not enabled for ${state.taskContract.kind}`,
+          ) };
+        }
         return await this.executeCommandDecision(state, decision, input);
 
       case "ASK_USER":
@@ -263,6 +421,13 @@ export class AgentLoop {
       case "FAILED":
         return { failed: true, result: await this.fail(state, decision.error, input) };
     }
+  }
+
+  private async recordCapabilityViolation(state: AgentState, error: string): Promise<true> {
+    state.setLastError(error);
+    await this.recordError(state.sessionId, error);
+    await this.emit({ type: "guardrail", code: error.split(":", 1)[0] ?? "CAPABILITY_VIOLATION", message: error });
+    return true;
   }
 
   private async executeDelegationDecision(
@@ -369,6 +534,7 @@ export class AgentLoop {
 
     state.setLastError(`${violation.code}: ${violation.message}`);
     await this.recordError(state.sessionId, state.lastError);
+    await this.emit({ type: "guardrail", code: violation.code, message: violation.message });
     return { failed: true };
   }
 
@@ -379,7 +545,22 @@ export class AgentLoop {
     input: AgentRunInput,
   ): Promise<boolean> {
     await this.emit({ type: "tool", toolName, input: toolInput });
+    const startedAt = Date.now();
     const result = await this.toolRegistry.execute(toolName, toolInput, this.buildToolContext(state.sessionId, input));
+    const resultSummary = result.success ? summarizeToolResult(toolName, result.data) : undefined;
+    await this.emit({
+      type: "tool_result",
+      toolName,
+      success: result.success,
+      durationMs: Date.now() - startedAt,
+      ...(resultSummary ? { summary: resultSummary } : {}),
+      ...(result.success ? { resultPreview: previewToolResult(result.data) } : {}),
+      ...(result.error?.message ? { error: result.error.message } : {}),
+    });
+    const embeddingCache = readEmbeddingCacheStats(result.metadata?.embeddingCache);
+    if (embeddingCache) {
+      await this.emit({ type: "cache", cache: "embedding", ...embeddingCache });
+    }
 
     state.addToolResult({
       toolName,
@@ -405,11 +586,19 @@ export class AgentLoop {
     input: AgentRunInput,
   ): Promise<StepOutcome> {
     await this.emit({ type: "patch", description: decision.description ?? "apply_patch" });
+    const startedAt = Date.now();
     const result = await this.toolRegistry.execute(
       "apply_patch",
       { patch: decision.patch, checkBeforeApply: true },
       this.buildToolContext(state.sessionId, input),
     );
+    await this.emit({
+      type: "patch_result",
+      success: result.success,
+      durationMs: Date.now() - startedAt,
+      description: decision.description,
+      ...(result.error?.message ? { error: result.error.message } : {}),
+    });
 
     state.addPatchResult({
       patch: decision.patch,
@@ -439,7 +628,7 @@ export class AgentLoop {
     const commandInput = commandInputFromDecision(decision);
     const command = renderCommandInput(commandInput);
     const isHighRiskCommand = isHighRiskCommandInput(commandInput);
-    await this.emit({ type: "command", command });
+    await this.emit({ type: "command", command, description: decision.description });
 
     const permission = await this.permissionManager.check({
       level: PermissionLevel.DANGEROUS,
@@ -472,9 +661,28 @@ export class AgentLoop {
       },
     });
 
-    const result = await this.commandRunner.run({ ...commandInput, cwd, timeoutMs });
+    const pendingOutputEvents: Array<Promise<void>> = [];
+    const executed = await this.commandRunner.run({ ...commandInput, cwd, timeoutMs }, {
+      onOutput: (event) => {
+        pendingOutputEvents.push(this.emit({ type: "command_output", ...event }));
+      },
+    });
+    const result: CommandResult = {
+      ...executed,
+      verification: classifyVerificationCommandInput(commandInput),
+    };
+    await Promise.all(pendingOutputEvents);
     state.addCommandResult(result);
     await this.recordCommandResult(state.sessionId, result);
+    await this.emit({
+      type: "command_result",
+      command: result.command,
+      success: result.success,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      timedOut: result.timedOut,
+      truncated: result.truncated,
+    });
 
     if (!result.success) {
       const error = result.stderr || result.stdout || result.error || `Command failed with exit code ${String(result.exitCode)}`;
@@ -543,35 +751,45 @@ export class AgentLoop {
         summary,
         finalDiff: "",
         steps: state.step,
+        taskKind: state.taskContract.kind,
+        outputKind: state.taskContract.outputKind,
         ...collaborationResultMetadata(state),
       };
     }
 
-    const finalDiff = await this.readFinalDiff();
+    const finalDiff = state.taskContract.capabilities.repositoryWrite ? await this.readFinalDiff(state) : "";
     state.markFinished(finalDiff);
     await this.recordCheckpoint(state, "FINISHED");
-    await this.sessionStore.appendRecord(state.sessionId, {
-      type: "DIFF_SUMMARY",
-      payload: {
-        diff: finalDiff,
-      },
-    });
-    await this.eventStore.appendEvent(state.sessionId, {
-      type: "DIFF_GENERATED",
-      payload: {
-        truncated: false,
-        length: finalDiff.length,
-      },
-    });
-    await this.emit({ type: "diff", generated: true });
+    if (state.taskContract.capabilities.repositoryWrite) {
+      await this.sessionStore.appendRecord(state.sessionId, {
+        type: "DIFF_SUMMARY",
+        payload: {
+          length: finalDiff.length,
+          ...taskDiffRecordMetadata(this.activeTaskDiffArtifact),
+        },
+      });
+      await this.eventStore.appendEvent(state.sessionId, {
+        type: "DIFF_GENERATED",
+        payload: {
+          truncated: false,
+          length: finalDiff.length,
+        },
+      });
+      await this.emit({ type: "diff", generated: true });
+    } else {
+      await this.recordAssistantResponse(state.sessionId, summary);
+    }
 
     await this.sessionStore.appendRecord(state.sessionId, {
       type: "TASK_SUMMARY",
       payload: {
         summary,
         success,
-        mode: "AGENT_LOOP",
-        finalDiff,
+        mode: state.taskContract.resultMode,
+        executionEngine: "AGENT_LOOP",
+        taskKind: state.taskContract.kind,
+        outputKind: state.taskContract.outputKind,
+        ...taskDiffRecordMetadata(this.activeTaskDiffArtifact),
         steps: state.step,
       },
     });
@@ -581,6 +799,10 @@ export class AgentLoop {
         summary,
         success,
         steps: state.step,
+        mode: state.taskContract.resultMode,
+        executionEngine: "AGENT_LOOP",
+        taskKind: state.taskContract.kind,
+        outputKind: state.taskContract.outputKind,
       },
     });
     if (input.keepSessionActive !== true) {
@@ -594,20 +816,29 @@ export class AgentLoop {
       summary,
       finalDiff,
       steps: state.step,
+      taskKind: state.taskContract.kind,
+      outputKind: state.taskContract.outputKind,
+      ...taskDiffResultMetadata(this.activeTaskDiffArtifact),
       ...collaborationResultMetadata(state),
     };
   }
 
   private async fail(state: AgentState, error: string, input?: AgentRunInput): Promise<AgentRunResult> {
     state.markFailed(error);
-    const finalDiff = state.operatingMode === "PLAN" ? "" : await this.readFinalDiff();
+    const finalDiff = state.operatingMode === "PLAN" || !state.taskContract.capabilities.repositoryWrite
+      ? ""
+      : await this.readFinalDiff(state);
     state.finalDiff = finalDiff;
     await this.recordCheckpoint(state, "FAILED");
 
-    if (state.operatingMode !== "PLAN") {
+    if (state.operatingMode !== "PLAN" && state.taskContract.capabilities.repositoryWrite) {
       await this.sessionStore.appendRecord(state.sessionId, {
         type: "DIFF_SUMMARY",
-        payload: { diff: finalDiff, failed: true },
+        payload: {
+          length: finalDiff.length,
+          failed: true,
+          ...taskDiffRecordMetadata(this.activeTaskDiffArtifact),
+        },
       });
     }
     await this.sessionStore.appendRecord(state.sessionId, {
@@ -615,8 +846,11 @@ export class AgentLoop {
       payload: {
         summary: error,
         success: false,
-        mode: state.operatingMode === "PLAN" ? "PLAN" : "AGENT_LOOP",
-        finalDiff,
+        mode: state.operatingMode === "PLAN" ? "PLAN" : state.taskContract.resultMode,
+        executionEngine: "AGENT_LOOP",
+        taskKind: state.taskContract.kind,
+        outputKind: state.taskContract.outputKind,
+        ...taskDiffRecordMetadata(this.activeTaskDiffArtifact),
         steps: state.step,
       },
     });
@@ -640,6 +874,9 @@ export class AgentLoop {
       finalDiff,
       steps: state.step,
       error,
+      taskKind: state.taskContract.kind,
+      outputKind: state.taskContract.outputKind,
+      ...taskDiffResultMetadata(this.activeTaskDiffArtifact),
       ...collaborationResultMetadata(state),
     };
   }
@@ -686,33 +923,215 @@ export class AgentLoop {
     userGoal: string,
     context: string,
     availableTools: ToolSpec[],
+    conversation: ConversationMessage[] | undefined,
+    singleShotUserGoal: string,
+    conversationHistoryTruncated: boolean,
   ): Promise<AgentDecision> {
+    const mode = state.taskContract.executionStrategy === "SINGLE_SHOT" ? "agent_single_shot" : "agent_decision";
+    const startedAt = Date.now();
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "LLM_CALL_STARTED",
+      payload: { mode, step: state.step },
+    });
+    await this.emit({ type: "llm", phase: "started", mode });
     try {
+      if (state.taskContract.executionStrategy === "SINGLE_SHOT") {
+        if (!this.llmClient.completeText) {
+          return { type: "FAILED", error: "The configured LLM client does not support single-shot text completion" };
+        }
+        const firstResult = await this.llmClient.completeText({
+          userGoal: singleShotUserGoal,
+          context,
+          ...(conversation && conversation.length > 0 ? { conversation } : {}),
+          mode: "direct",
+        });
+        const result = await this.revisePriorResponseDenial(
+          state,
+          singleShotUserGoal,
+          context,
+          conversation ?? [],
+          conversationHistoryTruncated,
+          firstResult,
+        );
+        await this.recordLlmUsage(state, drainLlmCallMetrics(this.llmClient), mode, Date.now() - startedAt);
+        const correctedText = result.success && result.text
+          ? await this.correctCapabilityClaim(state, singleShotUserGoal, result.text)
+          : undefined;
+        return correctedText
+          ? { type: "FINAL", summary: correctedText, success: true }
+          : { type: "FAILED", error: result.error ?? "Single-shot answer failed" };
+      }
       const decision = await this.llmClient.chat({
         userGoal,
         context,
         state: state.toSnapshot(),
         availableTools,
+        ...(conversation && conversation.length > 0 ? { conversation } : {}),
       });
-      await this.recordLlmUsage(state.sessionId, drainLlmCallMetrics(this.llmClient), "agent_decision");
-      return decision;
+      await this.recordLlmUsage(state, drainLlmCallMetrics(this.llmClient), mode, Date.now() - startedAt);
+      if (decision.type !== "FINAL") return decision;
+      const conversationSafeSummary = await this.correctPriorResponseDenial(
+        state,
+        singleShotUserGoal,
+        decision.summary,
+        conversation ?? [],
+        conversationHistoryTruncated,
+      );
+      return {
+        ...decision,
+        summary: await this.correctCapabilityClaim(state, singleShotUserGoal, conversationSafeSummary),
+      };
     } catch (error) {
       const message = `LLM decision failed: ${errorToMessage(error)}`;
+      const durationMs = Date.now() - startedAt;
+      await this.eventStore.appendEvent(state.sessionId, {
+        type: "LLM_CALL_FAILED",
+        payload: { mode, step: state.step, durationMs, error: message },
+      });
+      await this.emit({ type: "llm", phase: "failed", mode, durationMs, error: message });
       state.setLastError(message);
       await this.recordError(state.sessionId, message, error);
       return { type: "FAILED", error: message };
     }
   }
 
+  private async revisePriorResponseDenial(
+    state: AgentState,
+    userGoal: string,
+    context: string,
+    conversation: ConversationMessage[],
+    historyTruncated: boolean,
+    firstResult: LlmTextCompletionResult,
+  ): Promise<LlmTextCompletionResult> {
+    if (!firstResult.success || !firstResult.text || !this.llmClient.completeText) {
+      return firstResult;
+    }
+    const violation = inspectPriorResponseConsistency(
+      userGoal,
+      firstResult.text,
+      conversation,
+      { historyTruncated },
+    );
+    if (!violation) return firstResult;
+    if (violation.code === "INSUFFICIENT_HISTORY_FOR_DENIAL") {
+      return {
+        success: true,
+        text: await this.recordPriorResponseFallback(state, userGoal, violation),
+      };
+    }
+
+    const message = violation.excerpt
+      ? "Draft denied or rewrote a relevant earlier assistant output; retrying once with the visible original wording."
+      : "Draft made a definitive denial from an incomplete conversation selection; retrying once with an uncertainty requirement.";
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "PRIOR_RESPONSE_CONSISTENCY_RETRY",
+      payload: {
+        code: violation.code,
+        matchedTerms: violation.matchedTerms,
+        excerpt: violation.excerpt ?? null,
+        message,
+      },
+    });
+    await this.emit({ type: "guardrail", code: "PRIOR_RESPONSE_CONSISTENCY_RETRY", message });
+
+    const revision = await this.llmClient.completeText({
+      userGoal,
+      context: [
+        context,
+        buildPriorResponseRevisionContext(violation, firstResult.text),
+      ].filter(Boolean).join("\n\n"),
+      ...(conversation.length > 0 ? { conversation } : {}),
+      mode: "direct",
+    });
+    if (revision.success && revision.text) {
+      const repeatedViolation = inspectPriorResponseConsistency(
+        userGoal,
+        revision.text,
+        conversation,
+        { historyTruncated },
+      );
+      if (!repeatedViolation) return revision;
+    }
+
+    return {
+      success: true,
+      text: await this.recordPriorResponseFallback(state, userGoal, violation),
+    };
+  }
+
+  private async correctPriorResponseDenial(
+    state: AgentState,
+    userGoal: string,
+    text: string,
+    conversation: ConversationMessage[],
+    historyTruncated: boolean,
+  ): Promise<string> {
+    const violation = inspectPriorResponseConsistency(
+      userGoal,
+      text,
+      conversation,
+      { historyTruncated },
+    );
+    if (!violation) return text;
+    return await this.recordPriorResponseFallback(state, userGoal, violation);
+  }
+
+  private async recordPriorResponseFallback(
+    state: AgentState,
+    userGoal: string,
+    violation: PriorResponseConsistencyViolation,
+  ): Promise<string> {
+    const message = "A model denial conflicted with the visible conversation record and was replaced by a record-grounded correction.";
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "PRIOR_RESPONSE_DENIAL_CORRECTED",
+      payload: {
+        code: violation.code,
+        matchedTerms: violation.matchedTerms,
+        excerpt: violation.excerpt ?? null,
+        message,
+      },
+    });
+    await this.emit({ type: "guardrail", code: "PRIOR_RESPONSE_DENIAL_CORRECTED", message });
+    return renderPriorResponseSafeFallback(violation, inferPriorResponseLocale(userGoal));
+  }
+
+  private async correctCapabilityClaim(
+    state: AgentState,
+    userGoal: string,
+    text: string,
+  ): Promise<string> {
+    const correction = enforceCapabilityTruth(userGoal, text);
+    if (!correction.corrected) return text;
+    const capabilities = correction.conflicts.join(",");
+    const message = `Model capability claim contradicted the local Capability Registry and was replaced (${capabilities}).`;
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "CAPABILITY_CLAIM_CORRECTED",
+      payload: { capabilities: correction.conflicts, message },
+    });
+    await this.emit({ type: "guardrail", code: "CAPABILITY_CLAIM_CORRECTED", message });
+    return correction.text;
+  }
+
+  private async recordAssistantResponse(sessionId: string, content: string): Promise<void> {
+    await this.sessionStore.appendRecord(sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content },
+    });
+    await this.eventStore.appendEvent(sessionId, {
+      type: "ASSISTANT_MESSAGE",
+      payload: { content },
+    });
+  }
+
   private async recordUserMessage(state: AgentState, content: string): Promise<void> {
     state.addUserMessage(content);
     await this.sessionStore.appendRecord(state.sessionId, {
       type: "USER_MESSAGE",
-      payload: { content },
+      payload: { content, runId: state.runId },
     });
     await this.eventStore.appendEvent(state.sessionId, {
       type: "USER_MESSAGE",
-      payload: { content },
+      payload: { content, runId: state.runId },
     });
   }
 
@@ -795,7 +1214,7 @@ export class AgentLoop {
       },
     });
 
-    if (isTestCommand(result.command)) {
+    if (result.verification?.level === "TEST") {
       await this.eventStore.appendEvent(sessionId, {
         type: result.success ? "TEST_PASSED" : "TEST_FAILED",
         payload: {
@@ -844,6 +1263,21 @@ export class AgentLoop {
         usageAvailable: batch.usage.usageAvailable,
       },
     });
+    await this.emit({
+      type: "llm",
+      phase: "finished",
+      mode: "subagents",
+      calls: batch.usage.llmCalls,
+      durationMs: batch.durationMs,
+      usage: {
+        usageAvailable: batch.usage.usageAvailable,
+        promptTokens: batch.usage.promptTokens,
+        completionTokens: batch.usage.completionTokens,
+        totalTokens: batch.usage.totalTokens,
+        reasoningTokens: batch.usage.reasoningTokens,
+        cacheReadTokens: batch.usage.cachedPromptTokens,
+      },
+    });
   }
 
   private async recordError(sessionId: string, message: string | null, error?: unknown): Promise<void> {
@@ -861,9 +1295,14 @@ export class AgentLoop {
     });
   }
 
-  private async recordLlmUsage(sessionId: string, metrics: LlmCallMetrics[], mode: string): Promise<void> {
+  private async recordLlmUsage(
+    state: AgentState,
+    metrics: LlmCallMetrics[],
+    mode: string,
+    durationMs: number,
+  ): Promise<void> {
     for (const metric of metrics) {
-      await this.sessionStore.appendRecord(sessionId, {
+      await this.sessionStore.appendRecord(state.sessionId, {
         type: "LLM_USAGE",
         payload: toJsonObject({
           mode,
@@ -874,23 +1313,189 @@ export class AgentLoop {
           completionTokens: metric.usage?.completionTokens ?? null,
           totalTokens: metric.usage?.totalTokens ?? null,
           cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
+          cacheWriteTokens: metric.usage?.cacheWriteTokens ?? null,
           reasoningTokens: metric.usage?.reasoningTokens ?? null,
         }),
       });
     }
+    const aggregate = aggregateLlmMetrics(metrics);
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "LLM_CALL_FINISHED",
+      payload: toJsonObject({
+        mode,
+        step: state.step,
+        calls: metrics.length || 1,
+        durationMs,
+        model: aggregate.model ?? null,
+        finishReason: aggregate.finishReason ?? null,
+        ...aggregate.usage,
+      }),
+    });
+    await this.emit({
+      type: "llm",
+      phase: "finished",
+      mode,
+      calls: metrics.length || 1,
+      durationMs,
+      ...(aggregate.model ? { model: aggregate.model } : {}),
+      ...(aggregate.finishReason ? { finishReason: aggregate.finishReason } : {}),
+      usage: aggregate.usage,
+    });
   }
 
-  private async readFinalDiff(): Promise<string> {
-    const result = await this.patchManager.getDiff().catch(async () => {
-      const git = new GitManager({ repoPath: this.repoPath });
-      return await git.getDiff();
+  private async readFinalDiff(state: AgentState): Promise<string> {
+    if (this.activeTaskDiffBaseline) {
+      const service = new TaskDiffService({ repoPath: this.repoPath });
+      const after = await service.captureWorkingTree().catch(() => undefined);
+      if (after) {
+        const artifact = await service.createArtifact(
+          state.sessionId,
+          this.activeTaskDiffBaseline,
+          after,
+        ).catch(() => undefined);
+        if (artifact) {
+          await this.persistTaskDiffArtifact(state, artifact).catch(() => undefined);
+          return artifact.unifiedDiff;
+        }
+      }
+    }
+    return state.patchResults
+      .filter((result) => result.result.success)
+      .map((result) => result.patch.trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  private async persistTaskDiffArtifact(state: AgentState, artifact: TaskDiffArtifact): Promise<void> {
+    if (artifact.fileCount === 0 || this.activeTaskDiffArtifact) return;
+    await new TaskDiffStore(this.repoPath).save(artifact);
+    this.activeTaskDiffArtifact = artifact;
+    const metadata = taskDiffRecordMetadata(artifact);
+    await this.sessionStore.appendRecord(state.sessionId, {
+      type: "TASK_DIFF",
+      payload: toJsonObject(metadata),
     });
-    return result.diff;
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "CHANGES_READY",
+      payload: toJsonObject(metadata),
+    });
   }
 
   private async emit(event: AgentProgressEvent): Promise<void> {
-    await this.onProgress?.(event);
+    const state = this.activeState;
+    const enriched = {
+      ...event,
+      version: 1 as const,
+      timestamp: new Date().toISOString(),
+      sequence: ++this.progressSequence,
+      ...(state ? { sessionId: state.sessionId, runId: state.runId, step: state.step } : {}),
+    } as AgentProgressEvent;
+    await this.onProgress?.(enriched);
   }
+}
+
+function aggregateLlmMetrics(metrics: LlmCallMetrics[]): {
+  model?: string;
+  finishReason?: string;
+  usage: RuntimeLlmUsage;
+} {
+  const usageMetrics = metrics.flatMap((metric) => metric.usage ? [metric.usage] : []);
+  const sum = (key: keyof NonNullable<LlmCallMetrics["usage"]>): number | undefined => {
+    const values = usageMetrics.map((usage) => usage[key]).filter((value): value is number => value !== undefined);
+    return values.length > 0 ? values.reduce((total, value) => total + value, 0) : undefined;
+  };
+  const promptTokens = sum("promptTokens");
+  const completionTokens = sum("completionTokens");
+  const reportedTotal = sum("totalTokens");
+  const reasoningTokens = sum("reasoningTokens");
+  const cacheReadTokens = sum("cachedPromptTokens");
+  const cacheWriteTokens = sum("cacheWriteTokens");
+  const lastModel = findLastMetricValue(metrics, "model");
+  const lastFinishReason = findLastMetricValue(metrics, "finishReason");
+  return {
+    ...(lastModel ? { model: lastModel } : {}),
+    ...(lastFinishReason ? { finishReason: lastFinishReason } : {}),
+    usage: {
+      usageAvailable: usageMetrics.length > 0,
+      ...(promptTokens === undefined ? {} : { promptTokens }),
+      ...(completionTokens === undefined ? {} : { completionTokens }),
+      ...(reportedTotal === undefined
+        ? promptTokens === undefined || completionTokens === undefined ? {} : { totalTokens: promptTokens + completionTokens }
+        : { totalTokens: reportedTotal }),
+      ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+      ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+      ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+    },
+  };
+}
+
+function findLastMetricValue(metrics: LlmCallMetrics[], key: "model" | "finishReason"): string | undefined {
+  for (let index = metrics.length - 1; index >= 0; index -= 1) {
+    const value = metrics[index]?.[key];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function summarizeToolResult(toolName: string, value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return limitSingleLine(value, 180);
+  if (Array.isArray(value)) return `${String(value.length)} item${value.length === 1 ? "" : "s"}`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (
+      toolName === "read_file"
+      && typeof record.path === "string"
+      && record.hasMore === true
+      && typeof record.startLine === "number"
+      && typeof record.endLine === "number"
+      && typeof record.totalLines === "number"
+    ) {
+      return `${record.path} · partial ${String(record.startLine)}-${String(record.endLine)}/${String(record.totalLines)}`;
+    }
+    for (const key of ["path", "status", "summary", "message"]) {
+      if (typeof record[key] === "string") return limitSingleLine(record[key], 180);
+    }
+    for (const key of ["results", "files", "matches", "entries"]) {
+      if (Array.isArray(record[key])) return `${String(record[key].length)} ${key}`;
+    }
+    return limitSingleLine(JSON.stringify(value), 180);
+  }
+  return String(value);
+}
+
+function previewToolResult(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(redactSecrets(toJsonValue(value)));
+    return serialized.length <= 2_000 ? serialized : `${serialized.slice(0, 1_999)}…`;
+  } catch {
+    return "[unserializable tool result]";
+  }
+}
+
+function readEmbeddingCacheStats(value: unknown): {
+  memoryHits: number;
+  diskHits: number;
+  misses: number;
+  writes: number;
+  coalescedRequests: number;
+} | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const keys = ["memoryHits", "diskHits", "misses", "writes", "coalescedRequests"] as const;
+  if (!keys.every((key) => typeof record[key] === "number" && Number.isFinite(record[key]))) return undefined;
+  return {
+    memoryHits: record.memoryHits as number,
+    diskHits: record.diskHits as number,
+    misses: record.misses as number,
+    writes: record.writes as number,
+    coalescedRequests: record.coalescedRequests as number,
+  };
+}
+
+function limitSingleLine(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length <= maxChars ? normalized : `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 function drainLlmCallMetrics(client: LlmClient): LlmCallMetrics[] {
@@ -913,6 +1518,7 @@ function commandResultToPayload(result: CommandResult): JsonObject {
     timedOut: result.timedOut,
     truncated: result.truncated,
     error: result.error,
+    verification: result.verification,
   });
 }
 
@@ -960,6 +1566,51 @@ function isGitDiffData(value: unknown): value is { diff: string } {
 
 function stableDecisionKey(decision: AgentDecision): string {
   return JSON.stringify(sortJsonValue(decision));
+}
+
+function isRedundantSuccessfulWebToolCall(
+  state: AgentState,
+  toolName: string,
+  input: JsonObject,
+): boolean {
+  if (toolName !== "web_search" && toolName !== "fetch_url") return false;
+  const inputKey = JSON.stringify(sortJsonValue(input));
+  return state.toolResults.some((result) => (
+    result.toolName === toolName
+    && result.result.success
+    && JSON.stringify(sortJsonValue(result.input)) === inputKey
+  ));
+}
+
+function taskDiffRecordMetadata(artifact: TaskDiffArtifact | undefined): Record<string, unknown> {
+  if (!artifact) return {};
+  return {
+    artifactId: artifact.artifactId,
+    fileCount: artifact.fileCount,
+    additions: artifact.additions,
+    deletions: artifact.deletions,
+    changedFiles: artifact.files.map((file) => file.path),
+    files: artifact.files.map((file) => ({
+      path: file.path,
+      changeType: file.changeType,
+      additions: file.additions,
+      deletions: file.deletions,
+      binary: file.binary,
+    })),
+    truncated: artifact.truncated,
+  };
+}
+
+function taskDiffResultMetadata(
+  artifact: TaskDiffArtifact | undefined,
+): Pick<AgentRunResult, "diffArtifactId" | "diffFileCount" | "diffAdditions" | "diffDeletions"> {
+  if (!artifact) return {};
+  return {
+    diffArtifactId: artifact.artifactId,
+    diffFileCount: artifact.fileCount,
+    diffAdditions: artifact.additions,
+    diffDeletions: artifact.deletions,
+  };
 }
 
 function collaborationResultMetadata(state: AgentState): Pick<AgentRunResult, "delegationBatches" | "subAgents"> {

@@ -6,6 +6,7 @@ import {
   type MemoryScope,
   STABLE_MEMORY_KINDS,
 } from "./MemoryTypes.js";
+import { extractChangedPathsFromUnifiedDiff } from "../diff/ChangedPaths.js";
 
 export type MemoryConsumerMode =
   | "AGENT_LOOP"
@@ -107,12 +108,12 @@ export function planSessionMemoryWrite(record: SessionRecord): MemoryWritePlan {
   if (mode !== "AGENT_LOOP") {
     return { store: false, reason: `Mode ${mode || "(missing)"} is not an automatically verified repository outcome.` };
   }
-  if (record.payload.subMode === "REPOSITORY_ANALYSIS") {
-    return { store: false, reason: "Repository analysis is current evidence, not a durable completed change." };
-  }
-
   const finalDiff = typeof record.payload.finalDiff === "string" ? record.payload.finalDiff : "";
-  if (!finalDiff.trim()) {
+  const changedFiles = Array.isArray(record.payload.changedFiles)
+    ? record.payload.changedFiles.filter((file): file is string => typeof file === "string")
+    : [];
+  const artifactId = typeof record.payload.artifactId === "string" ? record.payload.artifactId : "";
+  if (!finalDiff.trim() && (!artifactId || changedFiles.length === 0)) {
     return { store: false, reason: "The task has no repository diff proving a durable outcome." };
   }
   const summary = typeof record.payload.summary === "string" ? record.payload.summary : "";
@@ -123,7 +124,8 @@ export function planSessionMemoryWrite(record: SessionRecord): MemoryWritePlan {
       : "VERIFIED_OUTCOME",
     scope: "REPOSITORY",
     confidence: 0.8,
-    evidenceRefs: extractDiffPaths(finalDiff).map((file) => `file:${file}`),
+    evidenceRefs: (changedFiles.length > 0 ? changedFiles : extractChangedPathsFromUnifiedDiff(finalDiff))
+      .map((file) => `file:${file}`),
     reason: "A successful AgentLoop task with an actual diff is a verified repository outcome.",
   };
 }
@@ -165,10 +167,4 @@ function disabledReadPlan(query: string, reason: string): MemoryReadPlan {
     excludeActiveSession: true,
     reason,
   };
-}
-
-function extractDiffPaths(diff: string): string[] {
-  return [...diff.matchAll(/^\+\+\+ b\/(.+)$/gm)]
-    .map((match) => match[1])
-    .filter((value): value is string => Boolean(value) && value !== "/dev/null");
 }

@@ -6,6 +6,7 @@ import { ensureDir, readJsonFile, resolveMiniAgentPath, writeJsonFileAtomic } fr
 export interface EmbeddingProvider {
   readonly id: string;
   embed(text: string): Promise<number[]>;
+  getCacheStats?(): EmbeddingCacheStats;
 }
 
 export interface EmbeddingCacheStats {
@@ -104,6 +105,10 @@ export class CachedEmbeddingProvider implements EmbeddingProvider {
     return { ...this.stats };
   }
 
+  getCacheStats(): EmbeddingCacheStats {
+    return this.getStats();
+  }
+
   async embed(text: string): Promise<number[]> {
     const textHash = sha256(text);
     const memoryHit = this.readMemory(textHash);
@@ -150,7 +155,7 @@ export class CachedEmbeddingProvider implements EmbeddingProvider {
       vector: [...vector],
       createdAt: new Date().toISOString(),
     };
-    await ensureDir(this.cacheDirectory)
+    await ensureDir(this.cacheDirectory, 0o700)
       .then(async () => await writeJsonFileAtomic(cachePath, record))
       .then(() => { this.stats.writes += 1; })
       .catch(() => undefined);

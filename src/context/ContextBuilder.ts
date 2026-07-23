@@ -4,14 +4,17 @@ import { buildTaskCompletionContract, formatTaskCompletionContract } from "../ag
 import { looksLikeIndexedKnowledgeRequest } from "../agent/TaskRouter.js";
 import { isTestCommand } from "../command/CommandClassification.js";
 import { GitManager } from "../git/GitManager.js";
-import type { ToolSpec } from "../llm/LlmClient.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
-import { planMemoryRead } from "../memory/MemoryPolicy.js";
-import { readSessionMemory } from "../session/SessionMemory.js";
+import { planMemoryRead, type MemoryConsumerMode } from "../memory/MemoryPolicy.js";
+import { readSessionMemoryWithTrace } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
 import { ContextPlanner } from "./ContextPlanner.js";
-import { formatRecentEvidence } from "./ContextEvidence.js";
+import {
+  formatCurrentFileReadCoverage,
+  formatLatestFileChunk,
+  formatRecentEvidence,
+} from "./ContextEvidence.js";
 import type { ContextSectionCandidate, ContextTrace, TaskPhase, WorkingSet } from "./ContextTypes.js";
 import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
@@ -19,6 +22,7 @@ import { RepoScanner } from "./RepoScanner.js";
 import { formatRuntimeContext } from "./RuntimeContext.js";
 import { buildWorkingSet, formatWorkingSet } from "./WorkingSet.js";
 import { formatSubAgentResults } from "../agent/SubAgentTypes.js";
+import { formatAgentTaskContract } from "../agent/AgentTaskContract.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
@@ -46,22 +50,25 @@ export class ContextBuilder {
     return this.lastTrace ? structuredClone(this.lastTrace) : undefined;
   }
 
-  async build(state: AgentState, _availableTools: ToolSpec[] = []): Promise<string> {
+  async build(state: AgentState): Promise<string> {
     const workingSet = buildWorkingSet(state);
     const phase = workingSet.phase;
     const goal = state.userGoal;
-    const needsTree = shouldIncludeTree(goal, phase, workingSet);
-    const needsReadme = shouldIncludeReadme(goal, phase);
-    const needsBuildFiles = shouldIncludeBuildFiles(goal, phase);
-    const needsFilePlacement = shouldIncludeFilePlacement(goal, phase, state);
-    const needsRepoState = phase === "DISCOVERY" || needsFilePlacement;
+    const canReadRepository = state.taskContract.capabilities.repositoryRead;
+    const needsTree = canReadRepository && shouldIncludeTree(goal, phase, workingSet);
+    const needsReadme = canReadRepository && shouldIncludeReadme(goal, phase);
+    const needsBuildFiles = canReadRepository && shouldIncludeBuildFiles(goal, phase);
+    const needsFilePlacement = canReadRepository && shouldIncludeFilePlacement(goal, phase, state);
+    const needsRepoState = canReadRepository && (phase === "DISCOVERY" || needsFilePlacement);
     const knowledgeRequest = looksLikeIndexedKnowledgeRequest(goal);
     const memoryPlan = planMemoryRead({
       query: goal,
-      mode: "AGENT_LOOP",
+      mode: memoryModeForTask(state),
+      needsLiveData: state.taskContract.kind === "WEB_RESEARCH",
       indexedKnowledgeRequest: knowledgeRequest,
     });
     const needsLongTermMemory = memoryPlan.retrieve;
+    const needsSessionMemory = state.taskContract.kind !== "DIRECT_RESPONSE";
 
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
@@ -77,7 +84,7 @@ export class ContextBuilder {
       isGitRepository,
       status,
       diff,
-      sessionMemory,
+      sessionMemoryResult,
       longTermMemory,
       selectedSkills,
     ] = await Promise.all([
@@ -93,12 +100,29 @@ export class ContextBuilder {
       needsBuildFiles
         ? scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
         : Promise.resolve(""),
-      scanner.isGitRepository().catch(() => false),
-      git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`),
-      git.getDiff({ maxChars: 10_000 }).then((result) => result.diff)
-        .catch((error: unknown) => `error: ${errorToText(error)}`),
-      readSessionMemory(sessionStore, state.sessionId, { maxRecords: 60, maxAuxiliaryRecords: 8, maxChars: 10_000 })
-        .catch(() => "(none)"),
+      canReadRepository ? scanner.isGitRepository().catch(() => false) : Promise.resolve(false),
+      canReadRepository
+        ? git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`)
+        : Promise.resolve(""),
+      canReadRepository
+        ? git.getDiff({ maxChars: 10_000 }).then((result) => result.diff)
+          .catch((error: unknown) => `error: ${errorToText(error)}`)
+        : Promise.resolve(""),
+      needsSessionMemory
+        ? readSessionMemoryWithTrace(sessionStore, state.sessionId, {
+          maxRecords: 60,
+          maxAuxiliaryRecords: 8,
+          maxChars: 10_000,
+          excludeRunId: state.runId,
+        })
+          .catch(() => ({
+            memory: "(none)",
+            trace: { totalRecords: 0, usefulRecords: 0, selectedRecords: 0, inputChars: 0, outputChars: 0, estimatedInputTokens: 0, estimatedOutputTokens: 0, compacted: false, excludedCurrentRunRecords: 0, strategy: "passthrough" as const, candidateRecords: 0, droppedRecords: 0, clippedRecords: 0, pinnedRecords: 0, selections: [] },
+          }))
+        : Promise.resolve({
+          memory: "(none)",
+          trace: { totalRecords: 0, usefulRecords: 0, selectedRecords: 0, inputChars: 0, outputChars: 0, estimatedInputTokens: 0, estimatedOutputTokens: 0, compacted: false, excludedCurrentRunRecords: 0, strategy: "passthrough" as const, candidateRecords: 0, droppedRecords: 0, clippedRecords: 0, pinnedRecords: 0, selections: [] },
+        }),
       needsLongTermMemory
           ? memoryContextService.build({
             query: memoryPlan.query,
@@ -115,6 +139,8 @@ export class ContextBuilder {
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
 
+    const sessionMemory = sessionMemoryResult.memory;
+
     const repoState = repoStateDetails === undefined
       ? ""
       : hasErrorRecord(repoStateDetails)
@@ -129,6 +155,8 @@ export class ContextBuilder {
           .catch((error: unknown) => `error: ${errorToText(error)}`);
     const diagnostics = formatDiagnostics(state);
     const recentEvidence = formatRecentEvidence(state, phase);
+    const activeFileChunk = formatLatestFileChunk(state);
+    const fileReadCoverage = formatCurrentFileReadCoverage(state);
     const completionContract = formatTaskCompletionContract(
       buildTaskCompletionContract(state),
       state.getCompletionEvidence(),
@@ -150,7 +178,10 @@ export class ContextBuilder {
       filePlacement,
       diagnostics,
       recentEvidence,
+      activeFileChunk,
+      fileReadCoverage,
       completionContract,
+      agentTaskContract: formatAgentTaskContract(state.taskContract),
       needsTree,
       needsReadme,
       needsBuildFiles,
@@ -158,10 +189,36 @@ export class ContextBuilder {
       needsLongTermMemory,
     });
     const plan = this.planner.plan(phase, candidates);
+    plan.trace.sessionMemory = {
+      totalRecords: sessionMemoryResult.trace.totalRecords,
+      selectedRecords: sessionMemoryResult.trace.selectedRecords,
+      estimatedInputTokens: sessionMemoryResult.trace.estimatedInputTokens,
+      estimatedOutputTokens: sessionMemoryResult.trace.estimatedOutputTokens,
+      compacted: sessionMemoryResult.trace.compacted,
+      excludedCurrentRunRecords: sessionMemoryResult.trace.excludedCurrentRunRecords,
+      strategy: sessionMemoryResult.trace.strategy,
+      candidateRecords: sessionMemoryResult.trace.candidateRecords,
+      droppedRecords: sessionMemoryResult.trace.droppedRecords,
+      clippedRecords: sessionMemoryResult.trace.clippedRecords,
+      pinnedRecords: sessionMemoryResult.trace.pinnedRecords,
+      selections: sessionMemoryResult.trace.selections,
+    };
+    const embeddingCache = memoryContextService.getEmbeddingCacheStats();
+    if (embeddingCache) {
+      plan.trace.embeddingCache = embeddingCache;
+    }
     this.lastTrace = plan.trace;
     await this.onTrace?.(plan.trace);
     return plan.context;
   }
+}
+
+function memoryModeForTask(state: AgentState): MemoryConsumerMode {
+  if (state.taskContract.kind === "DIRECT_RESPONSE") return "DIRECT_ANSWER";
+  if (state.taskContract.kind === "WEB_RESEARCH") return "WEB_ANSWER";
+  if (state.taskContract.outputKind === "CODE_REVIEW") return "CODE_REVIEW";
+  if (state.taskContract.outputKind === "REPOSITORY_ANALYSIS") return "REPOSITORY_ANALYSIS";
+  return "AGENT_LOOP";
 }
 
 function buildCandidates(input: {
@@ -180,7 +237,10 @@ function buildCandidates(input: {
   filePlacement: string;
   diagnostics: string;
   recentEvidence: string;
+  activeFileChunk: string;
+  fileReadCoverage: string;
   completionContract: string;
+  agentTaskContract: string;
   needsTree: boolean;
   needsReadme: boolean;
   needsBuildFiles: boolean;
@@ -198,6 +258,8 @@ function buildCandidates(input: {
     && input.longTermMemory !== "(none)"
     && input.longTermMemory !== "(not requested for the current task)";
   const hasDelegationEvidence = input.state.delegationBatches.length > 0;
+  const hasFileReadCoverage = input.state.getFileReadCoverage().length > 0;
+  const hasActiveFileChunk = input.activeFileChunk.length > 0;
 
   return [
     {
@@ -220,6 +282,16 @@ function buildCandidates(input: {
       maxTokens: 1_100,
       retention: "head_tail",
       reason: `Structured task state for the ${phase} phase.`,
+    },
+    {
+      id: "agent_task_contract",
+      title: "Agent task contract",
+      content: input.agentTaskContract,
+      priority: 89,
+      stable: true,
+      maxTokens: 420,
+      retention: "head_tail",
+      reason: "The task contract defines the enabled capabilities, evidence threshold, and required output shape.",
     },
     {
       id: "completion_contract",
@@ -252,6 +324,29 @@ function buildCandidates(input: {
       maxTokens: 1_800,
       retention: "head_tail",
       reason: "The current repository changes are primary evidence for implementation and verification.",
+    },
+    {
+      id: "active_file_chunk",
+      title: "Active file chunk",
+      content: input.activeFileChunk,
+      priority: 97,
+      required: hasActiveFileChunk,
+      enabled: hasActiveFileChunk,
+      maxTokens: 4_300,
+      retention: "head_tail",
+      reason: "The most recently read source chunk must remain directly visible for the next model decision.",
+    },
+    {
+      id: "file_read_coverage",
+      title: "File read coverage",
+      content: input.fileReadCoverage,
+      priority: 96,
+      required: input.state.taskContract.evidence.completeFileRead && hasFileReadCoverage,
+      enabled: hasFileReadCoverage,
+      stable: false,
+      maxTokens: 500,
+      retention: "head_tail",
+      reason: "Line-range coverage shows whether a target file has actually been read to EOF and where pagination must continue.",
     },
     {
       id: "recent_evidence",
@@ -443,7 +538,10 @@ function summarizePatchFailures(state: AgentState): string {
 
 function summarizeTestFailures(state: AgentState): string {
   const failures = state.commandResults
-    .filter((result) => !result.success && isTestCommand(result.command))
+    .filter((result) => !result.success && (
+      result.verification?.level === "TEST"
+      || (result.verification === undefined && isTestCommand(result.command))
+    ))
     .slice(-3)
     .map((result) => [
       `command: ${result.command}`,

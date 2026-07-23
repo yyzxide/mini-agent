@@ -1,4 +1,5 @@
 import { truncateText } from "../utils/fs.js";
+import type { EmbeddingCacheStats } from "./EmbeddingProvider.js";
 import { formatLongTermMemoryResults, LongTermMemoryStore } from "./LongTermMemoryStore.js";
 import type { MemoryKind, MemoryScope } from "./MemoryTypes.js";
 
@@ -7,6 +8,10 @@ export class MemoryContextService {
 
   constructor(options: { repoPath: string }) {
     this.store = new LongTermMemoryStore(options);
+  }
+
+  getEmbeddingCacheStats(): EmbeddingCacheStats | undefined {
+    return this.store.getEmbeddingCacheStats();
   }
 
   async build(input: {

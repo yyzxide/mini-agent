@@ -85,12 +85,15 @@ export async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
-export async function ensureDir(directoryPath: string): Promise<void> {
-  await fs.mkdir(directoryPath, { recursive: true });
+export async function ensureDir(directoryPath: string, mode?: number): Promise<void> {
+  await fs.mkdir(directoryPath, { recursive: true, ...(mode === undefined ? {} : { mode }) });
+  if (mode !== undefined) {
+    await fs.chmod(directoryPath, mode);
+  }
 }
 
 export async function appendJsonLine(filePath: string, value: unknown): Promise<void> {
-  await fs.appendFile(filePath, `${JSON.stringify(value)}\n`, "utf8");
+  await fs.appendFile(filePath, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 export async function readJsonLines<T>(filePath: string): Promise<T[]> {
@@ -113,6 +116,8 @@ export async function readJsonLines<T>(filePath: string): Promise<T[]> {
     try {
       records.push(JSON.parse(line) as T);
     } catch (error) {
+      const isTrailingPartialLine = index === lines.length - 1 && !content.endsWith("\n");
+      if (isTrailingPartialLine) break;
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Invalid JSONL at ${filePath}:${index + 1}: ${message}`);
     }
@@ -141,8 +146,54 @@ export async function writeJsonFileAtomic(filePath: string, value: unknown): Pro
   const directoryPath = path.dirname(filePath);
   const tempPath = path.join(directoryPath, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`);
 
-  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await fs.rename(tempPath, filePath);
+}
+
+export async function hardenPrivateTree(rootPath: string): Promise<void> {
+  const stat = await fs.lstat(rootPath).catch(() => undefined);
+  if (!stat || stat.isSymbolicLink()) return;
+  if (!stat.isDirectory()) {
+    await fs.chmod(rootPath, 0o600);
+    return;
+  }
+  await fs.chmod(rootPath, 0o700);
+  const entries = await fs.readdir(rootPath, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    if (entry.isSymbolicLink()) return;
+    await hardenPrivateTree(path.join(rootPath, entry.name));
+  }));
+}
+
+export async function withFileLock<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  let handle: fs.FileHandle | undefined;
+  while (!handle) {
+    try {
+      handle = await fs.open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      const stat = await fs.stat(lockPath).catch(() => undefined);
+      if (stat && Date.now() - stat.mtimeMs > 30_000) {
+        await fs.unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`Timed out waiting for file lock: ${lockPath}`);
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    await fs.unlink(lockPath).catch(() => undefined);
+  }
 }
 
 export function truncateText(

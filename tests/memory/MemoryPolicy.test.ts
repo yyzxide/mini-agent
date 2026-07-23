@@ -28,6 +28,17 @@ describe("MemoryPolicy", () => {
       scope: "REPOSITORY",
       evidenceRefs: ["file:src/context/cache.ts"],
     });
+
+    expect(planSessionMemoryWrite(summary({
+      success: true,
+      mode: "AGENT_LOOP",
+      summary: "更新缓存实现",
+      artifactId: "artifact-1",
+      changedFiles: ["src/context/cache.ts"],
+    }))).toMatchObject({
+      store: true,
+      evidenceRefs: ["file:src/context/cache.ts"],
+    });
   });
 
   it("separates stable repository memory from explicit historical recall", () => {

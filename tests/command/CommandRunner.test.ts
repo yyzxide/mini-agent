@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { classifyVerificationCommandInput } from "../../src/command/CommandClassification.js";
 import { CommandRunner, isHighRiskCommandInput } from "../../src/command/CommandRunner.js";
 
 let repoPath: string;
@@ -39,6 +40,24 @@ describe("CommandRunner", () => {
     const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stderr.write('err')"] });
 
     expect(result.stderr).toBe("err");
+  });
+
+  it("streams stdout and stderr while retaining the bounded result", async () => {
+    const runner = new CommandRunner({ repoPath });
+    const chunks: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write('live-out'); process.stderr.write('live-err')"],
+    }, {
+      onOutput: (event) => { chunks.push(event); },
+    });
+
+    expect(result.success).toBe(true);
+    expect(chunks.some((event) => event.stream === "stdout" && event.chunk.includes("live-out"))).toBe(true);
+    expect(chunks.some((event) => event.stream === "stderr" && event.chunk.includes("live-err"))).toBe(true);
+    expect(result.stdout).toContain("live-out");
+    expect(result.stderr).toContain("live-err");
   });
 
   it("returns a non-zero exit code without throwing", async () => {
@@ -106,5 +125,18 @@ describe("CommandRunner", () => {
   it("does not mark ordinary structured commands as high risk", () => {
     expect(isHighRiskCommandInput({ executable: "git", args: ["status", "--short"] })).toBe(false);
     expect(isHighRiskCommandInput({ executable: "pnpm", args: ["test"] })).toBe(false);
+  });
+
+  it("requires explicit approval for destructive, publishing, and outbound commands", () => {
+    expect(isHighRiskCommandInput({ executable: "rm", args: ["-rf", "src"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "git", args: ["push", "origin", "main"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "npm", args: ["publish"] })).toBe(true);
+    expect(isHighRiskCommandInput({ executable: "curl", args: ["https://example.com"] })).toBe(true);
+  });
+
+  it("does not treat verification-looking arguments to unrelated executables as evidence", () => {
+    expect(classifyVerificationCommandInput({ executable: "echo", args: ["npm", "test"] }).level).toBe("NONE");
+    expect(classifyVerificationCommandInput({ executable: "printf", args: ["pytest"] }).level).toBe("NONE");
+    expect(classifyVerificationCommandInput({ executable: "npm", args: ["test"] }).level).toBe("TEST");
   });
 });

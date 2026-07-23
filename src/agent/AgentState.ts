@@ -1,4 +1,5 @@
 import type { CommandResult } from "../command/CommandRunner.js";
+import { extractChangedPathsFromUnifiedDiff } from "../diff/ChangedPaths.js";
 import type { JsonObject } from "../session/SessionTypes.js";
 import type { ToolResult } from "../tools/Tool.js";
 import type { AgentDecision } from "./AgentDecision.js";
@@ -10,6 +11,13 @@ import {
   type VerificationLevel,
 } from "../command/CommandClassification.js";
 import type { SubAgentBatchResult } from "./SubAgentTypes.js";
+import { createDefaultAgentTaskContract } from "./AgentTaskContract.js";
+import type { AgentTaskContract } from "./AgentTaskContract.js";
+import {
+  mergeFileReadCoverageList,
+  parseReadFileResultData,
+  type FileReadCoverage,
+} from "./FileReadCoverage.js";
 
 export type AgentStatus = "RUNNING" | "WAITING_USER" | "FINISHED" | "FAILED";
 
@@ -51,6 +59,9 @@ export interface AgentStateSnapshot {
   recoveredRepositoryChanges: boolean;
   multiAgentEnabled: boolean;
   delegationResultCount: number;
+  taskKind: AgentTaskContract["kind"];
+  outputKind: AgentTaskContract["outputKind"];
+  fileReadCoverage: FileReadCoverage[];
 }
 
 export interface AgentStateOptions {
@@ -62,6 +73,7 @@ export interface AgentStateOptions {
   operatingMode?: AgentOperatingMode;
   recoveredCheckpoint?: AgentCheckpoint;
   multiAgentEnabled?: boolean;
+  taskContract?: AgentTaskContract;
 }
 
 export interface AgentVerificationOutcome {
@@ -105,7 +117,9 @@ export class AgentState {
   readonly operatingMode: AgentOperatingMode;
   readonly recoveredCheckpoint: AgentCheckpoint | undefined;
   readonly multiAgentEnabled: boolean;
+  readonly taskContract: AgentTaskContract;
   delegationBatches: SubAgentBatchResult[] = [];
+  private fileReadCoverage: FileReadCoverage[] = [];
   private readonly executionActions: AgentExecutionAction[] = [];
 
   constructor(options: AgentStateOptions) {
@@ -117,7 +131,9 @@ export class AgentState {
     this.operatingMode = options.operatingMode ?? "EXECUTE";
     this.recoveredCheckpoint = options.recoveredCheckpoint;
     this.multiAgentEnabled = options.multiAgentEnabled ?? false;
+    this.taskContract = options.taskContract ?? createDefaultAgentTaskContract();
     this.delegationBatches = structuredClone(options.recoveredCheckpoint?.collaboration?.batches ?? []);
+    this.fileReadCoverage = structuredClone(options.recoveredCheckpoint?.effects.fileReadCoverage ?? []);
   }
 
   addUserMessage(content: string): void {
@@ -134,11 +150,21 @@ export class AgentState {
 
   addToolResult(result: AgentToolExecutionResult): void {
     this.toolResults.push(result);
+    if (result.toolName === "read_file" && result.result.success) {
+      const read = parseReadFileResultData(result.result.data);
+      if (read) {
+        this.fileReadCoverage = mergeFileReadCoverageList(this.fileReadCoverage, read);
+      }
+    }
+  }
+
+  getFileReadCoverage(): FileReadCoverage[] {
+    return structuredClone(this.fileReadCoverage);
   }
 
   addCommandResult(result: CommandResult): void {
     this.commandResults.push(result);
-    const classification = classifyVerificationCommand(result.command);
+    const classification = result.verification ?? classifyVerificationCommand(result.command);
     this.executionActions.push({
       kind: "COMMAND",
       classification,
@@ -156,6 +182,11 @@ export class AgentState {
   addPatchResult(result: AgentPatchExecutionResult): void {
     this.patchResults.push(result);
     this.executionActions.push({ kind: "PATCH", success: result.result.success });
+    if (result.result.success) {
+      const changed = new Set(readStructuredChangedFiles(result.result.data)
+        ?? extractChangedPathsFromUnifiedDiff(result.patch));
+      this.fileReadCoverage = this.fileReadCoverage.filter((entry) => !changed.has(entry.path));
+    }
   }
 
   addDelegationBatch(result: SubAgentBatchResult): void {
@@ -256,8 +287,24 @@ export class AgentState {
       recoveredRepositoryChanges: this.recoveredCheckpoint?.effects.successfulPatch === true,
       multiAgentEnabled: this.multiAgentEnabled,
       delegationResultCount: this.delegationBatches.length,
+      taskKind: this.taskContract.kind,
+      outputKind: this.taskContract.outputKind,
+      fileReadCoverage: this.getFileReadCoverage(),
     };
   }
+}
+
+function readStructuredChangedFiles(value: unknown): string[] | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("changedFiles" in value)) {
+    return undefined;
+  }
+  const changedFiles = (value as { changedFiles?: unknown }).changedFiles;
+  if (!Array.isArray(changedFiles)) return undefined;
+  return changedFiles.flatMap((file) => (
+    typeof file === "object" && file !== null && !Array.isArray(file) && typeof file.path === "string"
+      ? [file.path.replaceAll("\\", "/")]
+      : []
+  ));
 }
 
 function normalizeVerificationOutcome(outcome: {

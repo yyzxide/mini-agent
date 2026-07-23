@@ -50,13 +50,10 @@ export class ApplyPatchTool implements Tool<ApplyPatchInput, ApplyPatchData> {
 
     try {
       const preview = await patchManager.previewPatch({ patch: input.patch });
-      const startedResult = await appendEvent(context, "PATCH_APPLY_STARTED", {
+      await appendEvent(context, "PATCH_APPLY_STARTED", {
         summary: preview.summary,
         files: toJsonValue(preview.files),
       });
-      if (startedResult) {
-        return startedResult;
-      }
 
       const permissionManager = context.permissionManager ?? new PermissionManager();
       const permissionInput = {
@@ -92,22 +89,16 @@ export class ApplyPatchTool implements Tool<ApplyPatchInput, ApplyPatchData> {
         changedFiles: applyResult.changedFiles,
       };
 
-      const fileRecordResult = await appendRecord(context, "FILE_CHANGE", {
+      await appendRecord(context, "FILE_CHANGE", {
         files: toJsonValue(applyResult.changedFiles),
         diff: applyResult.diff,
       });
-      if (fileRecordResult) {
-        return fileRecordResult;
-      }
 
-      const finishedResult = await appendEvent(context, "PATCH_APPLY_FINISHED", {
+      await appendEvent(context, "PATCH_APPLY_FINISHED", {
         success: true,
         applied: true,
         changedFiles: toJsonValue(applyResult.changedFiles),
       });
-      if (finishedResult) {
-        return finishedResult;
-      }
 
       return toolSuccess(data);
     } catch (error) {

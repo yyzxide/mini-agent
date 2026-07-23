@@ -3,11 +3,13 @@ import { MiniAgentError } from "../utils/errors.js";
 import {
   appendJsonLine,
   ensureDir,
+  hardenPrivateTree,
   normalizeRepoPath,
   readJsonFile,
   readJsonLines,
   resolveMiniAgentPath,
   writeJsonFileAtomic,
+  withFileLock,
 } from "../utils/fs.js";
 import type {
   EventRecord,
@@ -24,6 +26,8 @@ export interface EventStoreOptions {
 export class EventStore {
   readonly repoPath: string;
   private readonly onEvent: ((event: EventRecord) => void | Promise<void>) | undefined;
+  private initialized = false;
+  private initialization: Promise<void> | undefined;
 
   constructor(options: EventStoreOptions) {
     this.repoPath = normalizeRepoPath(options.repoPath);
@@ -31,8 +35,23 @@ export class EventStore {
   }
 
   async init(): Promise<void> {
-    await ensureDir(resolveMiniAgentPath(this.repoPath));
-    await ensureDir(resolveMiniAgentPath(this.repoPath, "events"));
+    if (this.initialized) return;
+    if (!this.initialization) {
+      this.initialization = this.initialize();
+    }
+    try {
+      await this.initialization;
+    } catch (error) {
+      this.initialization = undefined;
+      throw error;
+    }
+  }
+
+  private async initialize(): Promise<void> {
+    await ensureDir(resolveMiniAgentPath(this.repoPath), 0o700);
+    await ensureDir(resolveMiniAgentPath(this.repoPath, "events"), 0o700);
+    await hardenPrivateTree(resolveMiniAgentPath(this.repoPath));
+    this.initialized = true;
   }
 
   async appendEvent<TPayload extends JsonObject = JsonObject>(
@@ -58,7 +77,12 @@ export class EventStore {
     }
 
     await this.incrementEventCount(sessionId, event.timestamp);
-    await this.onEvent?.(event);
+    try {
+      await this.onEvent?.(event);
+    } catch {
+      // The event is already durably recorded. A presentation/observer failure
+      // must not make the underlying operation appear to have failed.
+    }
     return event;
   }
 
@@ -107,27 +131,19 @@ export class EventStore {
   }
 
   private async incrementEventCount(sessionId: string, updatedAt: string): Promise<void> {
-    const index = await this.readIndex();
-    let found = false;
-
-    const sessions = index.sessions.map((session) => {
-      if (session.sessionId !== sessionId) {
-        return session;
+    await withFileLock(resolveMiniAgentPath(this.repoPath, "index.lock"), async () => {
+      const index = await this.readIndex();
+      let found = false;
+      const sessions = index.sessions.map((session) => {
+        if (session.sessionId !== sessionId) return session;
+        found = true;
+        return { ...session, updatedAt, eventCount: session.eventCount + 1 };
+      });
+      if (!found) {
+        throw new MiniAgentError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`, { sessionId });
       }
-
-      found = true;
-      return {
-        ...session,
-        updatedAt,
-        eventCount: session.eventCount + 1,
-      };
+      await writeJsonFileAtomic(this.indexPath(), { ...index, sessions });
     });
-
-    if (!found) {
-      throw new MiniAgentError("SESSION_NOT_FOUND", `Session not found: ${sessionId}`, { sessionId });
-    }
-
-    await writeJsonFileAtomic(this.indexPath(), { ...index, sessions });
   }
 
   private assertValidSessionId(sessionId: string): void {

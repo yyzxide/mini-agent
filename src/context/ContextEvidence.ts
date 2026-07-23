@@ -1,6 +1,10 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { TaskPhase } from "./ContextTypes.js";
+import {
+  formatFileReadCoverage,
+  parseReadFileResultData,
+} from "../agent/FileReadCoverage.js";
 
 export function formatRecentEvidence(state: AgentState, phase: TaskPhase): string {
   const decisions = state.decisions.slice(-3).map(formatDecision);
@@ -9,7 +13,9 @@ export function formatRecentEvidence(state: AgentState, phase: TaskPhase): strin
       `${result.result.success ? "SUCCESS" : "FAILURE"} tool:${result.toolName}`,
       `input: ${safeJson(result.input, 600, "head")}`,
       result.result.success
-        ? `result: ${safeJson(result.result.data ?? null, 2_400, result.toolName === "read_file" ? "head_tail" : "head")}`
+        ? `result: ${result.toolName === "read_file"
+          ? formatReadFileResultSummary(result.result.data)
+          : safeJson(result.result.data ?? null, 2_400, "head")}`
         : `error: ${result.result.error?.message ?? "unknown tool failure"}`,
     ].join("\n"));
   const commandResults = prioritizeByFailure(state.commandResults.slice(-4), phase)
@@ -32,6 +38,47 @@ export function formatRecentEvidence(state: AgentState, phase: TaskPhase): strin
     formatGroup("Recent command evidence", commandResults),
     formatGroup("Recent patch evidence", patchResults),
   ].join("\n\n");
+}
+
+export function formatLatestFileChunk(state: AgentState): string {
+  const latest = [...state.toolResults].reverse()
+    .find((result) => result.toolName === "read_file" && result.result.success);
+  const read = parseReadFileResultData(latest?.result.data);
+  if (!read) return "";
+  const currentCoverage = state.getFileReadCoverage()
+    .find((entry) => entry.path === read.path);
+  if (!currentCoverage || (
+    read.sourceVersion !== undefined
+    && currentCoverage.sourceVersion !== undefined
+    && read.sourceVersion !== currentCoverage.sourceVersion
+  )) {
+    return "";
+  }
+  return [
+    `File: ${read.path}`,
+    `Lines: ${String(read.startLine)}-${String(read.endLine)} of ${String(read.totalLines)}`,
+    `Estimated tokens: ${String(read.estimatedTokens ?? "unreported")}`,
+    `More available: ${read.hasMore === true ? `yes; continue at line ${String(read.nextStartLine ?? read.endLine + 1)}, column ${String(read.nextStartColumn ?? 1)}` : "no"}`,
+    "Content:",
+    read.content,
+  ].join("\n");
+}
+
+export function formatCurrentFileReadCoverage(state: AgentState): string {
+  return formatFileReadCoverage(state.getFileReadCoverage());
+}
+
+function formatReadFileResultSummary(value: unknown): string {
+  const read = parseReadFileResultData(value);
+  if (!read) return safeJson(value ?? null, 800, "head");
+  return [
+    `${read.path}:${String(read.startLine)}-${String(read.endLine)}/${String(read.totalLines)}`,
+    read.hasMore === true
+      ? `partial; nextStartLine=${String(read.nextStartLine ?? read.endLine + 1)}; nextStartColumn=${String(read.nextStartColumn ?? 1)}`
+      : "complete chunk reaches EOF",
+    `estimatedTokens=${String(read.estimatedTokens ?? "unreported")}`,
+    "(source content is provided once in the Active file chunk section)",
+  ].join("; ");
 }
 
 function formatDecision(decision: AgentDecision): string {

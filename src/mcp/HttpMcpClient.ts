@@ -12,11 +12,24 @@ export class HttpMcpClient implements McpClient {
   private nextId = 1;
   private connected = false;
   private sessionId: string | undefined;
+  private connection: Promise<void> | undefined;
 
   constructor(private readonly config: McpServerConfig) {}
 
   async connect(): Promise<void> {
     if (this.connected) return;
+    if (!this.connection) {
+      this.connection = this.startConnection();
+    }
+    try {
+      await this.connection;
+    } catch (error) {
+      this.connection = undefined;
+      throw error;
+    }
+  }
+
+  private async startConnection(): Promise<void> {
     await this.request(initializeRequest(this.nextId++));
     await this.notify("notifications/initialized");
     this.connected = true;
@@ -36,14 +49,19 @@ export class HttpMcpClient implements McpClient {
   }
 
   async close(): Promise<void> {
-    if (!this.config.url || !this.sessionId) return;
-    await fetch(this.config.url, {
-      method: "DELETE",
-      headers: this.headers(),
-      signal: AbortSignal.timeout(this.config.timeoutMs),
-    }).catch(() => undefined);
-    this.connected = false;
-    this.sessionId = undefined;
+    try {
+      if (this.config.url && this.sessionId) {
+        await fetch(this.config.url, {
+          method: "DELETE",
+          headers: this.headers(),
+          signal: AbortSignal.timeout(this.config.timeoutMs),
+        }).catch(() => undefined);
+      }
+    } finally {
+      this.connected = false;
+      this.sessionId = undefined;
+      this.connection = undefined;
+    }
   }
 
   private makeRequest(method: string, params?: Record<string, unknown>): JsonRpcRequest {
@@ -74,7 +92,7 @@ export class HttpMcpClient implements McpClient {
     });
     const returnedSessionId = response.headers.get("mcp-session-id");
     if (returnedSessionId) this.sessionId = returnedSessionId;
-    if (!response.ok) throw new Error(`MCP HTTP ${response.status}: ${await response.text()}`);
+    if (!response.ok) throw new Error(`MCP HTTP ${response.status}: ${await readBoundedText(response)}`);
     if (response.status === 202 || response.status === 204) return { jsonrpc: "2.0" };
     return await parseHttpResponse(response, "id" in message ? message.id : undefined);
   }
@@ -91,7 +109,7 @@ export class HttpMcpClient implements McpClient {
 async function parseHttpResponse(response: Response, requestId?: number): Promise<JsonRpcResponse> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (contentType.includes("text/event-stream")) {
-    const body = await response.text();
+    const body = await readBoundedText(response);
     const messages = body.split(/\r?\n\r?\n/)
       .flatMap((event) => event.split(/\r?\n/).filter((line) => line.startsWith("data:")))
       .map((line) => line.slice(5).trim())
@@ -99,5 +117,31 @@ async function parseHttpResponse(response: Response, requestId?: number): Promis
       .map((line) => JSON.parse(line) as JsonRpcResponse);
     return messages.find((message) => message.id === requestId) ?? messages.at(-1) ?? { jsonrpc: "2.0" };
   }
-  return await response.json() as JsonRpcResponse;
+  return JSON.parse(await readBoundedText(response)) as JsonRpcResponse;
+}
+
+async function readBoundedText(response: Response, maxBytes = 1_000_000): Promise<string> {
+  if (!response.body) return (await response.text()).slice(0, maxBytes);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = maxBytes - bytes;
+      const chunk = value.subarray(0, remaining);
+      bytes += chunk.length;
+      output += decoder.decode(chunk, { stream: bytes < maxBytes });
+      if (value.length > remaining) {
+        await reader.cancel();
+        break;
+      }
+    }
+    output += decoder.decode();
+    return output;
+  } finally {
+    reader.releaseLock();
+  }
 }

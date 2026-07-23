@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
+import { sanitizeChildProcessEnv } from "../command/CommandRunner.js";
 import type { McpCallToolResult, McpRemoteTool, McpServerConfig } from "./McpTypes.js";
 import {
   initializeRequest,
@@ -23,30 +24,60 @@ export class StdioMcpClient implements McpClient {
   private output: Interface | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
+  private connected = false;
+  private connection: Promise<void> | undefined;
+  private stderrTail = "";
 
   constructor(private readonly config: McpServerConfig) {}
 
   async connect(): Promise<void> {
-    if (this.process) return;
+    if (this.connected) return;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!this.connection) {
+        this.connection = this.startConnection();
+      }
+      try {
+        await this.connection;
+        return;
+      } catch (error) {
+        await this.close();
+        if (attempt === 1) throw error;
+      }
+    }
+  }
+
+  private async startConnection(): Promise<void> {
     if (!this.config.command) throw new Error(`MCP server ${this.config.name} has no stdio command`);
 
     const child = spawn(this.config.command, this.config.args, {
       cwd: process.cwd(),
-      env: { ...process.env, ...this.config.env },
+      env: sanitizeChildProcessEnv(this.config.env),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
     this.process = child;
+    this.stderrTail = "";
     this.output = createInterface({ input: child.stdout });
     this.output.on("line", (line) => this.handleLine(line));
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      // Drain stderr so a verbose MCP server cannot deadlock on pipe backpressure,
+      // while retaining a bounded diagnostic tail for unexpected exits.
+      this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-4_000);
+    });
     child.once("error", (error) => this.failAll(error));
     child.once("exit", (code, signal) => {
-      this.failAll(new Error(`MCP server ${this.config.name} exited (${code ?? signal ?? "unknown"})`));
+      const diagnostic = this.stderrTail.trim();
+      this.failAll(new Error(
+        `MCP server ${this.config.name} exited (${code ?? signal ?? "unknown"})${diagnostic ? `: ${diagnostic}` : ""}`,
+      ));
       this.process = undefined;
+      this.connected = false;
+      this.connection = undefined;
     });
 
     await this.request(initializeRequest(this.nextId++));
     this.notify("notifications/initialized");
+    this.connected = true;
   }
 
   async listTools(): Promise<McpRemoteTool[]> {
@@ -67,6 +98,8 @@ export class StdioMcpClient implements McpClient {
     this.output = undefined;
     const child = this.process;
     this.process = undefined;
+    this.connected = false;
+    this.connection = undefined;
     if (!child || child.exitCode !== null) return;
     child.kill();
     await new Promise<void>((resolve) => {

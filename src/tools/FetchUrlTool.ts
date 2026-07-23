@@ -1,10 +1,13 @@
 import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import { z } from "zod";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
+import { formatNetworkError } from "../utils/network.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 30_000;
@@ -12,6 +15,15 @@ const DEFAULT_MAX_BYTES = 200_000;
 const HARD_MAX_BYTES = 1_000_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
 const MAX_REDIRECTS = 5;
+type TestFetchTransport = (url: URL, signal: AbortSignal) => Promise<Response>;
+let testFetchTransport: TestFetchTransport | undefined;
+
+export function setFetchUrlTransportForTesting(transport: TestFetchTransport | undefined): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Fetch URL test transport can only be configured in the test environment");
+  }
+  testFetchTransport = transport;
+}
 
 const fetchUrlInputSchema = z.object({
   url: z.string().trim().url(),
@@ -63,6 +75,9 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
         protocol: parsedUrl.protocol,
       });
     }
+    if (parsedUrl.username || parsedUrl.password) {
+      return toolFailure("URL_CREDENTIALS_NOT_ALLOWED", "Credentials embedded in URLs are not allowed");
+    }
 
     if (isBlockedNetworkTarget(parsedUrl.hostname)) {
       return toolFailure("BLOCKED_NETWORK_TARGET", "Refusing to fetch localhost or private network targets", {
@@ -90,7 +105,7 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
     const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
 
     try {
-      const fetched = await fetchWithValidatedRedirects(parsedUrl, controller.signal);
+      const fetched = await fetchWithValidatedRedirects(parsedUrl, controller.signal, input.maxBytes);
       const response = fetched.response;
 
       const contentType = response.headers.get("content-type") ?? "";
@@ -157,7 +172,7 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
         });
       }
 
-      return toolFailure("FETCH_URL_FAILED", error instanceof Error ? error.message : "URL fetch failed", {
+      return toolFailure("FETCH_URL_FAILED", formatNetworkError(error, "URL fetch failed"), {
         url: parsedUrl.toString(),
       });
     } finally {
@@ -166,24 +181,18 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
   }
 }
 
-async function fetchWithValidatedRedirects(startUrl: URL, signal: AbortSignal): Promise<{
-  response: Response;
-  finalUrl: URL;
-}> {
+async function fetchWithValidatedRedirects(
+  startUrl: URL,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<{ response: Response; finalUrl: URL }> {
   let currentUrl = startUrl;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    await assertPublicHttpUrl(currentUrl);
-
-    const response = await fetch(currentUrl, {
-      method: "GET",
-      redirect: "manual",
-      signal,
-      headers: {
-        "accept": "text/html,application/xhtml+xml,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
-        "user-agent": "mini-coding-agent/0.1",
-      },
-    });
+    const addresses = await resolvePublicHttpAddresses(currentUrl);
+    const response = testFetchTransport
+      ? await testFetchTransport(currentUrl, signal)
+      : await requestPinned(currentUrl, addresses[0]!, signal, maxBytes + 1);
 
     if (!isRedirectStatus(response.status)) {
       return { response, finalUrl: currentUrl };
@@ -205,9 +214,17 @@ async function fetchWithValidatedRedirects(startUrl: URL, signal: AbortSignal): 
   throw new TooManyRedirectsError(`URL redirected more than ${MAX_REDIRECTS} times`);
 }
 
-async function assertPublicHttpUrl(url: URL): Promise<void> {
+export interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+async function resolvePublicHttpAddresses(url: URL): Promise<ResolvedAddress[]> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new UnsupportedRedirectError(`Unsupported protocol: ${url.protocol}`, url.toString());
+  }
+  if (url.username || url.password) {
+    throw new UnsupportedRedirectError("Credentials embedded in redirect URLs are not allowed", url.toString());
   }
 
   if (isBlockedNetworkTarget(url.hostname)) {
@@ -215,8 +232,9 @@ async function assertPublicHttpUrl(url: URL): Promise<void> {
   }
 
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (net.isIP(hostname) !== 0) {
-    return;
+  const literalFamily = net.isIP(hostname);
+  if (literalFamily === 4 || literalFamily === 6) {
+    return [{ address: hostname, family: literalFamily }];
   }
 
   const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
@@ -232,6 +250,84 @@ async function assertPublicHttpUrl(url: URL): Promise<void> {
       );
     }
   }
+  return addresses.map((address) => {
+    if (address.family !== 4 && address.family !== 6) {
+      throw new Error(`DNS lookup returned unsupported address family ${String(address.family)}`);
+    }
+    return { address: address.address, family: address.family };
+  });
+}
+
+function requestHeaders(): Record<string, string> {
+  return {
+    "accept": "text/html,application/xhtml+xml,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
+    "user-agent": "mini-coding-agent/0.1",
+  };
+}
+
+async function requestPinned(
+  url: URL,
+  address: ResolvedAddress,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<Response> {
+  return await new Promise<Response>((resolve, reject) => {
+    const transport = url.protocol === "https:" ? https : http;
+    const request = transport.request(url, {
+      method: "GET",
+      headers: requestHeaders(),
+      lookup: createPinnedLookup(address),
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(response.headers)) {
+          if (Array.isArray(value)) value.forEach((item) => headers.append(key, item));
+          else if (value !== undefined) headers.set(key, value);
+        }
+        resolve(new Response(Buffer.concat(chunks, Math.min(bytes, maxBytes)), {
+          status: response.statusCode ?? 500,
+          statusText: response.statusMessage ?? "",
+          headers,
+        }));
+      };
+      response.on("data", (chunk: Buffer) => {
+        const remaining = maxBytes - bytes;
+        if (remaining <= 0) return;
+        chunks.push(chunk.subarray(0, remaining));
+        bytes += Math.min(chunk.length, remaining);
+        if (bytes >= maxBytes) {
+          finish();
+          response.destroy();
+        }
+      });
+      response.once("end", finish);
+      response.once("error", (error) => {
+        if (!settled) reject(error);
+      });
+    });
+    request.once("error", reject);
+    const abort = (): void => {
+      request.destroy(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    request.once("close", () => signal.removeEventListener("abort", abort));
+    request.end();
+  });
+}
+
+export function createPinnedLookup(address: ResolvedAddress): net.LookupFunction {
+  return (_hostname, options, callback) => {
+    if (options.all === true) {
+      callback(null, [{ address: address.address, family: address.family }]);
+      return;
+    }
+    callback(null, address.address, address.family);
+  };
 }
 
 function isRedirectStatus(status: number): boolean {

@@ -9,7 +9,11 @@ import { buildMemoryQuery, type MemoryQuery } from "./MemoryQueryBuilder.js";
 import type { MemoryRetrievalOptions, MemoryRetriever } from "./MemoryRetriever.js";
 import { rerankMemoryResults } from "./MemoryReranker.js";
 import { cosineSimilarity, extractKeywords, unique } from "./MemoryText.js";
-import { createEmbeddingProviderFromEnvironment, type EmbeddingProvider } from "./EmbeddingProvider.js";
+import {
+  createEmbeddingProviderFromEnvironment,
+  type EmbeddingCacheStats,
+  type EmbeddingProvider,
+} from "./EmbeddingProvider.js";
 import { planManualMemoryWrite, planSessionMemoryWrite } from "./MemoryPolicy.js";
 import {
   HISTORICAL_MEMORY_KINDS,
@@ -120,8 +124,12 @@ export class LongTermMemoryStore implements MemoryRetriever {
   }
 
   async init(): Promise<void> {
-    await ensureDir(path.dirname(this.indexPath));
+    await ensureDir(path.dirname(this.indexPath), 0o700);
     await fs.appendFile(this.indexPath, "", "utf8");
+  }
+
+  getEmbeddingCacheStats(): EmbeddingCacheStats | undefined {
+    return this.embeddingProvider.getCacheStats?.();
   }
 
   async list(limit = 50): Promise<LongTermMemoryEntry[]> {
@@ -371,7 +379,7 @@ export class LongTermMemoryStore implements MemoryRetriever {
   }
 
   private async writeAll(entries: LongTermMemoryEntry[]): Promise<void> {
-    await ensureDir(path.dirname(this.indexPath));
+    await ensureDir(path.dirname(this.indexPath), 0o700);
     const tempPath = `${this.indexPath}.${process.pid}.${Date.now()}.tmp`;
     const jsonl = entries.map((entry) => JSON.stringify(entry)).join("\n");
     await fs.writeFile(tempPath, jsonl.length > 0 ? `${jsonl}\n` : "", "utf8");

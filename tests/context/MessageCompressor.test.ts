@@ -15,9 +15,10 @@ describe("MessageCompressor", () => {
       "[user] finish the implementation",
     ].join("\n");
     const compressed = new MessageCompressor({ maxChars: 400 }).compress(value);
-    expect(compressed).toContain("[structured compaction]");
+    expect(compressed).toContain("[structured session compaction v2]");
     expect(compressed).toContain("[user] implement memory support");
     expect(compressed).toContain("[user] finish the implementation");
+    expect(compressed).toContain("source:line-");
     expect(compressed.length).toBeLessThanOrEqual(400);
   });
 });

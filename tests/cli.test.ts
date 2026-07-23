@@ -22,6 +22,7 @@ beforeEach(async () => {
 afterEach(async () => {
   process.chdir(originalCwd);
   process.exitCode = undefined;
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await fs.rm(tempRoot, { recursive: true, force: true });
 });
@@ -354,6 +355,7 @@ describe("mini-agent CLI", () => {
         prompt_tokens_details: {
           cached_tokens: 2,
         },
+        cache_creation_input_tokens: 3,
         completion_tokens_details: {
           reasoning_tokens: 3,
         },
@@ -411,6 +413,7 @@ describe("mini-agent CLI", () => {
           completionTokens: number | null;
           totalTokens: number | null;
           cachedPromptTokens: number | null;
+          cacheWriteTokens: number | null;
           reasoningTokens: number | null;
           remainingContextTokens: number | null;
           usageAvailable: boolean;
@@ -427,6 +430,7 @@ describe("mini-agent CLI", () => {
       expect(status.llm.completionTokens).toBe(17);
       expect(status.llm.totalTokens).toBe(48);
       expect(status.llm.cachedPromptTokens).toBe(6);
+      expect(status.llm.cacheWriteTokens).toBe(3);
       expect(status.llm.reasoningTokens).toBe(4);
       expect(status.llm.remainingContextTokens).toBeNull();
       expect(status.llm.usageAvailable).toBe(true);
@@ -570,7 +574,7 @@ describe("mini-agent CLI", () => {
     expect(events.map((event) => event.type)).toContain("COMMAND_FINISHED");
   });
 
-  it("records TEST_FAILED and TEST_PASSED for test-like commands", async () => {
+  it("does not let shell comments forge TEST_FAILED or TEST_PASSED evidence", async () => {
     process.chdir(tempRoot);
 
     const sessionOutput = await captureStdout(async () => {
@@ -602,8 +606,8 @@ describe("mini-agent CLI", () => {
     });
     const events = JSON.parse(eventsOutput) as Array<{ type: string }>;
 
-    expect(events.map((event) => event.type)).toContain("TEST_PASSED");
-    expect(events.map((event) => event.type)).toContain("TEST_FAILED");
+    expect(events.map((event) => event.type)).not.toContain("TEST_PASSED");
+    expect(events.map((event) => event.type)).not.toContain("TEST_FAILED");
   });
 
   it("previews and applies patches from the CLI", async () => {
@@ -710,6 +714,53 @@ describe("mini-agent CLI", () => {
       const init = call?.[1] as RequestInit | undefined;
       const body = JSON.parse(String(init?.body)) as { response_format?: unknown };
       expect(body.response_format).toBeUndefined();
+    } finally {
+      restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
+    }
+  });
+
+  it("renders verbose token, prompt-cache, context, and structured runtime telemetry", async () => {
+    process.chdir(tempRoot);
+    const oldApiKey = process.env.MINI_AGENT_API_KEY;
+    process.env.MINI_AGENT_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      model: "telemetry-model",
+      usage: {
+        prompt_tokens: 1200,
+        completion_tokens: 180,
+        total_tokens: 1380,
+        prompt_tokens_details: { cached_tokens: 900 },
+        cache_creation_input_tokens: 100,
+        completion_tokens_details: { reasoning_tokens: 40 },
+      },
+      choices: [{ finish_reason: "stop", message: { content: "```js\nconst answer = 42;\n```" } }],
+    }), { status: 200 })));
+
+    try {
+      const output = await captureStdout(async () => {
+        await createProgram().parseAsync([
+          "run",
+          "只在聊天中给我一个 JavaScript 常量示例",
+          "--verbose",
+          "--event-stream",
+          "--model",
+          "telemetry-model",
+          "--base-url",
+          "https://llm.example/v1",
+        ], { from: "user" });
+      });
+
+      expect(output).toContain("[conversation] 0 messages · ~0 tokens · new session");
+      expect(output).toContain("[context]");
+      expect(output).toContain("[thinking]");
+      expect(output).toContain("prompt-cache-read=900");
+      expect(output).toContain("prompt-cache-write=100");
+      expect(output).toContain("[usage] calls=1");
+      expect(output).toContain("MINI_AGENT_EVENT");
+      expect(output).toContain('"type":"conversation"');
+      expect(output).toContain('"type":"llm"');
+      expect(output).toContain('"cacheWriteTokens":100');
+      expect(output).toContain("[answer]");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -930,8 +981,12 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(secondInit?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages[1]?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
-      expect(secondBody.messages[1]?.content).toContain("def two_sum(a: int, b: int) -> int:");
+      expect(secondBody.messages.at(-1)?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
+      expect(secondBody.messages.at(-1)?.content).toContain("def two_sum(a: int, b: int) -> int:");
+      expect(secondBody.messages).toContainEqual({
+        role: "assistant",
+        content: expect.stringContaining("def two_sum(a: int, b: int) -> int:"),
+      });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -976,40 +1031,28 @@ describe("mini-agent CLI", () => {
     const requestBodies: Array<{
       messages?: Array<{ role?: string; content?: string }>;
     }> = [];
-    const fetchMock = vi.fn()
-      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
-        requestBodies.push(JSON.parse(String(init?.body)) as {
-          messages?: Array<{ role?: string; content?: string }>;
-        });
-        return new Response(JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: "这是一个 TypeScript 项目。",
-              },
-            },
-          ],
-        }), { status: 200 });
-      })
-      .mockImplementationOnce(async (_url: string | URL | Request, init?: RequestInit) => {
-        requestBodies.push(JSON.parse(String(init?.body)) as {
-          messages?: Array<{ role?: string; content?: string }>;
-        });
-        return new Response(JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: [
-                  "项目定位：这是一个本地 AI Coding Agent CLI，README.md 和 package.json 都表明它围绕命令行工具组织。",
-                  "关键模块：`src/cli/index.ts` 负责 CLI 入口，`src/agent/AgentLoop.ts` 承担循环执行逻辑。",
-                  "运行方式：`package.json` 暴露了 build 和 test 脚本，说明它通过 TypeScript 编译并用 Vitest 测试。",
-                  "当前状态：当前 git 工作区没有额外未提交改动，git diff 为空。",
-                ].join("\n"),
-              },
-            },
-          ],
-        }), { status: 200 });
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "list_files", input: { path: ".", maxDepth: 3 } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "README.md" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "package.json" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/cli/index.ts" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/agent/AgentLoop.ts" } },
+      { type: "TOOL_CALL", toolName: "git_status", input: {} },
+      { type: "TOOL_CALL", toolName: "git_diff", input: {} },
+      {
+        type: "FINAL",
+        summary: "`src/cli/index.ts` 是入口，`src/agent/AgentLoop.ts` 是统一运行时；README.md 与 package.json 提供项目和构建证据。",
+        success: true,
+      },
+    ];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as {
+        messages?: Array<{ role?: string; content?: string }>;
       });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
+      }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -1030,24 +1073,24 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[tool] git_diff");
       expect(output).toContain("[summary]");
       expect(output).toContain("`src/cli/index.ts`");
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(8);
 
-      const firstPrompt = requestBodies[0]?.messages?.find((message) => message.role === "user")?.content ?? "";
-      expect(firstPrompt).toContain("Repository analysis instructions:");
-      expect(firstPrompt).toContain("File: README.md");
-      expect(firstPrompt).toContain("File: package.json");
-      expect(firstPrompt).toContain("File: src/cli/index.ts");
-      expect(firstPrompt).toContain("File: src/agent/AgentLoop.ts");
-
-      const secondPrompt = requestBodies[1]?.messages?.find((message) => message.role === "user")?.content ?? "";
-      expect(secondPrompt).toContain("Previous repository analysis answer was too shallow");
-      expect(secondPrompt).toContain("Mention at least 3 supporting file paths");
+      const prompts = requestBodies.flatMap((body) => body.messages ?? [])
+        .filter((message) => message.role === "user")
+        .map((message) => message.content ?? "")
+        .join("\n");
+      expect(prompts).toContain("Task kind: REPOSITORY_INVESTIGATION");
+      expect(prompts).toContain("Output kind: REPOSITORY_ANALYSIS");
+      expect(prompts).toContain("README.md");
+      expect(prompts).toContain("package.json");
+      expect(prompts).toContain("src/cli/index.ts");
+      expect(prompts).toContain("src/agent/AgentLoop.ts");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("renders grounded code review findings and filters unsupported ones", async () => {
+  it("runs code review as a read-only repository investigation contract", async () => {
     process.chdir(tempRoot);
     await fs.mkdir(path.join(tempRoot, "src", "tools"), { recursive: true });
     await fs.writeFile(path.join(tempRoot, "src", "tools", "WebSearchTool.ts"), [
@@ -1065,6 +1108,9 @@ describe("mini-agent CLI", () => {
           {
             message: {
               content: JSON.stringify({
+                type: "TOOL_CALL",
+                toolName: "read_file",
+                input: { path: "src/tools/WebSearchTool.ts" },
                 summary: "Found one issue in the decoder.",
                 overallVerdict: "issues_found",
                 findings: [
@@ -1098,7 +1144,9 @@ describe("mini-agent CLI", () => {
           {
             message: {
               content: JSON.stringify({
-                summary: "Keep only the grounded decoder finding.",
+                type: "FINAL",
+                success: true,
+                summary: "[medium] Decimal entities only — src/tools/WebSearchTool.ts:2 only decimal entities are decoded.",
                 findings: [
                   {
                     index: 0,
@@ -1130,17 +1178,9 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[tool] read_file");
       expect(output).toContain("[review]");
       expect(output).toContain("Decimal entities only");
-      expect(output).toContain("[possible/medium]");
-      expect(output).toContain("Filtered 1 unsupported finding");
-      expect(output).not.toContain("Hallucinated issue");
+      expect(output).toContain("src/tools/WebSearchTool.ts:2");
       expect(output).not.toContain("[summary]");
       expect(fetchMock).toHaveBeenCalledTimes(2);
-
-      const logsOutput = await captureStdout(async () => {
-        await createProgram().parseAsync(["logs", "--limit", "10"], { from: "user" });
-      });
-      const logs = JSON.parse(logsOutput) as Array<{ component: string; message: string; details?: Record<string, unknown> }>;
-      expect(logs.some((record) => record.component === "review" && record.message === "Review verification applied")).toBe(true);
 
       const changesOutput = await captureStdout(async () => {
         await createProgram().parseAsync(["changes", "--limit", "5"], { from: "user" });
@@ -1148,17 +1188,16 @@ describe("mini-agent CLI", () => {
       const changes = JSON.parse(changesOutput) as Array<{ mode: string; metadata?: Record<string, unknown> }>;
       expect(changes[0]?.mode).toBe("CODE_REVIEW");
       expect(changes[0]?.metadata).toMatchObject({
-        reviewFile: "src/tools/WebSearchTool.ts",
-        findings: 1,
-        rejectedFindings: 1,
-        verificationApplied: true,
+        executionEngine: "AGENT_LOOP",
+        taskKind: "REPOSITORY_INVESTIGATION",
+        outputKind: "CODE_REVIEW",
       });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("includes supplemental related files in the code review prompt and metadata", async () => {
+  it("lets the review contract inspect related files through the same AgentLoop", async () => {
     process.chdir(tempRoot);
     await fs.mkdir(path.join(tempRoot, "src", "tools"), { recursive: true });
     await fs.mkdir(path.join(tempRoot, "src", "utils"), { recursive: true });
@@ -1179,21 +1218,18 @@ describe("mini-agent CLI", () => {
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                summary: "No grounded bug found in the primary file.",
-                overallVerdict: "no_confirmed_issues",
-                findings: [],
-                followUp: ["If decoding behavior matters, inspect the helper implementation path that was imported."],
-              }),
-            },
-          },
-        ],
-      }), { status: 200 }));
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/tools/WebSearchTool.ts" } },
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/utils/html.ts" } },
+      { type: "FINAL", summary: "未发现确定性问题；已检查 src/tools/WebSearchTool.ts 和 src/utils/html.ts。", success: true },
+    ];
+    const requestBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string; content?: string }> });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
+      }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -1209,41 +1245,27 @@ describe("mini-agent CLI", () => {
       });
 
       expect(output).toContain("[tool] read_file");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-
-      const firstCall = fetchMock.mock.calls[0];
-      const init = firstCall?.[1] as RequestInit | undefined;
-      const body = JSON.parse(String(init?.body)) as {
-        messages?: Array<{ role?: string; content?: string }>;
-      };
-      const userMessage = body.messages?.find((message) => message.role === "user")?.content ?? "";
-      expect(userMessage).toContain("Supplemental related files:");
-      expect(userMessage).toContain("File: src/utils/html.ts");
-      expect(userMessage).toContain("return decodeHexEntity(text);");
-
-      const logsOutput = await captureStdout(async () => {
-        await createProgram().parseAsync(["logs", "--limit", "10"], { from: "user" });
-      });
-      const logs = JSON.parse(logsOutput) as Array<{ component: string; message: string; details?: Record<string, unknown> }>;
-      expect(logs.some((record) => record.component === "review"
-        && record.message === "Review supplemental files loaded"
-        && hasStringArrayEntry(record.details?.supplementalFiles, "src/utils/html.ts"))).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const prompts = requestBodies.flatMap((body) => body.messages ?? [])
+        .map((message) => message.content ?? "").join("\n");
+      expect(prompts).toContain("src/utils/html.ts");
+      expect(prompts).toContain("return decodeHexEntity(text);");
 
       const changesOutput = await captureStdout(async () => {
         await createProgram().parseAsync(["changes", "--limit", "5"], { from: "user" });
       });
       const changes = JSON.parse(changesOutput) as Array<{ metadata?: Record<string, unknown> }>;
       expect(changes[0]?.metadata).toMatchObject({
-        reviewFile: "src/tools/WebSearchTool.ts",
-        supplementalFileCount: 1,
+        executionEngine: "AGENT_LOOP",
+        taskKind: "REPOSITORY_INVESTIGATION",
+        outputKind: "CODE_REVIEW",
       });
-      expect(changes[0]?.metadata?.supplementalFiles).toEqual(["src/utils/html.ts"]);
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("runs file-focused review through the dedicated review command", async () => {
+  it("runs the review command through the unified AgentLoop", async () => {
     process.chdir(tempRoot);
     await fs.mkdir(path.join(tempRoot, "src", "demo"), { recursive: true });
     await fs.writeFile(path.join(tempRoot, "src", "demo", "sample.ts"), [
@@ -1255,19 +1277,12 @@ describe("mini-agent CLI", () => {
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "src/demo/sample.ts" } },
+      { type: "FINAL", summary: "No grounded bug found in src/demo/sample.ts.", success: true },
+    ];
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify({
-              summary: "No grounded bug found in the primary file.",
-              overallVerdict: "no_confirmed_issues",
-              findings: [],
-              followUp: [],
-            }),
-          },
-        },
-      ],
+      choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1286,7 +1301,7 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[session]");
       expect(output).toContain("[review]");
       expect(output).toContain("src/demo/sample.ts");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1342,10 +1357,21 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const answerBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "洛克王国 最新版本 最新宠物 官方 更新公告" } },
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "洛克王国 当前版本 宠物 site:17roco.qq.com 更新日志" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://updates.example/roco-news" } },
+      {
+        type: "FINAL",
+        summary: "根据来源，2026 年 6 月 19 日新增宠物包括夜回犀牛和天擎犀牛。来源：https://example.com/roco-news",
+        success: true,
+      },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         return new Response(fakeDuckDuckGoHtml("https://updates.example/roco-news"), {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -1392,7 +1418,7 @@ describe("mini-agent CLI", () => {
         choices: [
           {
             message: {
-              content: "根据来源，最新更新是 2026 年 6 月 19 日，新增宠物包括夜回犀牛和天擎犀牛。\n\n来源：洛克王国更新公告 https://example.com/roco-news",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -1417,8 +1443,9 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[answer]");
       expect(output).toContain("夜回犀牛");
       expect(output).not.toContain("[summary]");
-      expect(answerBodies[0]?.messages[0]?.content).toContain("web_search and fetch_url");
-      expect(answerBodies[0]?.messages[1]?.content).toContain("2026年6月19日更新");
+      const prompts = answerBodies.flatMap((body) => body.messages).map((message) => message.content).join("\n");
+      expect(prompts).toContain("Task kind: WEB_RESEARCH");
+      expect(prompts).toContain("2026年6月19日更新");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1431,10 +1458,20 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const answerBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "示例产品 最新 说明 官方" } },
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "示例产品 当前更新 site:example.com 发布说明" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/1" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/2" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/3" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/4" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://backup.example/latest" } },
+      { type: "FINAL", summary: "最新说明已由两个来源确认：https://example.com/4", success: true },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         return new Response([
           "<html><body>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://example.com/1\">Result One</a><div class=\"result__snippet\">First source</div></div>",
@@ -1497,7 +1534,7 @@ describe("mini-agent CLI", () => {
         choices: [
           {
             message: {
-              content: "根据第四个来源，最新说明已经确认。",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -1519,9 +1556,9 @@ describe("mini-agent CLI", () => {
 
       expect(output).toContain("[answer]");
       expect(fetchMock.mock.calls.some((call) => String(call[0]) === "https://example.com/4")).toBe(true);
-      expect(answerBodies[0]?.messages[1]?.content).toContain("fetched sources: 2");
-      expect(answerBodies[0]?.messages[1]?.content).toContain("Fourth source confirmed");
-      expect(answerBodies[0]?.messages[1]?.content).toContain("Independent source also confirmed");
+      const prompts = answerBodies.flatMap((body) => body.messages).map((message) => message.content).join("\n");
+      expect(prompts).toContain("Fourth source confirmed");
+      expect(prompts).toContain("Independent source also confirmed");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1534,10 +1571,17 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const pageFetches: string[] = [];
+    const officialUrl = "https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html";
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "TypeScript latest release notes official" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: officialUrl } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://forum.example.com/thread-1" } },
+      { type: "FINAL", summary: `TypeScript 最新版本以官方 release notes 为准：${officialUrl}`, success: true },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         return new Response([
           "<html><body>",
           "<div class=\"result\"><a class=\"result__a\" href=\"https://forum.example.com/thread-1\">TypeScript forum guess</a><div class=\"result__snippet\">Community discussion about the latest release.</div></div>",
@@ -1582,7 +1626,7 @@ describe("mini-agent CLI", () => {
         choices: [
           {
             message: {
-              content: "TypeScript 最新版本以官方 release notes 为准。",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -1602,7 +1646,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(pageFetches[0]).toBe("https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html");
+      expect(pageFetches[0]).toBe(officialUrl);
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1620,11 +1664,21 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const duckQueries: string[] = [];
-    const answerContexts: string[] = [];
+    const answerContexts: Array<Array<{ role: string; content: string }>> = [];
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "世界杯 最新比分 official live scores" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://scores.example/japan" } },
+      { type: "FINAL", summary: "世界杯最新比分来源不足，当前证据无法完整核验。", success: true },
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "世界杯 日本队 最近几场 成绩 比分 official" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://scores.example/japan" } },
+      { type: "FINAL", summary: "限定在世界杯范围内，日本队最近成绩是日本 2-1 示例队。来源：https://scores.example/japan", success: true },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         const parsed = new URL(urlText);
         duckQueries.push(parsed.searchParams.get("q") ?? "");
         return new Response(fakeDuckDuckGoHtml("https://scores.example/japan"), {
@@ -1648,7 +1702,7 @@ describe("mini-agent CLI", () => {
       }
 
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
-      const prompt = body.messages[1]?.content ?? "";
+      const prompt = body.messages.at(-1)?.content ?? "";
       if (body.messages[0]?.content.includes("web question planner")) {
         const isJapanFollowUp = prompt.includes("日本队最近几场的成绩");
         return new Response(JSON.stringify({
@@ -1678,14 +1732,12 @@ describe("mini-agent CLI", () => {
         }), { status: 200 });
       }
 
-      answerContexts.push(prompt);
+      answerContexts.push(body.messages);
       return new Response(JSON.stringify({
         choices: [
           {
             message: {
-              content: duckQueries.length <= 1
-                ? "暂未核验到完整世界杯即时比分。"
-                : "限定在世界杯范围内，日本队最近成绩是日本 2-1 示例队。",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -1723,8 +1775,11 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("[answer]");
       expect(output).toContain("世界杯范围");
       expect(duckQueries.some((query) => query.includes("世界杯") && query.includes("日本队"))).toBe(true);
-      expect(answerContexts.at(-1)).toContain("[user] 世界杯最新比分");
-      expect(answerContexts.at(-1)).toContain("keep competitions separate");
+      expect(answerContexts.at(-1)).toContainEqual({
+        role: "user",
+        content: "世界杯最新比分",
+      });
+      expect(answerContexts.at(-1)?.at(-1)?.content).toContain("keep competitions separate");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1738,10 +1793,19 @@ describe("mini-agent CLI", () => {
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const duckQueries: string[] = [];
     const answerContexts: string[] = [];
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "EDG honours championships League of Legends Valorant" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/edg-honours" } },
+      {
+        type: "FINAL",
+        summary: "EDG 没指定游戏项目：《英雄联盟》S11 全球总决赛为 2021 年；《无畏契约》Valorant Champions 为 2024 年。来源：https://example.com/edg-honours",
+        success: true,
+      },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         const parsed = new URL(urlText);
         duckQueries.push(parsed.searchParams.get("q") ?? "");
         return new Response(fakeEdgDuckDuckGoHtml(), {
@@ -1787,7 +1851,7 @@ describe("mini-agent CLI", () => {
         choices: [
           {
             message: {
-              content: "EDG 没指定游戏项目，主要冠军包括：《英雄联盟》S11 全球总决赛 2021 年；《无畏契约》Valorant Champions 2024 年。",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -1812,8 +1876,8 @@ describe("mini-agent CLI", () => {
       expect(output).toContain("无畏契约");
       expect(duckQueries.some((query) => query.toLowerCase().includes("league of legends"))).toBe(true);
       expect(duckQueries.some((query) => query.toLowerCase().includes("valorant"))).toBe(true);
-      expect(answerContexts.at(-1)).toContain("do not assume one domain");
-      expect(answerContexts.at(-1)).toContain("separate championships by game");
+      expect(answerContexts.at(-1)).toContain("ambiguous entities");
+      expect(answerContexts.at(-1)).toContain("multiple verified interpretations");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -2052,10 +2116,17 @@ describe("mini-agent CLI", () => {
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const decisions = [
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "最新的呢 官方 更新说明" } },
+      { type: "TOOL_CALL", toolName: "web_search", input: { query: "当前版本 site:example.com release notes" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://updates.example/latest" } },
+      { type: "FINAL", summary: "这是联网回答。来源：https://updates.example/latest", success: true },
+    ];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlText = String(url);
 
-      if (urlText.includes("duckduckgo.com/html")) {
+      if (urlText.includes("duckduckgo")) {
         return new Response(fakeDuckDuckGoHtml("https://updates.example/latest"), {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -2101,7 +2172,7 @@ describe("mini-agent CLI", () => {
         choices: [
           {
             message: {
-              content: "这是联网回答。",
+              content: JSON.stringify(decisions.shift()),
             },
           },
         ],
@@ -2113,7 +2184,7 @@ describe("mini-agent CLI", () => {
       await captureStdout(async () => {
         await createProgram().parseAsync([
           "run",
-          "你是谁",
+          "你叫什么名字",
           "--session",
           session.sessionId,
           "--model",
@@ -2388,10 +2459,6 @@ function fakeEdgDuckDuckGoHtml(): string {
     "</div>",
     "</body></html>",
   ].join("");
-}
-
-function hasStringArrayEntry(value: unknown, expected: string): boolean {
-  return Array.isArray(value) && value.some((item) => item === expected);
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

@@ -1,10 +1,41 @@
 import type { JsonObject, JsonValue, SessionRecord } from "./SessionTypes.js";
 import type { SessionStore } from "./SessionStore.js";
+import { estimateTokens } from "../context/TokenEstimator.js";
+import {
+  compactStructuredItems,
+  type CompactionBucket,
+  type StructuredCompactionSelection,
+} from "../context/StructuredCompactor.js";
 
 export interface SessionMemoryOptions {
   maxRecords?: number;
   maxAuxiliaryRecords?: number;
   maxChars?: number;
+  maxTokens?: number;
+  excludeRunId?: string;
+}
+
+export interface SessionMemoryTrace {
+  totalRecords: number;
+  usefulRecords: number;
+  selectedRecords: number;
+  inputChars: number;
+  outputChars: number;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  compacted: boolean;
+  excludedCurrentRunRecords: number;
+  strategy: "passthrough" | "structured-salience-v2";
+  candidateRecords: number;
+  droppedRecords: number;
+  clippedRecords: number;
+  pinnedRecords: number;
+  selections: StructuredCompactionSelection[];
+}
+
+export interface SessionMemoryBuildResult {
+  memory: string;
+  trace: SessionMemoryTrace;
 }
 
 const DEFAULT_MAX_RECORDS = 80;
@@ -16,35 +47,140 @@ export async function readSessionMemory(
   sessionId: string,
   options: SessionMemoryOptions = {},
 ): Promise<string> {
+  return (await readSessionMemoryWithTrace(sessionStore, sessionId, options)).memory;
+}
+
+export async function readSessionMemoryWithTrace(
+  sessionStore: SessionStore,
+  sessionId: string,
+  options: SessionMemoryOptions = {},
+): Promise<SessionMemoryBuildResult> {
   const records = await sessionStore.readRecords(sessionId);
-  return buildSessionMemory(records, options);
+  return buildSessionMemoryWithTrace(records, options);
 }
 
 export function buildSessionMemory(
   records: SessionRecord[],
   options: SessionMemoryOptions = {},
 ): string {
+  return buildSessionMemoryWithTrace(records, options).memory;
+}
+
+export function buildSessionMemoryWithTrace(
+  records: SessionRecord[],
+  options: SessionMemoryOptions = {},
+): SessionMemoryBuildResult {
+  const currentRunStart = options.excludeRunId
+    ? records.findIndex((record) => record.payload.runId === options.excludeRunId)
+    : -1;
+  const scopedRecords = currentRunStart >= 0 ? records.slice(0, currentRunStart) : records;
+  const excludedCurrentRunRecords = records.length - scopedRecords.length;
   const maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
   const maxAuxiliaryRecords = options.maxAuxiliaryRecords ?? Math.min(
     DEFAULT_MAX_AUXILIARY_RECORDS,
     Math.max(4, Math.floor(maxRecords * 0.25)),
   );
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
-  const usefulRecords = records.filter((record, index) => {
-    return isUsefulMemoryRecord(record) && !isPersistedAgentDecisionMessage(record, records[index - 1]);
+  const maxTokens = options.maxTokens ?? Math.max(128, Math.floor(maxChars / 4));
+  const usefulRecords = scopedRecords.filter((record, index) => {
+    return isUsefulMemoryRecord(record) && !isPersistedAgentDecisionMessage(record, scopedRecords[index - 1]);
   });
   const selectedIds = new Set([
     ...usefulRecords.filter(isPrimaryMemoryRecord).slice(-maxRecords),
     ...usefulRecords.filter(isAuxiliaryMemoryRecord).slice(-maxAuxiliaryRecords),
   ].map((record) => record.id));
 
-  const selectedRecords = usefulRecords.filter((record) => selectedIds.has(record.id));
-  const lines = selectedRecords
-    .filter((record, index) => !isDuplicateTaskSummary(record, selectedRecords[index - 1]))
-    .map(formatMemoryRecord)
-    .filter((line) => line.length > 0);
+  const candidateRecords = usefulRecords.filter((record) => selectedIds.has(record.id));
+  const selectedRecords = candidateRecords
+    .filter((record, index, values) => !isDuplicateTaskSummary(record, values[index - 1]));
+  const lines = selectedRecords.map(formatMemoryRecord).filter((line) => line.length > 0);
+  const uncompressed = lines.length > 0 ? lines.join("\n") : "(none)";
+  const requiresCompaction = uncompressed.length > maxChars
+    || estimateTokens(uncompressed) > maxTokens;
+  const compaction = requiresCompaction
+    ? compactStructuredItems(
+      selectedRecords.map((record, index) => toCompactionItem(record, index, selectedRecords.length)),
+      { maxChars, maxTokens },
+    )
+    : undefined;
+  const memory = compaction?.text ?? uncompressed;
+  return {
+    memory,
+    trace: {
+      totalRecords: scopedRecords.length,
+      usefulRecords: usefulRecords.length,
+      selectedRecords: compaction?.trace.selectedItems ?? selectedRecords.length,
+      inputChars: uncompressed.length,
+      outputChars: memory.length,
+      estimatedInputTokens: estimateTokens(uncompressed),
+      estimatedOutputTokens: estimateTokens(memory),
+      compacted: requiresCompaction,
+      excludedCurrentRunRecords,
+      strategy: compaction?.trace.strategy ?? "passthrough",
+      candidateRecords: selectedRecords.length,
+      droppedRecords: compaction?.trace.droppedItems ?? 0,
+      clippedRecords: compaction?.trace.clippedItems ?? 0,
+      pinnedRecords: compaction?.trace.pinnedItems ?? 0,
+      selections: compaction?.trace.selections ?? [],
+    },
+  };
+}
 
-  return compactSessionLines(lines, maxChars);
+function toCompactionItem(record: SessionRecord, index: number, total: number) {
+  const bucket = memoryBucket(record);
+  const recencyBoost = total > 0 ? Math.round((index / total) * 12) : 0;
+  const { priority, reason } = memoryPriority(record);
+  return {
+    sourceId: record.id.slice(0, 8),
+    content: formatMemoryRecord(record),
+    bucket,
+    priority: priority + recencyBoost,
+    reason,
+    order: index,
+  };
+}
+
+function memoryBucket(record: SessionRecord): CompactionBucket {
+  if (
+    record.type === "TASK_SUMMARY"
+    || record.type === "ERROR"
+    || record.type === "MEMORY_COMPACTION"
+    || (record.type === "USER_MESSAGE" && hasExplicitConstraint(record))
+  ) {
+    return "PINNED";
+  }
+  if (record.type === "USER_MESSAGE" || record.type === "ASSISTANT_MESSAGE") {
+    return "CONVERSATION";
+  }
+  return "EVIDENCE";
+}
+
+function memoryPriority(record: SessionRecord): { priority: number; reason: string } {
+  switch (record.type) {
+    case "ERROR":
+      return { priority: 100, reason: "unresolved or historical error evidence" };
+    case "TASK_SUMMARY":
+      return { priority: 96, reason: "completed task outcome" };
+    case "MEMORY_COMPACTION":
+      return { priority: 94, reason: "previously preserved memory facts" };
+    case "USER_MESSAGE":
+      return hasExplicitConstraint(record)
+        ? { priority: 92, reason: "explicit user constraint" }
+        : { priority: 76, reason: "recent user request" };
+    case "ASSISTANT_MESSAGE":
+      return { priority: 68, reason: "recent assistant response" };
+    case "COMMAND_RESULT":
+      return { priority: 58, reason: "command or verification evidence" };
+    case "TOOL_RESULT":
+      return { priority: 52, reason: "tool evidence" };
+    default:
+      return { priority: 40, reason: "session evidence" };
+  }
+}
+
+function hasExplicitConstraint(record: SessionRecord): boolean {
+  return /(?:不要|不得|不能|必须|只能|需要|应该|希望|倾向|优先|保持|避免|禁止|do not|don't|must|only|need|should|prefer|keep|avoid)/i
+    .test(payloadString(record.payload, "content"));
 }
 
 function isDuplicateTaskSummary(record: SessionRecord, previous: SessionRecord | undefined): boolean {
@@ -123,57 +259,4 @@ function compactJson(value: JsonValue): string {
   } catch {
     return String(value);
   }
-}
-
-function compactSessionLines(lines: string[], maxChars: number): string {
-  if (lines.length === 0) {
-    return "(none)";
-  }
-
-  const memory = lines.join("\n");
-  if (memory.length <= maxChars) {
-    return memory;
-  }
-
-  const header = "[structured session compaction]";
-  const importantLabel = "Preserved constraints and outcomes:";
-  const recentLabel = "Recent records:";
-  const fixedChars = header.length + importantLabel.length + recentLabel.length + 4;
-  const available = Math.max(0, maxChars - fixedChars);
-  const importantCandidates = lines.filter((line) => (
-    /^\[(?:summary|error|memory)\]/i.test(line)
-    || (/^\[user\]/i.test(line) && /(?:不要|不得|不能|必须|只能|保持|避免|do not|don't|must|only|keep|avoid)/i.test(line))
-  ));
-  const important = takeRecentLines(importantCandidates, Math.floor(available * 0.35));
-  const importantText = important.length > 0 ? important.join("\n") : "(none extracted)";
-  const recentBudget = Math.max(0, available - importantText.length);
-  const importantSet = new Set(important);
-  const recent = takeRecentLines(lines.filter((line) => !importantSet.has(line)), recentBudget);
-  const recentText = recent.length > 0 ? recent.join("\n") : "(none)";
-
-  return [header, importantLabel, importantText, recentLabel, recentText].join("\n").slice(0, maxChars);
-}
-
-function takeRecentLines(lines: string[], maxChars: number): string[] {
-  if (maxChars <= 0) {
-    return [];
-  }
-  const selected: string[] = [];
-  let remaining = maxChars;
-  for (const line of [...lines].reverse()) {
-    const separatorChars = selected.length > 0 ? 1 : 0;
-    if (line.length + separatorChars <= remaining) {
-      selected.unshift(line);
-      remaining -= line.length + separatorChars;
-      continue;
-    }
-    if (selected.length === 0 && remaining >= 40) {
-      const marker = " ...[record compacted]... ";
-      const contentBudget = Math.max(0, remaining - marker.length);
-      const headChars = Math.floor(contentBudget * 0.35);
-      selected.unshift(`${line.slice(0, headChars)}${marker}${line.slice(-(contentBudget - headChars))}`);
-    }
-    break;
-  }
-  return selected;
 }

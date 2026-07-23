@@ -40,6 +40,11 @@ export class KnowledgeSearchTool implements Tool<KnowledgeSearchInput, RagSearch
       ...(input.source !== undefined ? { source: input.source } : {}),
       ...(input.tags !== undefined ? { tags: input.tags } : {}),
     });
-    return toolSuccess(response, { found: response.found, reason: response.reason ?? null, citations: response.citations });
+    return toolSuccess(response, {
+      found: response.found,
+      reason: response.reason ?? null,
+      citations: response.citations,
+      embeddingCache: store.getEmbeddingCacheStats() ?? null,
+    });
   }
 }
