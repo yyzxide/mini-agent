@@ -1,13 +1,13 @@
 # Roadmap
 
-当前路线：本地 CLI Coding Agent 工程骨架、MCP tools runtime 和记忆治理已落地，下一阶段扩展真实 eval 数据集、生产级向量存储、MCP 高级能力与 TUI/编辑器集成。
+当前路线：单一 AgentLoop、MCP tools runtime、终端事件时间线、任务级 Diff Viewer 和分层上下文压缩已落地，下一阶段扩展真实 Eval、分级记忆、MCP 高级能力与持续式 TUI。已经完成的设计迁移不在这里展开，见 [架构演进记录](ARCHITECTURE_EVOLUTION.md)。
 
 ## 0. 已完成的核心能力
 
 当前已经具备：
 
 - 交互式 CLI 和一次性 `run`。
-- direct / web / review / agent-loop 四种任务模式。
+- 单一 `AgentLoop` + `AgentTaskContract`，统一执行 Direct、Web、Review、Repository Analysis 和 Repository Task。
 - 真实 OpenAI-compatible API 接入。
 - 结构化 `AgentDecision`。
 - `ToolRegistry`、zod 输入校验和结构化 `ToolResult`。
@@ -20,24 +20,25 @@
 - JSONL session/event/log/change-log。
 - 本地长期记忆索引：query build、retrieve、rerank、evidence select、context injection。
 - 独立文档知识库 RAG：Markdown/TXT 分块、增量索引、混合检索、引用、拒答和离线评测。
-- 全模式长期记忆召回、显式 remember/forget、失败过滤、密钥脱敏和结构化 compaction。
+- 全模式长期记忆召回、显式 remember/forget、失败过滤、密钥脱敏和 `structured-salience-v2` 分层 compaction。
+- 版本化运行事件、实时命令输出、Token/缓存/压缩遥测，以及按需打开的任务级终端 Diff Viewer。
 - 声明式 Skill 发现、校验、自动/显式选择以及全模式上下文注入。
 - Session 持久化的只读 Plan 模式和 `/plan` -> `/execute` 闭环，带运行时写操作硬拦截。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
-- 当前正常环境回归基线为 40 个测试文件、303 个测试用例。
+- 当前测试基线以 [中文 README](README.md#核心回归测试) 的最近一次全量验证结果为准。
 
 ## 1. P0：继续提高稳定性
 
 ### 1.1 继续拆分 CLI 交互与命令注册
 
-持续拆分后，`src/cli/index.ts` 从约 4270 行降到约 2250 行；Direct/Web/Review/AgentLoop/RepositoryAnalysis、公共 Runtime、ToolCommands 和 McpCommands 均已独立。当前入口主要承担剩余命令注册、交互循环、模式调度和状态展示。
+持续拆分后，Direct/Web/Review/RepositoryAnalysis 的独立执行器已被删除，统一由 `AgentLoopTask` 和 `CliTaskRuntime` 承担任务执行。Tool/MCP 命令、终端事件 Renderer 和 Diff Viewer 已独立；`src/cli/index.ts` 当前约 2450 行，主要仍承担命令注册、交互循环和 slash command 状态协调。
 
 后续继续拆成：
 
 - `src/cli/program.ts`：Commander 命令注册。
 - `src/cli/interactive.ts`：交互式 session 和 slash commands。
-- `src/cli/taskRunner.ts`：统一模式调度入口，调用现有独立 Task 模块。
-- `src/cli/render.ts`：终端输出格式。
+- `src/cli/taskRunner.ts`：统一契约构建和 AgentLoop 调用入口。
+- `src/cli/sessionCommands.ts`：session、history、compact、resume 等交互操作。
 - `src/cli/commands/*`：config、tool、mcp、memory、session、git 等子命令。
 
 ### 1.2 增强决策质量闸门
@@ -88,7 +89,7 @@
 - 为每个工具补更细的 examples。
 - 将 tool manifest 注入 prompt，而不是只注入 schema。
 - 引入 tool choice 评测：给定任务应选择哪些工具。
-- 对工具结果做 evidence summary，减少上下文噪声。
+- 对不同工具结果做结构化 evidence normalization；当前 compactor 已能分层和裁剪，但还没有工具语义级摘要。
 
 ## 3. P2：开发体验
 
@@ -112,12 +113,14 @@ mini-agent session replay <sessionId>
 
 按时间线重放工具调用、命令结果和最终 diff，方便复盘和面试演示。
 
-### 3.3 更好的终端输出
+### 3.3 持续式 TUI
 
-- 分组展示 plan、tool、patch、command、result。
-- 对长输出折叠。
-- 对 diff 做文件级摘要。
-- 对错误给出下一步建议。
+当前已有分组时间线、实时命令输出、长输出截断、Changes 卡片和全屏 Diff Viewer。下一阶段基于同一 `AgentRuntimeEvent` 协议增加：
+
+- 可折叠的长工具结果与错误诊断。
+- 固定的任务状态、Token 和 Context 面板。
+- Session Replay 与步骤跳转。
+- 保持非交互 CLI 和机器事件流兼容。
 
 ## 4. 安全增强
 

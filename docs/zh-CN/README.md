@@ -17,22 +17,31 @@
 -> 索引长期记忆供后续任务检索
 ```
 
-普通聊天、明确只要代码片段的请求和联网问答不会强行进入代码修改循环。当前版本会先用 `TaskRouter` 分成四类：
+当前版本不再为普通问答、联网问答、代码审查和仓库分析维护四套执行器。每条请求都会先生成 `AgentTaskContract`，再进入同一个 `AgentLoop`：
 
-- `DIRECT_ANSWER`：普通问答、解释、明确只要代码片段的请求，输出 `[answer]`。
-- `WEB_ANSWER`：需要最新资料或公网信息的问题，先执行 `web_search` / `fetch_url`，会优先考虑更像官方/高可信的来源，继承当前 session 的追问范围，并在前几个来源抓取失败时继续尝试后续候选来源，再输出更完整的 `[answer]`。这类问题包括最新版本、新闻、赛事比分、实时/收盘行情、汇率和市场指数等强时效查询。
-- `CODE_REVIEW`：文件级代码审查和 bug 检查。CLI 会先读取目标文件，再自动补充少量由本地 import / include 解析出来的相关文件作为上下文，然后要求模型输出结构化 findings，先在本地校验引用代码是否真的出现在主文件里，再做一轮 review 复核，必要时把过度武断的结论降级或丢弃，输出 `[review]`。
-- `AGENT_LOOP`：真正的仓库阅读、修改、测试和修复任务，输出 `[plan]`、`[tool]`、`[patch]`、`[command]`、`[summary]`。
+- `DIRECT_RESPONSE`：单步回答契约，不开放工具和仓库访问，输出 `[answer]`。
+- `WEB_RESEARCH`：只开放 `web_search` / `fetch_url`；实时事实要求两个独立域名的可读正文，最终引用必须来自本轮工具证据，输出 `[answer]`。
+- `REPOSITORY_INVESTIGATION`：代码审查与仓库分析共用的只读调查契约。两者只在输出要求上不同，分别输出 `[review]` 或 `[summary]`。
+- `REPOSITORY_TASK`：开放仓库读取、补丁、受控命令、验证、RAG/MCP 和可选只读子 Agent。
+- `KNOWLEDGE_QUERY`：只使用 `knowledge_search`，最终回答必须保留文件与行号引用。
+- `PLAN`：叠加在任务契约上的只读操作模式，运行时再次硬拦补丁和命令。
 
-对于“分析当前项目”“总结这个仓库”这类仓库分析请求，CLI 现在不会只依赖目录树摘要直接作答，而是会先强制执行一轮取证：列目录、读取 README / 构建文件、读取代表性源码文件，然后再让模型输出带文件依据的项目分析。
+旧的 `DIRECT_ANSWER`、`WEB_ANSWER`、`CODE_REVIEW` 标签仍保留在 session/change-log 元数据中，用于兼容历史记录；新记录会同时写入 `executionEngine: AGENT_LOOP`、`taskKind` 和 `outputKind`。
 
-`WEB_ANSWER` 不是简单把用户原话丢给搜索引擎。它会先用 `WebQuestionPlanner` 结合 session 记忆生成独立问题、搜索 query、回答范围、来源提示和回答约束；规划失败时再用本地 fallback 策略补齐追问范围和 source-focused query。
+CLI 现在会按时间线显示 Conversation 历史、Context 构建、显式计划、工具输入与结果、补丁、命令实时输出、Guardrail、LLM 调用和最终结果。直接回答单独显示实际传给模型的历史消息数和估算 Token；仓库与联网任务在 Context 预算下显示 Session Memory 的记录选择与压缩情况。`--verbose` 展开 Token、Context 压缩、Prompt Cache 与 Embedding Cache 指标，`--trace` 进一步显示经过脱敏的 AgentDecision、Conversation 角色序列和逐 Context Section 分配；`--event-stream` 输出同一套版本化 `AgentRuntimeEvent`，供日志和自动化消费。系统不输出模型隐藏思维链，只显示可审计的计划、结构化决策和证据。
+
+写入仓库的任务结束后只显示紧凑的 `Changes` 卡片，不在执行时间线中铺开代码。交互式 TTY 中可以点击卡片或按 Enter 打开终端内置的全屏 Diff Viewer，使用方向键切换文件、PageUp/PageDown 或滚轮滚动、`q`/Esc 返回；非交互任务会显示 `mini-agent diff --session <id>`。任务 Diff 使用独立临时 Git 索引捕获前后工作树 Tree，因此能包含新建代码、Markdown 等未跟踪文件，同时排除任务开始前已经存在的脏改动，并且不会改变用户真实暂存区。
+
+对于“分析当前项目”“总结这个仓库”这类请求，调查契约只暴露仓库只读工具，并在至少成功读取一个相关文件之前拒绝成功结束。代码审查走完全相同的调查链，只附加 finding、严重级别、文件和行号等输出要求。
 
 对于 `葡萄牙呢`、`那这个呢`、`and Portugal?` 这种很短的追问，CLI 现在也会先结合当前 session 做一次本地补全；如果上一轮问法已经明确了省略掉的谓语或范围，就会先重写成更完整的问题，再决定走直接回答还是联网回答。
+
+对于上一轮刚产生文件变更后的 `在哪里`、`放哪了`、`哪个文件`、`怎么打开`，CLI 不再让模型猜测指代对象，而是只读取紧邻上一轮的 `FILE_CHANGE` 记录，返回仓库内的绝对路径，并显示 `[follow-up] ... LLM skipped`。明确的 `你在哪里` 或 `北京在哪里` 不会被当成文件追问。
 
 ## 文档索引
 
 - [架构设计说明](ARCHITECTURE.md)：解释 CLI Agent 的模块拆分、工具系统、权限、session 和 LLM 接入。
+- [架构演进记录](ARCHITECTURE_EVOLUTION.md)：简要保留关键设计从 A 到 B 的问题、迁移方法、兼容取舍和下一步方向。
 - [项目现状评估](PROJECT_STATUS.md)：当前完成度、100 分制评分、与 Claude Code/Codex 的差距、后续优先级。
 - [AI Agent 面试学习指南](AI_STUDY_GUIDE.md)：按优先级学习 LLM、Tool Calling、Agent Loop、Context、RAG、Eval、MCP、安全和 AI 后端工程。
 - [RAG 使用、设计与评测指南](RAG_GUIDE.md)：文档导入、混合检索、引用拒答、评测指标和生产化边界。
@@ -51,19 +60,22 @@
 ## 核心能力
 
 - 真实 OpenAI-compatible API 接入。
-- 普通问答、联网问答、代码审查、仓库任务四种模式分流。
+- 单一 AgentLoop 与契约化的能力、证据、输出和预算控制。
 - 统一 ToolRegistry 和 zod 参数校验。
 - `list_files`、`read_file`、`search_code`、`web_search`、`fetch_url`、`git_status`、`git_diff`、`apply_patch`。
 - `read_file` / `search_code` 会拒绝 `.git`、`.mini-agent` 等内部元数据路径，代码搜索结果会统一为 POSIX 风格路径。
 - 命令执行超时、输出截断和危险命令拦截。
+- 终端运行时间线与命令实时输出，支持 `--verbose`、`--trace` 和脱敏的机器事件流。
+- Prompt/Completion/Reasoning Token、Prompt Cache read/write、Context/Session 压缩和 Embedding Cache 命中遥测；服务商未报告的数据明确显示为 unknown/unreported。
+- Session Memory 使用字符/Token 双预算的分层压缩；用户硬约束、最近对话和执行证据分别选择，`--trace` 可查看来源、裁剪状态与保留原因。
 - 常见运行错误本地诊断，例如运行目录错误、命令不存在、端口占用、连接拒绝和权限不足。
 - patch 应用前 `git apply --check`，并固定 `core.autocrlf=false`，避免全局 Git 换行配置影响补丁结果。
 - `.mini-agent/sessions` 和 `.mini-agent/events` 本地审计记录。
-- `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志，包含代码审查阶段信息，以及补充相关文件加载记录。
+- `.mini-agent/logs` 运行日志和 `.mini-agent/change-log.jsonl` 任务变更日志；新任务会记录统一执行引擎、任务类型和输出契约。
 - `.mini-agent/memory/index.jsonl` 长期记忆索引，把任务总结和压缩记忆转成可检索历史，并通过查询构建、召回、重排和证据选择注入上下文。
 - `.mini-agent/rag/index.jsonl` 文档知识索引，支持 Markdown/TXT 安全导入、按行分块、来源增量替换、关键词与向量混合检索、来源/标签过滤、行号引用和证据不足拒答。
 - `.mini-agent/cache/embeddings/v1/` 远端 embedding 内容寻址缓存，按 provider/vector-space 和文本哈希隔离，不保存原文，并支持内存 LRU、并发 single-flight 与跨进程磁盘复用。
-- 长期记忆覆盖 Direct、Web、Review、RepositoryAnalysis 和 AgentLoop；支持离线或 OpenAI-compatible embedding、TTL、confidence、同主题 supersession、显式 remember/forget、失败过滤和密钥脱敏。
+- 长期记忆按统一任务结果治理；支持离线或 OpenAI-compatible embedding、TTL、confidence、同主题 supersession、显式 remember/forget、失败过滤和密钥脱敏。
 - 声明式 Skill：从版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md` 发现、校验、自动选择并注入所有执行模式；Skill 只能指导现有受控工具，不能执行任意脚本或绕过权限。
 - 真正的只读 Plan 模式：`mini-agent plan`、`/plan`、`/plan off`、`/execute`。Plan 状态会随 Session 保存，只向模型暴露只读工具，并在运行时硬拦 patch、命令和伪装成工具调用的写操作。
 - MCP stdio/Streamable HTTP tools runtime，支持 initialize、工具发现、名称隔离、权限映射、调用转发和生命周期关闭。
@@ -76,6 +88,7 @@
 - 如果上一轮先给了代码片段，下一轮再说“写入一个文件里面”“写进去”“保存一下”“把刚才的代码保存到文件里”，CLI 会复用当前 session，把上一轮代码块补成明确写文件任务，再交给 `AGENT_LOOP` 落盘。
 - 如果上一轮是代码落盘任务，下一轮继续说“数据流的中位数呢”这类短算法追问，CLI 会继承上一轮的仓库编辑模式，而不是退回到纯聊天贴代码。
 - 如果用户问“你写入了嘛？”，CLI 会直接检查当前 session 里上一轮之后是否出现 `FILE_CHANGE` 记录；没有记录就明确说明没有查到本次落盘，不让模型凭记忆猜。
+- 产品能力以 `Capability Registry` 为唯一事实源；能力咨询通过主体、能力主题、疑问/情态和历史解释等组合信号识别，不按完整问句逐条特判。模型最终回答若错误否认已注册的联网或仓库写入能力，运行时会纠正并留下审计事件。
 - 项目额外维护了一套“对话级回归测试”，专门覆盖真实用户最容易踩到的多轮场景。
 
 ## 核心回归测试
@@ -90,6 +103,7 @@
 - `葡萄牙呢` 这类短追问必须结合当前 session 补全语义
 - `Skill -> 五子棋 -> 这个难度如何` 必须只指向最近的五子棋任务，不能被旧主题、长期记忆或 Skill 注入带偏
 - “分析当前项目”必须先读取 README / 构建文件 / 代表性源码再总结
+- “完整读取 / 全面审查某个文件”必须分页覆盖第 1 行到 EOF；只读文件开头时不能成功结束
 
 运行命令：
 
@@ -103,7 +117,7 @@ npm run test:regression
 npm run verify:regression
 ```
 
-当前正常环境回归基线：40 个测试文件、303 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
+当前正常环境回归基线：51 个测试文件、423 个测试用例；提交前建议同时运行 `npm run typecheck` 和 `npm run lint:unused`。
 
 ## 快速验证
 
@@ -154,7 +168,7 @@ cp mini-agent.config.example.json mini-agent.config.json
 /execute      执行当前 Session 最近一份成功计划
 /status       查看当前会话状态与已记录的 LLM token 用量
 /repo         查看仓库状态摘要
-/diff         查看 git diff
+/diff         打开当前 Session 最近一次任务的终端 Diff Viewer
 /exit         结束会话
 ```
 

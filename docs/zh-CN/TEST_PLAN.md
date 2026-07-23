@@ -6,7 +6,7 @@
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 基线：40 个测试文件、303 个测试用例。
+- 正常环境全量 Vitest 基线：55 个测试文件、486 个测试用例。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -100,7 +100,9 @@
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
 - Direct/Web/Review/RepositoryAnalysis/AgentLoop 可按策略召回长期记忆，并把它标记为不可信历史证据；实时 Web 问题和易过期赛果必须禁用长期记忆召回。
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
-- 结构化 compaction 同时保留关键用户/助手事实和最近上下文。
+- `structured-salience-v2` compaction 同时受字符与 Token 预算控制，分层保留用户硬约束、最近对话和执行证据。
+- 超长工具结果会单条裁剪，重复记录会去重；压缩正文保留来源 id，trace 能解释每条选择的分层、原因和裁剪状态。
+- 自动 Session Memory 压缩与显式 `/compact` 共用同一压缩核心。
 
 ### 1.4.3 Document Knowledge-base RAG
 
@@ -136,27 +138,30 @@
 
 测试中可以 stub `fetch`，避免依赖真实网络。
 
-### 1.6 TaskRouter 和回答模式
+### 1.6 TaskRouter、TaskContract 和兼容标签
 
 覆盖：
 
-- 普通聊天和解释类问题进入 `DIRECT_ANSWER`。
-- 明确声明“代码片段 / 不要改文件”的请求进入 `DIRECT_ANSWER`。
-- 默认的代码生成请求进入 `AGENT_LOOP`，并真正创建或修改仓库文件。
-- 需要最新外部资料的问题进入 `WEB_ANSWER`。
-- 仓库阅读、修改、测试、修复任务进入 `AGENT_LOOP`。
+- 所有 CLI 请求最终都进入统一 `AgentLoop`，TaskRouter 只提供语义提示，`TaskContractBuilder` 负责编译能力和完成条件。
+- 普通聊天和明确声明“代码片段 / 不要改文件”的请求生成 `DIRECT_RESPONSE` 单步契约，并保留 `DIRECT_ANSWER` 兼容标签。
+- 默认代码生成、仓库修改、测试和修复请求生成 `REPOSITORY_TASK`，并真正创建或修改仓库文件。
+- 需要最新外部资料的问题生成 `WEB_RESEARCH` 契约，并保留 `WEB_ANSWER` 兼容标签。
+- `ExternalFactPolicy` 区分一般知识、需要验证的精确/完整事实和非外部事实；“有哪些知名/代表性例子”保持 Direct，“全部/完整/有界清单”进入 Web。
+- 代码审查与仓库分析共用 `REPOSITORY_INVESTIGATION` 只读契约，只区分输出要求。
 - 英文关键词按词边界匹配，避免 `latest` 被误判成 `test`。
 
-### 1.7 WebQuestionPlanner
+### 1.7 Follow-up Resolver 与 Web 契约
 
 覆盖：
 
-- 根据 session memory 把追问改写成独立搜索问题。
-- 普通时效问题生成多条搜索 query。
-- 实时比分、赛事结果等问题追加官方站和比分源 query。
-- 版本发布类问题追加官方 release notes、changelog、GitHub releases。
-- 模型规划返回非法 JSON 时回退到本地启发式策略。
-- 最终回答上下文包含 `answerScope`、`sourceHints` 和 `answerInstructions`。
+- 根据结构化 Conversation 只补全短追问中省略的上一轮主题，不从压缩后的 session memory 文本重新解析另一份会话真相。
+- 普通隐式指代只选择紧邻上一轮，避免旧主题竞争；审计助手旧回答时不走该切片，而是从完整会话记录召回相关原话、相邻问题和后续纠正。
+- 模型否认可见旧原话时触发一次有界修订；再次冲突时使用只判断“说过什么”、不判断外部真伪的安全回退。
+- Web 行为由 `WEB_RESEARCH` 契约约束：先搜索、再抓取、满足独立来源和引用白名单。
+- 首个搜索查询必须保持用户范围；“知名”不能被改写成未请求的“最知名 / most famous / top / best”排名。
+- `fetch_url` 只接受用户给出的 URL 或成功搜索返回的精确 URL；搜索失败后猜测来源地址必须在执行前拦截。
+- 搜索或抓取证据不足时允许明确限制性答复并正常结束，不允许编造实时事实，也不能因“必须成功搜索”陷入连续失败死锁。
+- 重复的相同 Web 工具调用、provider/transport 失败后的等价换词重试由运行时拦截。
 
 ### 1.8 AgentLoop
 
@@ -211,13 +216,17 @@
 - 用户问“你写入了嘛？”时，必须读取 session 中的 `FILE_CHANGE` 记录作答，不能让模型猜测
 - 用户贴出 `npm error enoent Could not read package.json`，且报错路径不在当前仓库时，必须诊断为运行目录错误，而不是说代码本身能跑
 - `葡萄牙呢` 这种短追问，必须结合上一轮会话补全为明确问题
-- 先测试 Skill、再创建五子棋，随后问“这个难度如何”时，请求上下文只能保留最近的五子棋任务，不能重新引用 Skill 或注入历史 Skill 记忆
+- 先测试 Skill、再创建五子棋，随后问“这个难度如何”时，`LATEST_REFERENT` 只提供最近的五子棋 exchange；包含“你之前说过……”等审计语义的请求必须先分类为 `PRIOR_RESPONSE_AUDIT`，不能被 latest-only 切片截断
 - `long time no see` 必须走普通问答，不能进入 AgentLoop 或输出 `[diff]`
 - “昨天法国队踢西班牙队，谁赢了”与“法国队vs西班牙队，谁赢了”必须直接进入 `WEB_ANSWER`
 - 普通回答拒绝联网后再说“你用搜一下啊”，必须复用上一轮赛事问题，而不是搜索这句追问本身
 - `/new` 后的实时赛果不得从旧 session 长期记忆中作答
 - 名称、模型标识、处理路径和 `WEB_ANSWER` 能力说明必须由本地产品知识回答，不能虚构手动切换方式
 - AgentLoop 的 tool/patch/command decision 不能作为 `ASSISTANT_MESSAGE` 进入后续聊天历史；旧 session 中紧随 `AGENT_DECISION` 的遗留消息也必须过滤
+- 用户质疑助手较早的原话时，即使该 claim 已超出旧的 newest-16 边界，也必须用 `PRIOR_RESPONSE_AUDIT` 召回；若草稿仍否认原话，最终输出必须被修订并记录 Guardrail/Event
+- “Kanye West 有哪些知名歌曲”属于代表性一般知识，不应仅因“有哪些”强制联网；若显式要求联网，查询不得擅自增加“最”，搜索不可达时必须输出可完成的证据不足说明
+- “OpenAI 最新模型”一类时序最高级问题不能直接接受 DuckDuckGo 前五名：provider 第六名存在更新官方发布时必须经候选池重排进入前列；最终结论还必须有权威时效搜索，且不能忽略证据中的更高同系列版本
+- 搜索质量能力必须对 provider 无关：两个任意命名的 fake provider 应经过同一候选归一化、跨源 URL 去重、fallback 和时效重排，DuckDuckGo HTML 解析不得进入通用 Pipeline/Policy
 - “分析当前文件夹的项目”必须先读取真实仓库证据，再总结
 - 模型声称“已写入”但没有 patch 时，必须被质量闸门拦截并继续修复
 - 模型在已经有代码上下文时反问“写入什么内容到哪个文件”，必须被质量闸门拦截

@@ -45,14 +45,14 @@
 
 你可以直接抄这个，再按版面裁剪：
 
-> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。支持普通问答、联网问答、代码审查与仓库任务四类模式分流，具备 `ToolRegistry`、`AgentLoop`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块；实现 MCP stdio/Streamable HTTP 工具发现与调用、Web 证据闸门、可替换 embedding 的长期记忆治理、受控补丁与命令执行及 JSONL 审计，并通过 Vitest 覆盖核心链路。
+> `mini-coding-agent`：基于 TypeScript / Node.js 开发的本地 AI Coding Agent CLI。以单一 `AgentLoop` 和任务契约统一普通回答、联网研究、代码审查、仓库分析与修改，具备 `ToolRegistry`、`PatchManager`、`CommandRunner`、`SessionStore`、`LongTermMemoryStore` 等核心模块；实现 MCP stdio/Streamable HTTP 工具发现与调用、Web 证据闸门、分层上下文压缩、受控补丁与命令执行及 JSONL 审计，并通过 Vitest 覆盖核心链路。
 
 ## 4. 项目亮点怎么挑
 
 如果简历空间有限，优先写这 5 个：
 
-1. **多模式任务路由**  
-   普通问答、联网问答、代码审查、仓库修改任务分流，对应 `DIRECT_ANSWER`、`WEB_ANSWER`、`CODE_REVIEW`、`AGENT_LOOP`。
+1. **单一 AgentLoop + 任务契约**
+   普通回答、联网研究、代码审查、仓库分析和修改共用执行生命周期，通过契约隔离能力、证据门槛和输出要求。
 
 2. **受控工具系统**  
    搜索代码、读文件、抓网页、打 patch、跑命令都走结构化工具和 zod 校验，并带只读、破坏性、幂等性、外部访问等能力标注。
@@ -64,7 +64,7 @@
    路径限制、`.git` / `.mini-agent` 内部路径拒绝、patch check、Git 换行配置隔离、命令超时、危险命令拦截、联网目标限制。
 
 5. **评测与扩展性**  
-   Agent Harness 支持脚本化多步场景、步骤/工具选择指标与失败归因；MCP 支持真实 tools runtime；当前正常环境回归基线为 40 个测试文件、303 个测试用例。
+   Agent Harness 支持脚本化多步场景、步骤/工具选择指标与失败归因；MCP 支持真实 tools runtime；当前正常环境回归基线为 51 个测试文件、423 个测试用例。
 
 ## 5. 面试自我介绍怎么接这个项目
 
@@ -74,7 +74,7 @@
 
 ### 1 分钟版本
 
-> 我做了一个本地运行的 AI Coding Agent CLI，名字叫 `mini-coding-agent`。用户可以在任意 git 仓库里直接下自然语言任务，系统先做任务分流：普通问答、联网资料问题、文件级代码审查和真正的仓库修改任务分别走不同路径。真正进入 AgentLoop 后，模型只负责输出结构化决策，本地 TypeScript 代码负责执行工具、应用 patch、运行命令和记录 session/event/log。整个项目让我把模型集成、工具系统、安全控制、执行审计和测试回归这些能力串起来了。
+> 我做了一个本地运行的 AI Coding Agent CLI，名字叫 `mini-coding-agent`。用户可以在任意 git 仓库里直接下自然语言任务，系统把请求编译成带能力、证据和输出要求的任务契约，再统一进入 AgentLoop。模型负责提出结构化决策，本地 TypeScript 运行时负责权限校验、工具执行、补丁、命令、完成性门禁和 session/event 审计。整个项目让我把模型集成、上下文治理、安全控制、执行审计和测试回归串成了完整闭环。
 
 ### 3 分钟版本
 
@@ -84,7 +84,7 @@
 2. 再说方案：我做了本地 CLI Agent，不依赖后端和页面，先把核心闭环跑通。
 3. 再说架构：CLI、TaskRouter、AgentLoop、ToolRegistry、CommandRunner、PatchManager、SessionStore。
 4. 再说难点：结构化决策、路径安全、命令安全、上下文压缩、联网回答质量。
-5. 再说结果：能完成本地代码任务闭环，当前正常环境回归基线为 40 个测试文件、303 个测试用例，可写入简历。
+5. 再说结果：能完成本地代码任务闭环，当前正常环境回归基线为 51 个测试文件、423 个测试用例，可写入简历。
 
 ## 6. 适合投哪些岗位
 

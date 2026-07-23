@@ -9,6 +9,7 @@ The project is intentionally focused on the local CLI loop. There is no bundled 
 Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including:
 
 - architecture notes
+- architecture evolution from earlier designs to the current runtime
 - project status and scorecard
 - resume/interview packaging notes
 - demo script
@@ -31,6 +32,7 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Searches public web results through the controlled `web_search` tool when current external information is needed.
 - Fetches bounded public HTTP(S) pages through the `fetch_url` tool.
 - Answers web-capability questions locally: the CLI has controlled, on-demand web tools, not a browser-style always-on session or manual web-search switch.
+- Keeps product capability facts in one registry, classifies capability questions from composable semantic signals instead of complete-sentence cases, and corrects model answers that falsely deny registered web or repository-write capabilities.
 - Maintains governed Memory v2 records with semantic kinds/scopes, evidence-backed automatic writes, TTL, supersession, secret redaction, and pluggable embeddings.
 - Provides repository-local document RAG for Markdown/TXT with safe ingestion, line-aware chunking, incremental source replacement, hybrid retrieval, metadata filters, grounded citations, insufficient-evidence refusal, and offline evaluation metrics.
 - Caches remote embeddings by provider/vector-space and text hash with bounded in-process LRU, single-flight deduplication, and repository-local atomic persistence without storing source text.
@@ -46,6 +48,7 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
 - Reads files with repository path safety checks and refuses internal metadata paths such as `.git` and `.mini-agent`.
+- Reads large source files through token-bounded pagination, tracks merged line-range coverage with a source hash, and blocks a successful full-file review until the primary target is covered from line 1 through EOF.
 - Normalizes code-search result paths to POSIX-style repository paths for stable follow-up tool calls.
 - Applies unified diff patches after `git apply --check`, with `core.autocrlf=false` to avoid machine-specific Git line-ending behavior.
 - Executes structured commands with shell disabled by default.
@@ -191,23 +194,41 @@ mini-agent run "fix the failing test" --max-steps 20
 mini-agent run "inspect repository" --model "your-model"
 mini-agent run "inspect repository" --base-url "https://api.example.com/v1"
 mini-agent run "inspect repository" --event-stream
-mini-agent run "write a C++ two-sum example" --agent-loop
+mini-agent run "fix the failing test" --verbose
+mini-agent run "inspect repository" --trace
+mini-agent run "explain the current design trade-offs" --agent-loop
 mini-agent run "inspect the context and memory architecture" --agents 3
 ```
 
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
-`--agent-loop` forces the repository-editing loop when the router would otherwise answer directly.
-`--agents 2..3` opts into one bounded read-only delegation batch and also forces the AgentLoop. `--agents 1` disables delegation. It is off by default; config can enable it with `multiAgent.mode: "auto"`.
+`--verbose` expands tool inputs, context compaction, cache, token, and timing telemetry. `--trace` additionally prints redacted AgentDecision payloads and per-section context allocation.
+`--agent-loop` keeps the routed task capabilities unchanged but forces a direct response to use the iterative decision protocol instead of the single-shot optimization.
+`--agents 2..3` opts repository tasks into one bounded read-only delegation batch. `--agents 1` disables delegation. It is off by default; config can enable it with `multiAgent.mode: "auto"`.
 
-## Answer Modes
+## Unified Agent Runtime
 
-`mini-agent` separates user input into four modes:
+Every request now runs through one `AgentLoop`. `TaskRouter` no longer selects four independent executors; it provides a semantic hint that is compiled into an `AgentTaskContract`. The contract controls tools, write/command permissions, evidence thresholds, output shape, and step budget:
 
-- `DIRECT_ANSWER`: normal chat, explanations, and explicit snippet-only requests. Output uses `[answer]`.
-- `WEB_ANSWER`: current external-information questions. The CLI runs `web_search`, prefers higher-trust or official-looking sources first, fetches important public pages with `fetch_url`, keeps follow-up scope from the active session, and keeps fetching later-ranked sources when early pages fail. Live/current claims require readable pages from at least two independent domains, and answer URLs must come from this turn's gathered sources. Output uses `[answer]`.
-- `CODE_REVIEW`: file-focused bug inspection and code review. The CLI reads the target file, automatically loads a few related files referenced by local imports/includes, asks the model for structured findings, locally filters out findings whose quoted code does not match the primary file, then runs a second-pass verification step that can downgrade or drop overreaching findings. Output uses `[review]`.
-- `AGENT_LOOP`: repository inspection or modification tasks. The model returns structured decisions for tools, patches, commands, and final summaries. Output uses `[plan]`, `[tool]`, `[patch]`, `[command]`, and `[summary]`.
-- `PLAN`: a persisted read-only operating mode for repository planning. Only read-only tools are exposed; patches, commands, and non-read-only tool calls are blocked again at execution time. Use `mini-agent plan`, `/plan`, `/plan off`, and `/execute`.
+- `DIRECT_RESPONSE`: one AgentLoop step, no tools, no repository access, output `[answer]`.
+- `WEB_RESEARCH`: iterative AgentLoop with only `web_search` and `fetch_url`; live claims require fetched pages from two independent domains and citations must use URLs gathered in the current run. Output `[answer]`.
+- `REPOSITORY_INVESTIGATION`: the shared read-only profile for both code review and repository analysis. Their only architectural difference is the output contract (`CODE_REVIEW` or `REPOSITORY_ANALYSIS`).
+- `REPOSITORY_TASK`: repository reading, patches, controlled commands, verification, optional RAG/MCP, and bounded read-only delegation.
+- `KNOWLEDGE_QUERY`: only the indexed `knowledge_search` capability, with exact file-and-line citation postconditions.
+- `PLAN`: a persisted read-only operating mode layered over the relevant task contract. Patches and commands are blocked again at execution time.
+
+Legacy labels such as `DIRECT_ANSWER`, `WEB_ANSWER`, and `CODE_REVIEW` remain in session/change-log metadata for compatibility; `executionEngine: AGENT_LOOP` records the actual runtime.
+
+## Runtime timeline and telemetry
+
+The CLI renders every AgentLoop run as an ordered terminal timeline. The same versioned `AgentRuntimeEvent` stream is available through `--event-stream` for logs and automation. It covers context construction, auditable decision summaries, tool start/result, patches, live command output, guardrail rejections, LLM calls, diffs, and final results.
+
+LLM telemetry distinguishes prompt, completion, reasoning, prompt-cache read, and provider-reported cache-write tokens. Missing provider fields are shown as `unreported`, never inferred as a cache miss. Direct responses report the separately supplied conversation message count and estimated content tokens; repository and web tasks report session-memory records beneath the context-budget line. Context traces report selected, skipped, and truncated sections plus structured session-memory compaction. Remote embedding telemetry reports memory hits, disk hits, misses, writes, and coalesced requests.
+
+Task-contract capabilities are per-request least-privilege boundaries, not a global product capability list. Product meta-questions such as “what can you do?”, “can you access the web?”, “can you write files?”, or “why did you say you could not?” are answered deterministically from local product/session facts. They do not trigger web research merely because their text mentions networking.
+
+The timeline deliberately does not expose hidden model chain-of-thought. It shows the explicit plan, structured decisions, evidence, tool inputs/results, and deterministic guardrail reasons instead. Machine-readable events and trace payloads are redacted before being printed.
+
+Repository-writing tasks finish with a compact `Changes` card instead of dumping unified diff text into the execution timeline. In an interactive TTY, click the card or press Enter at the changes action to open the built-in full-screen terminal diff viewer; use arrow keys to select a file, PageUp/PageDown or the mouse wheel to scroll, and `q`/Escape to return. Non-interactive runs print `mini-agent diff --session <id>` as the fallback. Task diffs come from isolated before/after working-tree snapshots, so they include new untracked code or documentation files without mixing in changes that already existed before the task.
 
 Declarative skills use a small `SKILL.md` format:
 
@@ -225,9 +246,9 @@ Versioned skills live in `skills/<name>/SKILL.md`; machine-local skills live in 
 
 When the user asks to write code but does not provide a target path, the agent now prefers the repository-editing loop and receives task-specific file-placement guidance from local project signals such as `src/`, `public/`, `src/main/java/`, `tests/`, build files, and detected languages.
 
-For repository analysis requests such as "analyze this repository" or "总结当前项目", the CLI now forces an evidence-gathering pass before summarizing: it lists files, reads README/build files, loads representative source files, and only then asks the model for a grounded project analysis. This avoids shallow summaries based only on a tree snapshot.
+For repository analysis requests such as "analyze this repository" or "总结当前项目", the investigation contract exposes only repository-read tools and refuses a successful final answer until at least one relevant file has been read. Code review uses the same runtime profile with review-specific output instructions.
 
-In interactive mode, web-answer follow-up questions reuse the active session context. The CLI first asks the model for a small web research plan: standalone question, search queries, answer scope, source hints, and answer instructions. If that planner fails, a local fallback planner still carries recent context and adds source-focused queries for live sports scores, release notes, news, and similar time-sensitive topics.
+In interactive mode, web-research follow-up questions reuse the active session context. The current question is resolved against the previous exchange before the same AgentLoop selects search queries and source URLs. Local guardrails reject completion without the contract's search, fetch, independent-domain, and citation evidence.
 
 For example, after asking about World Cup scores, a follow-up like "Japan's recent results" is searched as a World Cup-scoped question instead of a broad national-team query.
 
@@ -239,6 +260,8 @@ Short repository follow-ups can also reuse the active session. For example, if t
 
 File-write confirmation is answered from local session records. If the user asks `你写入了嘛？`, the CLI checks whether a `FILE_CHANGE` record was created after the previous request. It will not ask the model to guess, and it will not claim a file was written when no write record exists.
 
+Artifact-location follow-ups are grounded the same way. After a task creates or modifies files, prompts such as `在哪里`, `放哪了`, `哪个文件`, or `怎么打开` are resolved from the immediately preceding turn's `FILE_CHANGE` records. The CLI returns repository-safe absolute paths, emits a `[follow-up]` timeline entry, and skips the LLM instead of asking it to guess the referent.
+
 ## Regression Suite
 
 The project keeps a focused conversation-level regression suite for the user-visible failures that are easiest to reintroduce:
@@ -248,6 +271,7 @@ The project keeps a focused conversation-level regression suite for the user-vis
 - short follow-ups such as `写入一个文件里面` or `写进去` must reuse the latest generated code
 - short algorithm follow-ups after an edit task must remain in repository-editing mode
 - write-confirmation questions such as `你写入了嘛？` must be grounded in session `FILE_CHANGE` records
+- artifact-location questions such as `在哪里` must return the latest turn's changed paths without an LLM call
 - package-manager `ENOENT package.json` errors must be diagnosed as wrong working-directory problems when the pasted path is outside the active repo
 - omitted-predicate follow-ups such as `葡萄牙呢` must reuse session context
 - repository analysis must read real repository evidence before summarizing
@@ -285,7 +309,7 @@ Interactive slash commands:
 /compact      Write a compact local memory record for the active session.
 /status       Show current agent/session status and tracked LLM usage.
 /repo         Show a repository state summary.
-/diff         Show git diff.
+/diff         Open the latest task changes in the terminal diff viewer.
 /clear        Clear the terminal.
 /exit         Finish the active interactive session and exit.
 ```
@@ -392,8 +416,8 @@ The current MVP uses local guardrails:
 - `read_file` has line limits.
 - `search_code` limits result count.
 - `fetch_url` requires review permission, blocks localhost/private-network targets, validates DNS and each redirect hop, limits timeout/download size, and returns only readable text-like content.
-- `web_search` returns bounded public result titles, URLs, and snippets; it currently tries DuckDuckGo HTML first and falls back to DuckDuckGo Lite when needed. The CLI then ranks sources by domain trust hints, query overlap, and page type before deciding what to fetch, but it still does not grant arbitrary browser control.
-- If a model-generated web answer contradicts the executed tool trace or cites a URL absent from the gathered evidence, the CLI treats it as invalid and asks for a grounded rewrite. A second invalid citation is rejected locally. Product questions about its name, configured model identifier, processing paths, or web capability are answered from deterministic local product knowledge instead of model improvisation.
+- `web_search` returns bounded public result titles, URLs, and snippets; it currently tries DuckDuckGo HTML first and falls back to DuckDuckGo Lite when needed. The `WEB_RESEARCH` contract lets the AgentLoop choose which results to fetch, but it does not grant arbitrary browser control.
+- If a web `FINAL` lacks the required fetched sources, independent domains, or a URL from the gathered evidence, local guardrails reject that decision and return the violation to the same AgentLoop. Product questions about its name, configured model identifier, unified runtime, or web capability are answered from deterministic local product knowledge instead of model improvisation.
 - Patch application runs `git apply --check` before `git apply`.
 - Commands execute as structured `executable + args` processes with shell disabled by default, plus timeout and output truncation.
 - Explicit shell or shell-like commands require additional approval; dangerous command patterns such as `rm -rf /`, `sudo`, `mkfs`, `shutdown`, `reboot`, and `chmod 777 /` are blocked.
@@ -441,8 +465,8 @@ The default provider remains a dependency-free deterministic local embedding. Se
 
 Runtime logs and task change logs serve different purposes:
 
-- `logs/YYYY-MM-DD.jsonl` records operational events such as task start/end, tool debugging, command execution, CLI errors, and code-review stages like target resolution, primary/supplemental file loading, grounding, and verification.
-- `change-log.jsonl` records task-level review entries: session id, task text, answer mode, success/failure, summary, changed files, diff stat, test outcomes, and task metadata such as review file, supplemental file count/list, findings count, rejected count, and verdict when the task is a code review.
+- `logs/YYYY-MM-DD.jsonl` records operational events such as task start/end, tool debugging, command execution, and CLI errors.
+- `change-log.jsonl` records session id, task text, compatibility mode, success/failure, summary, changed files, diff stat, test outcomes, and unified-runtime metadata (`executionEngine`, `taskKind`, and `outputKind`).
 
 List sessions:
 

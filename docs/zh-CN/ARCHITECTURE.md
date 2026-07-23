@@ -1,522 +1,249 @@
 # 架构设计说明
 
-## 1. 当前定位
+本文描述当前代码的可验证事实。关键设计从旧方案到当前方案的迁移原因、取舍和后续方向，见 [架构演进记录](ARCHITECTURE_EVOLUTION.md)。
 
-`mini-coding-agent` 是一个本地 CLI 形态的 AI Coding Agent。用户在某个 git 仓库中运行 CLI，输入自然语言任务，Agent 通过一组受控工具完成代码搜索、文件读取、联网搜索资料、联网读取公开文档、补丁应用、命令执行、测试反馈和 diff 总结。
+## 1. 架构定位
 
-它的主业是代码任务，但不应该丢失正常 AI 助手的基础能力。普通非代码问题会走直接回答；需要外部时效信息的问题会进入联网回答模式，通过受控联网工具搜索和读取资料；真正需要读写仓库、执行命令和修复问题的任务才进入 AgentLoop。
+`mini-coding-agent` 是一个本地 TypeScript CLI Agent。当前架构采用“单一 AgentLoop + 任务契约 + 确定性执行内核”：
 
-当前版本不内置后端服务和前端页面。所有核心能力都在 TypeScript CLI Runner 中完成。
+- LLM 提议下一步决策。
+- Task Contract 限定本次任务能看到和使用的能力。
+- 本地代码负责输入校验、权限、工具执行、证据检查和完成性判断。
+- Session、Event 和 Checkpoint 保存可恢复的执行轨迹。
+
+普通回答、Web 研究、代码审查、仓库分析和仓库修改不再拥有各自的 Task Executor。它们全部进入同一个 `AgentLoop`，差异只由契约表达。
 
 ## 2. 总体链路
 
 ```text
 CLI
- -> TaskRouter
- -> DIRECT_ANSWER / WEB_ANSWER / AGENT_LOOP
- -> OpenAICompatibleClient / ToolRegistry / ContextBuilder
- -> AgentDecision / PatchManager / CommandRunner
- -> SessionStore / EventStore
- -> answer 或 final summary + git diff
+ -> TaskRouter（语义提示，不选择执行器）
+ -> TaskContractBuilder
+ -> AgentTaskContract
+ -> AgentLoop
+    -> ContextBuilder
+    -> LlmClient
+    -> AgentDecision
+    -> Capability / Permission / Completion Guardrails
+    -> ToolRegistry / Patch / Command / Read-only delegation
+ -> SessionStore / EventStore / Checkpoint
+ -> answer / review / summary / diff
 ```
 
-核心循环：
+CLI 的任务分派只有一个目标：`runAgentLoopTask`。旧的 `DirectAnswerTask`、`WebAnswerTask`、`CodeReviewTask` 和 `RepositoryAnalysisTask` 已移除。
 
-1. 初始化 `AgentState`。
-2. 构建仓库上下文和当前 session 的短期记忆。
-3. 先用 `TaskRouter` 判断是直接回答、联网回答，还是进入仓库 AgentLoop。
-4. 直接回答任务只调用文本 LLM，不改文件。
-5. 联网回答任务先调用 `web_search`，再按需要调用 `fetch_url`；如果前几个来源抓取失败，会继续尝试后续候选来源。实时问题必须抓到至少两个独立域名的可读正文，生成答案中的 URL 也必须来自本轮工具证据。
-6. 仓库任务调用真实 LLM，解析出 `AgentDecision`。
-7. 根据 decision 执行工具、应用 patch、运行命令或结束。
-8. 命令失败时把日志放回上下文。
-9. 达到 final 或最大步数后输出总结和 diff。
-
-如果任务是“写个 demo / 写个页面 / 写个游戏 / 写个某语言示例 / 写一份设计文档”，当前版本默认也会进入 `AGENT_LOOP`，并通过一段本地生成的“新文件放置建议”告诉模型优先把新文件落到哪里，例如 `src/`、`public/`、`src/main/java/`、`tests/`、已有 `docs/` 或仓库根目录。文档创建与代码创建一样有落盘后置条件：没有成功 patch 时不能直接返回成功。
-
-## 3. 目录职责
+产品自身能力采用三层事实链，避免把某几句用户问法硬编码成特殊执行流程：
 
 ```text
-src/cli              CLI 入口、调试命令和回答模式支持模块
-src/agent            TaskRouter、AgentLoop、状态、决策类型
-src/context          仓库扫描、仓库状态分析和上下文拼接
-src/tools            统一工具接口和工具实现
-src/patch            patch 预览、check、apply
-src/command          命令执行、超时、输出截断
-src/git              git status/diff/commit 辅助能力
-src/permission       权限级别和危险命令拦截
-src/session          JSONL session/event 存储
-src/memory           长期记忆治理、可替换 embedding、关键词和向量式检索
-src/rag              文档加载、分块、增量索引、混合检索、引用与离线评测
-src/skills           声明式 Skill 发现、校验、选择和上下文注入
-src/mcp              MCP stdio/Streamable HTTP 客户端、工具发现、权限映射和调用转发
-src/eval             Agent 评测 harness、脚本化 LLM 客户端
-src/llm              LLM 接口和 OpenAI-compatible 客户端
-src/web              联网问题规划、追问改写和搜索源策略
-src/diagnostics      常见运行错误分类和本地诊断
-src/config           本地配置文件读取和脱敏
-src/utils            路径安全、错误处理、运行日志
-tests                自动化测试
+Capability Registry（产品事实）
+ -> Product Meta Classifier（组合识别主题、语气、疑问与历史解释意图）
+ -> TaskRouter / 本地确定性回答
+
+LLM 最终回答
+ -> Capability Truth Guard
+ -> 与 Registry 冲突时纠正并记录审计事件
 ```
 
-## 4. AgentDecision
+## 3. AgentTaskContract
 
-`TaskRouter` 在进入 AgentLoop 之前先做轻量分流：
+`src/agent/AgentTaskContract.ts` 定义统一任务契约。主要字段包括：
 
-- 普通问答和明确只要片段的请求走 `DIRECT_ANSWER`，只输出答案，不改仓库。
-- 默认的“写代码 / 实现功能 / 做个 demo / 写个游戏”会走 `AGENT_LOOP`，优先把结果落成仓库文件，而不是只在聊天里贴代码。
-- “写一份设计文档 / 创建 README / 撰写技术报告”也会走 `AGENT_LOOP`；“如何写设计文档”或明确要求“只在聊天展示、不改文件”仍走 `DIRECT_ANSWER`。
-- 如果当前输入本身很短，但语义上是在承接上一轮代码结果，例如“写入一个文件里面”“写进去”“保存一下”“把刚才那个保存成文件”，CLI 会先从当前 session 中提取最近一段代码块，重写成明确的写文件任务，再进入 `AGENT_LOOP`。
-- 如果上一轮是仓库编辑任务，下一轮是“数据流的中位数呢”这类短代码追问，CLI 会保留 `AGENT_LOOP`，避免把连续实现需求误判成普通聊天。
-- 如果用户问“你写入了嘛？”，CLI 不会把这个问题交给模型猜，而是直接检查 session 中上一轮请求之后是否存在 `FILE_CHANGE` 记录。
-- 需要最新资料、新闻、版本、赛事结果、收盘行情、汇率、市场指数等外部信息的问题走 `WEB_ANSWER`，输出基于搜索资料的答案，不改仓库。
-- 文件级 bug 检查和代码审查走 `CODE_REVIEW`，先读取目标文件，再额外加载少量由相对 import、require、`#include` 推导出来的相关文件作为补充上下文，再让模型返回结构化 findings，先由本地代码校验 `codeQuote` 是否真的落在主文件对应行附近，再做一轮 review 复核，进一步过滤“引用代码是真的，但结论过度武断”的 finding。
-- Review 支持逻辑集中在 `CodeReviewSupport`，完整执行编排位于 `CodeReviewTask`；CLI 入口只负责选择并调用该任务。
-- 明确提到仓库、文件、修改、测试、修复等任务走 `AGENT_LOOP`。
-- 对于“分析当前项目”“总结当前仓库”这类仓库分析请求，CLI 虽然仍归在 `AGENT_LOOP` 大类下，但会先执行一条本地强制取证路径：列出目录、读取 README / 构建文件、读取代表性源码文件；如果没有读到源码文件，就拒绝直接总结。这样能避免模型只看目录树摘要就给出看似正确、实则不够扎实的概述。
-- “刚才聊了什么 / 还记得吗 / 上次呢”这类会话追问走 `DIRECT_ANSWER`，但会带上当前 session 的最近记录。
-- `--agent-loop` 可以强制进入仓库修改流程。
+- `kind`：任务的语义类型。
+- `outputKind`：最终输出要求。
+- `executionStrategy`：单步文本回答或多步决策循环。
+- `capabilities`：仓库读写、命令、Web、知识库、MCP、委派等能力开关。
+- `evidence`：成功结束前必须满足的证据门槛。
+- `maxSteps`：本次任务的默认步数预算。
+- `instructions`：任务特定输出和调查要求。
+- `resultMode`：兼容历史 session/change-log 的旧标签。
 
-`WEB_ANSWER` 会先调用 `WebQuestionPlanner` 生成搜索计划：
+当前主要契约：
 
-- `standaloneQuestion`：把追问改写成可以独立搜索的问题。
-- `searchQueries`：生成 1 到 4 条搜索 query。
-- `answerScope`：明确回答范围。
-- `sourceHints`：提示优先找官方、实时、发布说明、比分页等来源。
-- `answerInstructions`：约束回答不要混淆赛事、版本、政策或其它领域边界。
-- `needsLiveData`：标记是否属于实时或强时效问题。
+| Task kind | 能力 | 典型输出 |
+|---|---|---|
+| `DIRECT_RESPONSE` | 无工具、无仓库访问 | 普通回答、代码片段 |
+| `WEB_RESEARCH` | `web_search`、`fetch_url` | 带本轮来源的联网回答 |
+| `REPOSITORY_INVESTIGATION` | 仓库只读工具 | 代码审查或仓库分析 |
+| `REPOSITORY_TASK` | 仓库读写、命令、验证，可选 RAG/MCP/委派 | 修改结果与 diff |
+| `KNOWLEDGE_QUERY` | `knowledge_search` | 带文件行号引用的知识回答 |
 
-Web 支持逻辑位于 `WebAnswerSupport`：负责来源校验、去重、排序、抓取候选、实时问题双来源门槛、引用 URL 白名单和能力纠偏；完整执行编排位于 `WebAnswerTask`。Direct、Review、AgentLoop 和仓库分析也分别拥有独立 Task 模块，公共 Session/LLM 生命周期由 `CliTaskRuntime` 提供。
+契约能力只描述“当前这一条请求的最小权限”，不能被解释为整个产品的能力清单。例如 `DIRECT_RESPONSE` 本轮没有写文件和 Web 工具，不代表 Mini Coding Agent 不能写文件或联网；下一条编辑请求会建立 `REPOSITORY_TASK`，时效信息请求会建立 `WEB_RESEARCH`。能力清单、能力确认以及“为什么上一轮否认某项能力”属于本地产品元问题，由确定性产品事实回答，不进入 Web 研究。
 
-规划优先由 LLM 根据 session memory 完成；如果规划失败，会回退到本地启发式策略。例如上一轮问“世界杯最新比分”，下一轮问“日本队最近几场的成绩”，搜索 query 会携带“世界杯”范围，避免泛化成日本国家队所有友谊赛、预选赛或其它赛事成绩。
+### 3.1 Capability Registry 与产品元问题
 
-对于 `葡萄牙呢`、`那这个呢` 这类很短的追问，CLI 还会先做一层本地 follow-up 重写：如果上一轮用户问题已经明确了省略掉的谓语或范围，例如“西班牙是强队吗”，那么短追问会先被补成“葡萄牙是强队吗”，再继续走路由和回答流程。
+`src/agent/CapabilityRegistry.ts` 是产品能力的唯一事实源，集中声明能力是否支持、对应任务契约、工具、描述和限制。提示词、确定性回答和输出校验都从这里生成，不能各自维护相互漂移的文案或事实。
 
-仓库任务也有类似机制，但处理的是“代码产物承接”而不是问句补全。比如上一轮是“给我一个 Python 代码片段”，下一轮是“写入一个文件里面”或“写进去”，本地 `TaskFollowUp` 会从 session 记录中提取最近的代码块、保留原始需求、丢掉解释性文字，再把它拼成一个明确的落盘任务，避免 Agent 反过来再问用户“要写什么、写到哪里”。
+`ProductCapability` 不枚举完整问句，而是组合以下语义信号：
 
-写入确认问题也有本地兜底。`你写入了嘛？` 会读取当前 session 的 JSONL 记录，查找上一轮用户请求之后是否出现 `FILE_CHANGE`。如果没有，CLI 会明确说“没有查到上一轮请求对应的新文件写入记录”，并最多补充最近一次历史文件变更，防止模型把旧文件变更误说成刚才已经写入。
+- 产品主体：你、这个 CLI、Mini Agent 等。
+- 能力主题：联网研究、仓库写入或全局能力清单。
+- 言语行为：询问可用性、索要能力清单、解释上一轮限制。
+- 情态与疑问：能否、是否支持、为什么、上一轮等。
 
-对于 EDG、T1、Apple 这类可能跨游戏、跨产品或跨领域的实体，如果用户没有指定领域，规划器不能默认选择一个方向。它会生成更宽的 query，并要求最终回答按领域列出主要可能，或提示用户补充范围。例如“EDG 哪一年夺冠了”应区分《英雄联盟》S11 2021 年和《无畏契约》Valorant Champions 2024 年，而不是只回答其中一个。
+因此“你能联网吗”“所以以后也碰不到外网吗”“刚才那个权限是永久的吗”可以归入同一产品元意图，而“请联网搜索 Node.js 版本”仍是需要真正执行的 Web 任务。规则只承担高置信度结构识别；未达到阈值的开放表达仍交给模型理解。
 
-对于实时比分、版本发布、政策新闻等强时效问题，fallback 策略会自动追加 source-focused query。例如赛事比分会优先尝试官方赛事站、比分页和赛程结果页；版本问题会追加官方 release notes、changelog 和 GitHub releases。
+模型可以解释自然语言，但不能定义产品事实。`CapabilityTruthGuard` 会检查 `FINAL` 中“不能联网”“不能修改仓库”等全局能力否认；当用户确实在讨论产品能力且回答与 Registry 冲突时，运行时会替换为权威事实，并写入 `CAPABILITY_CLAIM_CORRECTED` 事件。它不会改写普通任务中合理的权限错误或暂时性失败。
 
-对于股市、汇率和大盘指数这类金融行情问题，fallback 策略会补充东方财富、新浪财经、交易所和指数关键词，并要求回答区分指数点位、涨跌点数、涨跌幅、交易日期以及是否为收盘数据；如果来源无法核验精确行情，必须明确说明不确定性，不能给投资建议。
+### 3.2 ExternalFactPolicy
 
-当前联网工具是受控公网搜索和页面抓取，不是实时比分或商业搜索 API。遇到动态比分页、反爬页面或 JS 渲染页面时，工具可能只能拿到摘要或拿不到结构化数据。此时回答必须说明“无法核验实时比分”，不能编造结果。
+外部事实是否进入 Web 不只看“最新/联网”关键词。`ExternalFactPolicy` 先判断证据等级：
 
-Agent 每轮从模型获得一个结构化决策：
+- `NOT_EXTERNAL_FACT`：仓库工作、产品元问题、计算、创作和只审计“此前说过什么”。
+- `GENERAL_KNOWLEDGE`：定义、概览、原理、非穷举比较，以及“有哪些知名/代表性作品”这类开放样本。
+- `VERIFICATION_REQUIRED`：完整或有界清单、精确年份/地点/数量、易变化事实、明确事实核查或来源要求。
 
-- `tool_call`：调用只读或安全工具。
-- `delegate_readonly`：把 2 到 3 个相互独立的调查任务并行交给只读子 Agent。
-- `apply_patch`：应用 unified diff。
-- `run_command`：执行命令，例如测试。
-- `ask_user`：需要用户补充信息。
-- `final`：任务完成，输出总结。
-- `failed`：模型调用或决策解析失败。
+`VERIFICATION_REQUIRED` 编译为 `WEB_RESEARCH`；`GENERAL_KNOWLEDGE` 可以使用 `DIRECT_RESPONSE`，但提示词要求把模型记忆当未核验一般知识，不能为了完整感编造精确细节。分类按问题形态组合信号，不维护作品名或特定问句白名单。
 
-这种设计把“模型想做什么”和“程序怎么执行”分开，方便做权限控制、日志记录和测试。
+显式 Web 任务还受 `WebResearchPolicy` 限制：查询可以增加同义词，但不能擅自加入排名或最高级；抓取 URL 必须来自用户输入或本轮成功搜索。Policy 决定需要什么证据，Task Contract 决定开放什么能力，Guardrail 在执行前和结束前验证两者。
 
-## 4.1 Plan 操作模式
-
-`PLAN` 不再只是一次进度 decision。Session 额外保存独立于生命周期状态的 `operatingMode: EXECUTE | PLAN`：暂停和恢复不会丢失当前操作模式。
-
-Plan 模式具有两层只读保护：第一层只向模型暴露 `readOnlyHint=true` 且 `destructiveHint=false` 的工具；第二层在 `AgentLoop` 执行 decision 前硬拦 `APPLY_PATCH`、`RUN_COMMAND` 和任何非只读 `TOOL_CALL`。因此即使模型返回恶意或漂移的写操作，也不会进入 ToolRegistry、PatchManager 或 CommandRunner。
-
-用户可以使用 `mini-agent plan <task>` 进行一次性规划；交互模式使用 `/plan`、`/plan off` 和 `/execute`。`/execute` 只把最近成功计划作为指导重新交给正常 AgentLoop，并要求重新检查当前仓库，不会直接执行计划文本里的命令。
-
-## 4.2 决策质量闸门
-
-真实模型会出现两类典型问题：一类是 JSON 形状轻微漂移，例如 `apply_patch` 写成小写、`description` 漏掉、把 `summary` 写成 `message`；另一类是语义上撒谎，例如没有真正写文件却说“已创建”，或者 session 中已经有上一轮代码却反问“要写什么内容”。
-
-当前版本用两层机制兜底：
-
-1. `DecisionParser` 先对常见字段漂移做规范化，再交给 zod 校验。它只宽容低风险形状问题，不会补造核心内容。例如 patch 文本缺失仍然失败，未知 decision type 仍然失败。
-2. `TaskGuardrails` 在 `AgentLoop` 执行关键 decision 前做后置条件校验。对于“写代码 / 保存到文件 / 创建文件 / 实现功能”这类仓库写入任务，如果没有成功 `APPLY_PATCH`，模型不能直接 `FINAL success`；如果已经有足够代码上下文，也不能再 `ASK_USER` 要用户重复提供内容或文件名。
-
-如果质量闸门拦截了 decision，它不会立即把任务判死，而是把错误写入 session 的 `ERROR` 和下一轮上下文，让模型根据明确错误继续修正。只有连续失败或重复同一错误超过阈值时，AgentLoop 才会失败退出。
-
-这层设计的原则是：模型可以提出计划和补丁，但“是否真的完成”必须由本地状态、工具结果和 session 记录判断，而不是相信模型一句总结。
-
-## 4.3 运行错误诊断器
-
-用户经常会把终端报错直接贴进对话。如果所有报错都交给模型自由解释，模型容易忽略当前仓库路径、命令执行目录、端口状态等本地事实。
-
-当前版本新增 `ErrorClassifier`，把常见运行错误先归类成结构化诊断结果：
-
-- `WRONG_WORKING_DIRECTORY`：例如 `npm error enoent Could not read package.json`，且报错路径指向当前仓库外部。
-- `COMMAND_NOT_FOUND`：例如 `mini-agent: command not found`。
-- `PORT_IN_USE`：例如 `Port 8080 was already in use` 或 `EADDRINUSE`。
-- `CONNECTION_REFUSED`：例如 `ECONNREFUSED 127.0.0.1:3308`。
-- `PERMISSION_DENIED`：例如 `EACCES` 或 `Permission denied`。
-
-`TaskRouter` 只根据“是否存在高置信诊断”把任务分到 `DIRECT_ANSWER`；真正的诊断渲染在 CLI 中完成。这样以后新增错误类型时，只需要扩展 `src/diagnostics/ErrorClassifier.ts` 和对应测试，不需要继续在 Router、CLI、Prompt 里散落一堆特殊判断。
-
-诊断结果包含 `category`、`confidence`、`title`、`explanation`、`evidence`、`suggestedCommands` 和 `metadata`。模型后续如果要参与修复，也应该基于这个结构化诊断，而不是直接猜测错误原因。
-
-## 4.4 Context Engine v2
-
-AgentLoop 不再在每一步固定拼接 README、目录树、完整 AgentState 和最近结果 JSON。新版先由 `TaskPhaseDetector` 判断 `DISCOVERY / IMPLEMENTATION / VERIFICATION / RECOVERY`，再由 `WorkingSet` 汇总当前目标、用户约束、相关文件、修改文件、已完成动作、未解决问题、最新失败和验证状态。
-
-`ContextPlanner` 对候选 section 做 token 估算、优先级排序和双重预算控制；任务、Working Set、未解决错误以及验证阶段的 Diff 属于高优先级或必选证据。README 只在任务明确涉及项目概览、安装、运行、使用方式或 README 本身时读取；目录树只在发现阶段且目标文件尚未确定时读取；构建文件只在构建、运行、依赖和测试任务中读取。找到目标文件后，这些发现阶段信息会自动退出上下文。
-
-最近工具、命令和 Patch 结果会先转成受限证据摘要，完整 patch 不再和 `Current diff` 重复注入。发送给模型的顶层 state 也只保留 step、状态、运行模式、最后错误和是否已有仓库变更，不再绕过 ContextBuilder 重放全部历史数组。
-
-每轮构建都会写入一个不包含正文的 `CONTEXT_BUILT` 事件，记录阶段、总字符数、估算 token 数，以及各 section 是否入选、是否截断和选择原因。超长 Session 会临时生成结构化压缩，优先保留用户约束、任务结果和最近记录；长期记忆仍与文档 RAG 分离。AgentLoop 普通仓库任务只允许稳定的偏好、项目约定和架构决策，显式历史/续接请求才会扩大到结果和错误方案。
-
-AgentLoop 每次开始、动作执行前、步骤完成后和终止时都会写入版本化 `AGENT_CHECKPOINT`。checkpoint 只保存受限 Working Set、已修改文件、已完成动作、最近失败、验证状态、成功副作用和正在执行的动作，不复制完整 patch、工具正文或命令输出。`AgentStateReducer` 在显式复用 session 时只恢复同一运行模式下最新的 `RUNNING / WAITING_USER` checkpoint；`FINISHED / FAILED` 或后面已有 `TASK_SUMMARY` 的 checkpoint 都视为终态，避免上一任务污染下一任务。若中断发生在 tool、patch 或 command 执行途中，恢复后的阶段为 `RECOVERY`，要求先检查当前仓库状态，不能盲目重放可能已经生效的动作。
-
-### 任务完成契约（Definition of Done）
-
-`TaskCompletionContract` 根据用户目标和实际修改文件生成确定性的验收条件，并作为必选上下文 section 提供给模型。普通回答、知识库查询、文档变更、源码变更、配置变更和只读计划使用不同契约；文档变更只要求真实 patch，源码与结构化配置变更则要求在最后一次成功 patch 之后执行相关测试、类型检查、lint、build 或其它验证。
-
-动作结果在 `AgentState` 中按真实执行顺序归约。成功验证之后再应用 patch 会立刻使验证失效；验证失败也不能被旧的成功结果覆盖。验证证据按 `DIFF_HYGIENE < SYNTAX < STATIC < TEST` 分级，并保存是否覆盖整个仓库以及命令中明确出现的文件作用域。动态脚本至少需要语法检查，TypeScript 等静态/编译型源码与结构化配置至少需要静态检查，修复、回归、重构和测试文件变更需要测试；弱检查或无关文件检查不能满足更强契约。`TaskGuardrails` 在 `FINAL success=true` 前本地检查这些后置条件，因此模型即使忽略上下文也不能用一句“已经完成”绕过。checkpoint 同时持久化分级验证证据，中断恢复后仍保持同样的时序与强度语义；`/status` 会显示当前变更和验证证据。
-
-### 受控多 Agent 协作
-
-多 Agent 默认关闭，可通过 `mini-agent run ... --agents 2..3`、`mini-agent plan ... --agents 2..3` 或 `multiAgent.mode: "auto"` 启用。启用后，父 Agent 可以返回一次 `DELEGATE_READONLY`，声明 2 到 3 个角色化调查任务，例如仓库结构分析、验证方案设计和风险复核。
-
-这不是多个写入者并发操作同一工作区。父 Agent 始终是唯一写入者；子 Agent 使用独立 LLM client 和独立内存状态，只能看到本地、闭世界、只读工具，不能调用 MCP/联网工具、运行命令、应用 patch、询问用户或继续嵌套委派，也不直接写 SessionStore、EventStore 或 checkpoint。Coordinator 在受限并发、步骤、LLM 调用、工具调用和报告长度预算内运行子任务，然后按声明顺序把成功与失败结果一次性写回父 session。父 Agent 收到的报告会标记为不可信建议证据，重要结论仍需复核后才能修改文件或声明完成。
-
-## 4.5 新文件放置建议
-
-为了减少模型在“用户没给目标路径”时乱猜文件位置，`ContextBuilder` 会在创建新产物且尚未成功应用 patch 时按需注入 `New file placement guidance`。这段内容由 `FilePlacementAdvisor` 根据仓库真实结构生成，例如：
-
-- 是否存在 `src/`、`app/`、`public/`、`static/`、`scripts/`
-- 是否是 Maven / Gradle / Go / Node.js 项目
-- 当前主要语言分布
-- 当前任务更像源码、测试、脚本还是独立浏览器 demo
-
-然后给出 1 到 4 个建议目标路径，例如：
-
-- `src/median_finder.ts`
-- `public/game_2048.html`
-- `src/main/java/MedianFinder.java`
-- `tests/median_finder.test.ts`
-
-这样模型即便不知道当前仓库的惯例，也会优先沿着本地工程结构来创建新文件。
-
-## 5. 工具系统
-
-每个工具实现统一接口：
-
-```ts
-interface Tool<TInput, TResult> {
-  name: string;
-  description: string;
-  inputSchema: z.ZodSchema<TInput>;
-  permissionLevel: PermissionLevel;
-  metadata?: {
-    source?: "local" | "mcp";
-    category?: "filesystem" | "search" | "git" | "patch" | "command" | "web" | "external";
-    annotations?: {
-      readOnlyHint?: boolean;
-      destructiveHint?: boolean;
-      idempotentHint?: boolean;
-      openWorldHint?: boolean;
-    };
-  };
-  execute(input: TInput, context: ToolContext): Promise<ToolResult<TResult>>;
-}
-```
-
-`ToolRegistry` 负责：
-
-- 注册工具。
-- 按名称查找工具。
-- 用 zod 校验输入。
-- 包装执行异常。
-- 返回结构化 `ToolResult`。
-- 导出工具 spec 给 LLM prompt。
-- 导出带能力标注的 tool manifest。
-- 导出 MCP tool descriptor，并把远端 MCP 工具统一转换为本地 `Tool`。
-
-工具 metadata 中的 `annotations` 用于描述工具边界：
-
-- `readOnlyHint`：是否只读。
-- `destructiveHint`：是否可能修改本地状态。
-- `idempotentHint`：重复调用是否相对安全。
-- `openWorldHint`：是否访问公网或外部世界。
-
-这层信息会进入 LLM tool spec，也可以通过 `mini-agent tool manifest` 或 `mini-agent mcp tools` 查看。它的作用是让模型、CLI、未来 UI 和外部工具协议都能理解工具风险，而不是只靠工具名字猜。
-
-目前工具：
-
-- `list_files`
-- `read_file`
-- `search_code`
-- `git_status`
-- `git_diff`
-- `web_search`
-- `fetch_url`
-- `apply_patch`
-
-MCP 已从 descriptor bridge 升级为可运行的客户端链路：支持 stdio 和 Streamable HTTP，完成 `initialize`、`notifications/initialized`、`tools/list`、`tools/call`，远端工具按 `<server>__<tool>` 隔离名称，并通过配置映射到现有权限系统。Registry 统一记录 MCP 调用结果，任务结束时关闭子进程或 HTTP session。当前尚未实现 server-initiated sampling/elicitation、resources、prompts、OAuth 和旧版 HTTP+SSE 回退，因此应表述为“真实 MCP tools runtime”，而不是完整覆盖 MCP 全协议。
-
-## 6. 路径安全
-
-文件类工具不直接拼字符串访问路径，而是统一调用 `resolveRepoPath(repoPath, targetPath)`。
-
-安全策略：
-
-- 支持相对路径。
-- 拒绝访问仓库外路径。
-- 拒绝绝对路径逃逸。
-- 拒绝 `.git` 和 `.mini-agent` 等内部路径的危险读、搜、写。
-- 工具返回给模型的仓库相对路径统一为 POSIX 风格，避免 Windows `\` 路径影响后续工具调用。
-- 错误返回清晰 message，例如 `Path is outside repository`。
-
-这保证 Agent 即便收到不可靠的模型输出，也不能随意读写仓库外文件。
-
-## 7. 联网工具
-
-联网能力通过 `web_search` 和 `fetch_url` 两层提供，而不是让 Agent 任意访问网络。
-
-`web_search` 用于搜索公开网页结果，返回标题、URL 和摘要。它适合回答“最新资料”“网上查一下”“新闻/来源”等问题。
-
-`fetch_url` 用于读取指定公开 URL。它的边界是：
-
-- 只支持 `http` 和 `https`。
-- 拒绝 localhost、`.local` 和明显的内网 IP。
-- 限制超时时间和最大下载字节数。
-- 只返回文本、HTML、JSON、XML 等可读内容。
-- HTML 会做简单文本抽取，避免把脚本和样式塞进上下文。
-
-当前 `web_search` 默认先尝试 DuckDuckGo HTML 结果页做轻量解析；如果 HTML 结果为空或质量不够，再降级到 DuckDuckGo Lite。CLI 在抓取来源前还会结合域名可信度、query 词项覆盖、官方/发布页特征和域名去重做一轮排序，尽量优先抓取更像官方说明、release notes、比赛结果页的来源，避免前三条都落在同一站点上。后续如果需要更稳定的生产效果，可以继续接 Brave、Tavily、SerpAPI 或企业内部搜索 API。
-
-“你不能联网吗？”这类能力询问不应该触发网页搜索。名称、当前配置的模型标识、五条处理路径和联网能力都由本地产品知识确定性回答，避免模型虚构产品说明。CLI 不要求退出会话或手动切换聊天室，每条输入都会重新路由；“你用搜一下啊”会复用上一轮真实问题。如果 `WEB_ANSWER` 已经执行工具，而模型否认联网能力或引用本轮证据中不存在的 URL，本地会要求重写；重写仍包含伪造链接时直接拦截。
-
-## 7.5 仓库状态分析
-
-`git status`、`git diff`、`git log` 只属于事实层，不能直接等价于 Agent 对仓库的理解。当前版本增加了 `RepoStateAnalyzer`，用于把多种信号合成更适合模型和用户阅读的状态摘要：
-
-- git 分支、commit、变更文件和 diff 统计。
-- 项目构建文件，例如 `package.json`、`pom.xml`、`go.mod`。
-- 主要语言分布。
-- package scripts。
-- 建议验证命令，例如 `npm test`、`pnpm test`、`mvn test`、`go test ./...`。
-
-这层摘要主要用于仓库视角的状态查看：交互式请使用 `/repo`，非交互模式可以使用 `mini-agent status` 或 `mini-agent repo`；`mini-agent git status` 仍保留为底层 git 调试命令。
-
-## 8. Patch 设计
-
-patch 由 `PatchManager` 管理：
-
-1. 预览 patch。
-2. 检查 patch 是否越权或修改内部目录。
-3. 执行 `git apply --check`。
-4. 执行 `git apply`。
-5. 获取最终 `git diff`。
-6. 把 patch 事件写入 session/event。
-
-这样可以把“模型生成修改”和“本地实际落盘”之间加一层工程校验。
-
-实现上会用 `git -c core.autocrlf=false apply --check` 和 `git -c core.autocrlf=false apply`，避免开发者机器上的全局 Git 换行配置把 patch 行尾悄悄改掉，导致同一个补丁在不同系统上表现不一致。
-
-## 9. 命令执行
-
-`CommandRunner` 使用子进程执行命令，返回结构化结果：
-
-```json
-{
-  "command": "npm test",
-  "exitCode": 1,
-  "stdout": "...",
-  "stderr": "...",
-  "durationMs": 1234,
-  "success": false,
-  "timedOut": false,
-  "truncated": false
-}
-```
-
-命令执行有几个限制：
-
-- 默认超时。
-- 最大输出长度。
-- 危险命令拦截。
-- 工作目录限制。
-- 默认禁用 shell，只有显式 shell 模式才会走 shell 命令。
-- 失败结果进入下一轮上下文。
-
-## 10. Session 和 Event
-
-`.mini-agent/` 是本地记录目录：
+代码审查和仓库分析都属于 `REPOSITORY_INVESTIGATION`。两者拥有完全相同的权限和循环，差异只有：
 
 ```text
-.mini-agent/
-  config.json
-  change-log.jsonl
-  sessions/<sessionId>.jsonl
-  events/<sessionId>.jsonl
-  logs/YYYY-MM-DD.jsonl
-  memory/index.jsonl
+CODE_REVIEW          -> finding、严重级别、文件、行号、修复建议
+REPOSITORY_ANALYSIS  -> 模块、数据流、证据文件、架构判断、演进建议
 ```
 
-Session 更像最终状态记录，Event 更像时间线。二者都用 JSONL，是因为：
+`PLAN` 不是另一套任务类型，而是叠加在当前契约上的只读操作模式。
 
-- 易追加。
-- 易人工查看。
-- 不依赖数据库。
-- 崩溃时仍保留已写入步骤。
-- 以后可以被别的系统读取。
+## 4. AgentLoop
 
-新增的运行日志和任务变更日志解决两个不同问题：
+每轮执行流程：
 
-- `logs/YYYY-MM-DD.jsonl` 是排障日志，记录任务开始/结束、工具调试、命令执行、patch 应用、CLI 异常，以及 `CODE_REVIEW` 的关键阶段，例如 review target 解析、主文件加载、补充文件加载、grounding 和 verification。日志会做基础脱敏，例如 API key、authorization、token、password 等字段不会明文写入。
-- `change-log.jsonl` 是复盘日志，记录每次任务的 session、任务文本、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果。对于 `CODE_REVIEW`，还会额外记录 review file、loaded lines、supplemental files、findings 数量、rejected 数量和最终 verdict。它适合做 review、demo 复盘和面试材料整理。
+1. 根据契约过滤 ToolSpec。
+2. 根据 Plan 模式再次过滤非只读工具。
+3. 构建有预算的上下文。
+4. 从 LLM 获取一个 `AgentDecision`。
+5. 校验决策是否在本次契约的能力范围内。
+6. 执行工具、补丁、命令、只读委派或用户询问。
+7. 保存 Decision、Tool Result、Event 和 Checkpoint。
+8. 对 `FINAL` 执行本地后置条件检查。
+9. 对涉及产品能力的回答执行 Registry 一致性校验。
+10. 成功、失败或达到步数上限后结束。
 
-交互式 CLI 启动时会创建一个活跃 session；用户连续输入多轮任务时复用同一个 session，只有 `/new` 才会创建新 session。`/pause` 会把当前 session 标记为 `PAUSED` 并退出，适合临时离开；`/exit` 会把当前 session 标记为 `FINISHED`，表示这轮会话已经结束。`mini-agent resume <sessionId>` 会重新打开指定 session，把状态切回 `ACTIVE`。会话对话通过 SessionMemory 恢复；若最新 Agent 任务确实在执行中，还会由 `AgentStateReducer` 恢复结构化 checkpoint。两者职责分离。
+允许的决策包括：
 
-交互式 CLI 也支持 `/resume <sessionId>` 在当前进程中切换历史 session，支持 `/history` 查看当前 session 记录，支持 `/events` 查看事件时间线，支持 `/logs` 和 `/changes` 查看运行日志和任务变更日志。
+- `PLAN`
+- `TOOL_CALL`
+- `DELEGATE_READONLY`
+- `APPLY_PATCH`
+- `RUN_COMMAND`
+- `ASK_USER`
+- `FINAL`
+- `FAILED`
 
-命令行输入体验分成两层：
+`DIRECT_RESPONSE` 仍通过 AgentLoop 生命周期运行，但使用 `SINGLE_SHOT` 策略：没有本地确定性回答时，AgentLoop 调用文本补全并把结果转换成 `FINAL`。因此简单回答不支付多轮 JSON 决策成本，同时 Session、Guardrail 和结果记录仍保持统一。
 
-- 交互式 `mini-agent` 内部，依赖 Node `readline` 的 completer，为 `/status`、`/repo`、`/review` 这类 slash 命令提供 `Tab` 补全。
+`LocalReplyResolver` 只处理可以由本地事实确定的产品元信息、诊断和会话确认；`ArtifactFollowUp` 只解析“上一轮改动在哪里”这类必须绑定紧邻 `FILE_CHANGE` 的状态型追问。它们把确定性答案写入 Task Contract，随后仍经过 AgentLoop 的 Session、Event、Guardrail 和 Final 生命周期，不是绕过 AgentLoop 的另一套问答执行器。对应测试文件只做回归验证，不参与运行时分支。
 
-`SessionMemory` 会把当前 session 最近的用户消息、真实助手回复、任务总结、工具结果、命令结果、错误和压缩记忆记录整理成短期记忆。超过预算时不再简单保留大段头部，而是生成临时结构化压缩，优先保留用户约束、任务结果和最近记录。`AGENT_DECISION` 是执行轨迹，不属于聊天回复；新版不再把它重复写成 `ASSISTANT_MESSAGE`，读取旧 session 时也会过滤紧随 decision 的历史助手记录。`ContextPlanner` 再根据当前阶段决定短期记忆占用的 token 预算。
+## 5. 运行时事件与终端显示
 
-Direct 模式还会重建 role-separated conversation。对于“这个难度如何”这类没有显式命名对象的指代追问，只保留最近一次已完成的 user/assistant exchange，并暂停本轮长期记忆召回和 Skill 自动选择；对于“之前那个 Skill”这类显式历史回看则保留完整受限历史。这样由确定性的上下文选择先消除多个候选指代，再交给模型作答。
+AgentLoop 发布版本化的 `AgentRuntimeEvent`，终端 Renderer、`--event-stream` 和 Session Replay 可以消费同一协议。当前产品只实现 CLI 展示，没有额外 Web 控制台。事件覆盖：
 
-“昨天谁赢了”“最新比分”这类易过期事实即使在新 session 中也不会召回长期记忆；进入 `WEB_ANSWER` 后同样不向回答上下文注入历史赛果。实时事实只服从本轮 Web 工具证据，避免旧摘要污染当前答案。
+- 实际携带的 Conversation 消息数、估算 Token、选择策略、历史截断状态，以及 Prior-response Audit 命中的旧 assistant 消息数。
+- Context 构建、Section 选择/跳过/截断和 Session Memory 压缩。
+- LLM 调用开始/结束、耗时、Prompt/Completion/Reasoning Token 和 Prompt Cache read/write。
+- Tool、Patch、Command 的开始与结果，以及命令 stdout/stderr 实时输出。
+- Embedding Cache 的 memory hit、disk hit、miss、write 和 single-flight 合并。
+- Guardrail 拒绝、用户询问、Diff 和最终结果。
 
-长期记忆由 `LongTermMemoryStore` 负责，写入与读取分别由 `MemoryWritePolicy`、`MemoryReadPolicy` 治理，生成 `.mini-agent/memory/index.jsonl`。自动写入只接受“成功的 AgentLoop 任务 + 非空 repository diff”以及显式压缩记录；PLAN、WEB、DIRECT、仓库分析、失败任务和没有 diff 证据的摘要不会自动晋升为长期记忆。显式 `MANUAL` 记忆仍由用户控制。常见 API key/token/password 会在持久化前脱敏。每条 Memory v2 记录包含：
+默认终端把 `[conversation]`、`[context]`、`[memory:session]` 和服务商的 `prompt-cache-*` 分开显示，避免把对话历史、动态 Context 预算和 Prompt/KV Cache 混为一谈。`--verbose` 展开参数与遥测，`--trace` 显示经过脱敏的结构化 Decision、Conversation 角色序列和 Context 分配。服务商没有返回的缓存字段保持 `unreported`，不会把“未知”错误统计为 Miss。
 
-- `sessionId`：来源会话。
-- `source`：来自任务总结还是压缩记忆。
-- `kind`：用户偏好、项目约定、架构决策、会话摘要、已验证结果、错误方案等语义类型。
-- `scope`：`SESSION`、`REPOSITORY` 或 `USER` 作用域。
-- `status`：`ACTIVE`、`SUPERSEDED` 或 `EXPIRED` 生命周期状态。
-- `title`：通常取最近一次用户请求。
-- `text`：可检索摘要正文。
-- `keywords`：中英文混合关键词。
-- `vector`：本地确定性向量表示。
-- `metadata`：模式、成功状态、证据文件数量等可选字段。
-- `evidenceRefs`：支撑自动记忆的文件或 session record 引用。
+ContextBuilder 构造 Session Memory 时只读取当前 run 之前的记录；当前 run 新产生的 Tool Result、Guardrail 和 Error 已在 AgentState/Recent Evidence 中表达，不会再次作为历史记忆注入。这使同一任务的多步循环不会因为重复读取自己的执行轨迹而不断膨胀。相同输入且已经成功的 Web 调用会被拒绝；provider/transport 已失败时，等价换词搜索也会被拒绝，避免为机械满足错误契约重复等待网络。
 
-长期记忆检索现在拆成五层：
+事件流不暴露模型隐藏思维链。可观察的“思考”仅指显式 `PLAN`、结构化 `AgentDecision`、工具证据与本地 Guardrail 原因。
 
-1. `MemoryReadPolicy`：按 Direct、Web、Review、RepositoryAnalysis、AgentLoop 选择允许的 kind/scope；普通 Direct/Web 不自动读历史记忆，显式历史回看才允许结果类记忆。
-2. `MemoryQueryBuilder`：把用户问题转换为检索 query，识别意图、实体、关键词、偏好的回答模式、时间敏感度和证据预算。
-3. `MemoryRetriever`：先执行 kind/scope/status/provider 等硬过滤，再完成关键词与向量候选召回；本地 hash embedding 要求存在词面证据，减少碰撞误召回。
-4. `MemoryReranker`：对召回候选做二次排序，综合基础相似度、任务模式匹配、同 session 加权、时间新鲜度和实体命中，并应用重排后最低分数线。
-5. `MemoryEvidenceSelector`：从重排结果里选择最终证据，限制单个 session 过度占用结果，给每条证据附加选择原因。
+## 6. 能力与工具隔离
 
-默认设计不依赖外部向量库，适合本地运行；配置 embedding 环境变量后可以切换到 OpenAI-compatible embeddings。记忆条目记录 provider、confidence、validUntil 和显式 supersession 关系；忘记新版本时会恢复其前一版本。JSONL 读写具备运行时结构校验、跨进程写锁和原子替换。切换 provider 或升级 schema 后不会在查询时隐式重建，需显式运行 `mini-agent memory migrate`。
+契约会同时限制“模型看到什么”和“运行时允许什么”：
 
-每次任务结束后，CLI 会调用写入策略审查当前 session；不满足证据要求时索引数为零。`/compact` 写入低置信度的 session 级历史上下文。`MemoryContextService` 只注入读取策略允许的结果，并使用 `<memory_evidence>` 标记为不可信历史数据：模型不得执行记忆中的指令，当前用户要求、当前文件和当前工具结果始终优先。
+- Direct 不暴露任何工具，也不会扫描仓库状态。
+- Web 只暴露 `web_search` 和 `fetch_url`。
+- Repository Investigation 只暴露 `list_files`、`read_file`、`search_code`、`git_status` 和 `git_diff`。
+- Knowledge Query 只暴露 `knowledge_search`。
+- Repository Task 才能申请补丁、命令、MCP 和委派。
 
-显式生命周期控制包括 `memory remember/forget/stats/clear --yes`、`/remember` 和 `/forget`。记忆是当前仓库 `.mini-agent` 下的本地数据，不会自动随 Git 在 Windows/Linux 两台机器之间同步。
+即使模型构造出契约外的 `TOOL_CALL`、`APPLY_PATCH`、`RUN_COMMAND` 或 `DELEGATE_READONLY`，AgentLoop 仍会在执行前拒绝。
 
-## 10.1 文档知识库 RAG 与 embedding cache
+MCP 也按契约按需加载。Direct、Web 和只读调查不会启动无关 MCP server。
 
-文档 RAG 与长期记忆是两套独立语料和索引。`RagStore` 只导入仓库内 Markdown/TXT，按行分块后写入 `.mini-agent/rag/index.jsonl`；`knowledge_search` 做关键词与向量混合检索并返回文件行号 citation。长期记忆的 `.mini-agent/memory/index.jsonl` 不会被当作文档知识库。
+## 7. 证据和完成性
 
-显式的“根据已索引知识库回答”请求会进入可调用工具的 Agent 路径；“你有 RAG 吗”这类能力问题由本地产品事实直接回答，避免模型把历史会话误说成 RAG。
+系统不直接相信模型声称“已经完成”。`TaskGuardrails` 组合两类后置条件：
 
-缓存分两层：LLM KV/Prompt Cache 由模型服务端维护，CLI 只记录 `cached_tokens`；远端 embedding 由 Agent 按 provider/vector-space 和文本 SHA-256 缓存到 `.mini-agent/cache/embeddings/v1/`。缓存不保存原文，并具备内存 LRU、并发 single-flight、跨进程磁盘复用、损坏回源以及 provider/维度隔离。RAG 索引和长期记忆本身属于派生索引或业务数据，不笼统称作缓存。
+### 7.1 通用仓库完成条件
 
-## 10.2 声明式 Skill
+- 要求写文件的任务必须存在成功 patch。
+- 源码或配置修改必须在最后一次 patch 之后完成对应级别验证。
+- 失败的最新验证不能被成功 `FINAL` 忽略。
+- 知识库任务必须调用 `knowledge_search` 并保留返回的精确引用。
+- 代码审查以及明确要求“完整读取 / 从头到尾分析”的任务，目标文件必须形成从第 1 行到 EOF 的连续读取覆盖；缺行时 `FINAL` 会被拒绝，并给出下一未读行。
 
-Skill v1 是本地声明式指令，而不是动态脚本或插件。系统发现版本化的 `skills/<name>/SKILL.md` 和本地 `.mini-agent/skills/<name>/SKILL.md`，校验名称、描述、触发词、大小和真实路径边界；同名时版本化仓库 Skill 优先。
+### 7.2 契约证据条件
 
-Skill 可以通过 `$skill-name` 显式选择，也会根据名称、description 和 triggers 确定性匹配，最多注入三个。`ContextBuilder` 和 Direct/Web/Review/RepositoryAnalysis 会按任务注入匹配 Skill，并明确优先级为“当前用户指令和仓库事实高于 Skill”；Direct 的模糊指代追问会暂停新 Skill 注入，防止旧主题抢占当前指代。Skill 不会注册动态工具，也不能绕过 ToolRegistry、PermissionManager 或 Plan 只读策略。
+- Repository Investigation 至少成功读取一个相关文件。
+- Web Research 正常答案必须成功搜索；如果确实尝试过搜索但 provider/transport 不可用，可以用明确的“来源不足、无法核验”结果完成，不能退回模型记忆冒充搜索结论。
+- 实时 Web 事实默认要求两个已抓取来源和两个独立域名。
+- “最新模型/版本/发布”等时序最高级不机械要求两个域名；它要求至少两次非等价搜索，其中至少一次带 `官方/official`、release notes、changelog 或 `site:` 约束，并抓取至少一个关键来源。一个权威当前目录可以强于两个陈旧汇总页，但单张搜索结果页不能证明不存在更新发布。
+- `web_search` 会先保留 provider 返回的完整候选池，再针对时效查询按实体域名亲和度、可见发布日期、发布页路径和同系列版本号重排，最后才应用 `maxResults`；搜索引擎原始排名不等于发布时间排序。
+- Web 搜索分为三层：provider adapter 只负责传输与响应解析；`WebSearchPipeline` 负责跨 provider 的候选归一化、URL 去重、总超时、fallback 和候选池；`WebSearchRanking` 与 `WebResearchPolicy` 负责 provider 无关的召回重排和事实门槛。当前内置 adapter 是 DuckDuckGo HTML/Lite，新增正式 API provider 不应复制后两层。
+- 若本轮证据出现高于最终结论的同系列版本候选，Final Guardrail 要求继续核验该候选或明确报告冲突，不能直接声称较低版本“最新”。
+- Web 查询必须保持用户范围；用户没有要求排名时，不能把“知名”改成“最知名 / most famous / top / best”。
+- `fetch_url` 只能使用用户直接提供或本轮成功搜索返回的精确 URL；猜测来源地址会在执行前被拒绝。
+- Web 最终引用必须是本轮搜索或抓取得到的 URL。
+- 未达到 Web 门槛时，只允许明确报告证据不足，不能给出确定性实时结论。
 
-## 10.5 CLI 诊断和常用 slash 命令
+## 8. ContextBuilder
 
-顶层诊断命令：
+上下文按任务阶段和 Token/字符预算选择：
 
-- `mini-agent doctor`：检查 Node、git、rg、pnpm、模型配置、仓库状态、session/log/change-log 状态。
-- `mini-agent logs`：查看最近运行日志。
-- `mini-agent changes`：查看最近任务变更日志。
-- `mini-agent memory index [sessionId]`：索引一个 session；不传 sessionId 时索引全部本地 session。
-- `mini-agent memory search <query>`：检索本地长期记忆。
-- `mini-agent memory list`：列出最近写入的长期记忆。
-- `mini-agent memory remember/forget/stats/migrate/clear`：显式管理、迁移长期记忆。
-- `mini-agent skill list/show/validate/init`：发现、查看、校验或创建本地 Skill 模板。
-- `mini-agent plan <task>`：运行一次只读规划。
+- 用户任务和 Working Set。
+- Agent Task Contract。
+- Task Completion Contract。
+- 最近决策和工具证据。
+- 错误诊断、当前 diff 和验证结果。
+- 会话上下文、长期记忆、Skills、RAG。
+- 必要时的仓库树、README、构建文件和文件放置建议。
 
-交互式 slash 命令：
+Session Memory 使用 `structured-salience-v2` 压缩。候选记录被划分为固定约束与结果、最近对话、执行证据三层，同时受字符和估算 Token 双预算控制。选择过程综合记录类型、显式用户约束、优先级和最近性；重复内容先去重，超长单条记录按 head-tail 裁剪。压缩正文保留 Session Record 来源 id，Context Trace 记录每条保留内容的分层、原因和裁剪状态。自动压缩与显式 `/compact` 共用同一个确定性核心，不依赖额外 LLM 调用。
 
-- `/help`：查看命令。
-- `/new`：开启新会话。
-- `/review <file>`：直接对单个仓库文件做代码审查。
-- `/resume <sessionId>`：切换历史会话。
-- `/pause`：暂停当前会话并退出，后续可 resume。
-- `/session`：查看当前 session 元信息。
-- `/summary`：查看当前 session 的压缩摘要，不写入记录。
-- `/sessions`：列出 session，并显示最近消息/摘要提示。
-- `/history [n]`：查看当前 session 最近记录。
-- `/events [n]`：查看当前 session 最近事件。
-- `/logs [n]`：查看最近运行日志。
-- `/changes [n]`：查看最近任务变更日志。
-- `/compact`：写入一条本地压缩记忆。
-- `/memory <query>`：检索本地长期记忆；不传 query 时列出最近记忆。
-- `/remember <text>`、`/forget <id>`：保存或删除长期记忆。
-- `/skills [name]`：列出或查看 Skill。
-- `/plan [task|off|status]`、`/execute [notes]`：规划模式与显式执行闭环。
-- `/status`：查看当前 session 状态，包括最近模式、最近摘要和已记录的 LLM token 用量。
-- `/repo`：查看仓库状态摘要。
-- `/diff`：查看当前 diff。
+`read_file` 同时受行数和 Token 预算约束，返回 `hasMore`、`nextStartLine`、`nextStartColumn`、总行数、Token 估算和内容哈希。普通文件按行分页；单行本身超过预算时按列继续读取，因此压缩后的 JSON、生成代码或超长文本也不会成为永远读不完的盲区。`AgentState` 合并同一文件的完整行区间和未完成行位置，并把覆盖率写入紧凑 Checkpoint；源码正文不会复制进 Checkpoint。最新读取块使用独立的高优先级 Context Section，Recent Evidence 只保存范围摘要，避免源码先被截断、随后又重复占用上下文。文件版本变化或成功 patch 会使旧覆盖失效。
 
-另外，非交互模式也支持 `mini-agent session summary <sessionId>`，用于把某个历史会话快速压缩成可阅读摘要；如果传 `--write`，还会把摘要写回 `MEMORY_COMPACTION` 记录。`mini-agent session status <sessionId>` 则会输出该会话的 JSON 状态，包括本地累计 token 使用量；剩余上下文窗口通常无法精确获得，因为大多数 OpenAI-compatible API 不返回这个值。
-- `/clear`：清屏。
-- `/exit`：结束当前 session 并退出。
+完整读取不等于把整个大文件一次塞进模型窗口：Agent 逐块查看源码并继续分页，而运行时负责验证最终覆盖率。普通定点修复仍可使用 `search_code` 后只读相关范围，不强制为无关文件支付全量读取成本。
 
-## 10.6 AgentBench v1 和评测
+能力契约也控制隐式上下文读取：Direct 不读取 Git 状态和仓库树；仓库类任务才加载仓库信息。发生错误时，诊断和 diff 的优先级高于稳定的契约说明，保证紧预算下仍能恢复。
 
-真实 API 调用存在不稳定性，不能把所有质量保障都押在人工试用上。当前 `src/eval` 分成执行 Harness 和质量基准两层：
+## 9. Session、Event 与恢复
 
-- `ScriptedLlmClient`：用一组预设 `AgentDecision` 模拟模型输出，记录每次调用输入。
-- `AgentHarness`：自动创建临时 git 仓库、写入测试文件、启动 AgentLoop，并检查最终 diff、文件内容、工具选择、测试/验证结果、步骤数和 LLM 调用预算。它既接受 scripted client，也接受真实 `LlmClient`。
-- `AgentBenchDataset`：校验版本化 JSON 场景、阈值和 baseline policy，拒绝重复场景 ID 或格式错误的决策。
-- `AgentBench`：按场景和 repetition 运行 Harness，汇总 pass@1、pass@k、run pass rate、工具选择准确率、平均步骤、LLM 调用、耗时、Token、cached Token、上下文截断率和失败分类。
-- quality gate：同时检查数据集绝对阈值与相对 baseline 回归；失败时 CLI 返回非零退出码，可直接用于 CI。
+- Session JSONL 保存用户消息、决策、工具结果摘要、文件变化、命令结果、摘要和 LLM 用量；大块源码和工具正文不会在 Session/Event 两边完整复制。
+- Event JSONL 保存按时间排序的执行事件。
+- Checkpoint 保存 Run ID、Working Set、已发生副作用、验证状态和可能的 in-flight action。
+- Change Log 保留兼容模式标签，同时写入 `executionEngine: AGENT_LOOP`、`taskKind` 和 `outputKind`。
 
-仓库自带 `benchmarks/agent-bench-v1.json` 和 `benchmarks/baselines/core-v1.json`。核心集覆盖修改文件、创建文档、patch 冲突恢复、阻止虚假完成、执行测试、使 patch 前的过期验证失效和只读规划。运行方式：
+只读回答和调查会记录 `ASSISTANT_MESSAGE`；仓库修改任务记录 diff 和变更摘要。
 
-```bash
-# 确定性执行引擎门禁
-npm run bench -- --baseline benchmarks/baselines/core-v1.json
+`.mini-agent` 目录使用 owner-only 权限（目录 `0700`、文件 `0600`）；Session 与 Event 的共享索引通过文件锁和原子替换更新。JSONL 尾部发生进程中断留下半条记录时，读取会保留此前完整记录；中间损坏仍会明确报错。审计或终端观察者写入失败不会把已经成功发生的补丁/工具副作用伪装成失败并诱发重复执行。
 
-# 真实模型抽样；三次 repetition 用于观察稳定性
-mini-agent bench run benchmarks/agent-bench-v1.json \
-  --mode real --repetitions 3 \
-  --output .mini-agent/benchmarks/real.json
-```
+Checkpoint 只在 `sessionId`、运行模式和规范化后的当前目标都一致时恢复。新任务不会继承上一任务的“已写文件/已验证”状态。
 
-scripted 模式回答“执行引擎是否回归”，real 模式回答“模型是否能自己作出正确决策”，二者不能混为一谈。场景应优先断言最终文件、diff、测试和禁止出现的内容，而不是只断言模型调用了某个工具。后续上下文、checkpoint、验证和恢复策略的优化，都应先保存基线报告，再用同一数据集比较成功率与成本变化。
+## 10. 多轮追问
 
-## 11. LLM 接入
+- 问句型短追问通过 `resolveFollowUpQuestion` 补全省略的主题或谓语。
+- 文件位置型短追问优先由 `ArtifactFollowUp` 从紧邻上一轮的 `FILE_CHANGE` 解析，生成确定性回答并跳过 LLM；`FOLLOW_UP_RESOLVED` 同时写入事件审计和终端时间线。
+- 写任务由 `TaskDiffService` 使用独立 Git 临时索引捕获任务前后的 Working Tree，生成只属于本轮的 `TASK_DIFF`；任务开始前已经存在的脏改动不会被算入本轮。`TaskDiffStore` 持久化完整变更，终端时间线只渲染可激活的 Changes 卡片，用户激活后才进入 raw-mode 全屏 Diff Viewer。
+- “写进去 / 保存一下”通过 `TaskFollowUp` 复用上一轮代码并转换为仓库写入目标。
+- “是否写入”由本地 Session 记录确定性回答，不交给模型猜测。
+- Conversation 先从完整结构化会话记录中规划最终 prompt：普通请求选择最近历史；普通隐式指代只选择紧邻 exchange，避免旧主题竞争；对助手旧回答的质疑会优先分类为审计请求，并从完整记录召回相关原话、相邻问题和后续纠正。
+- `PriorResponseTruthGuard` 只验证“当前记录中是否出现过相关 assistant 输出”。它不会把旧回答当外部事实；否认可见原话时最多重试一次，仍冲突则返回可审计的安全纠正。
+- Web 与 Direct 使用同一份 Conversation 选择结果。Web 追问仍必须重新满足本轮 Web 证据门槛，旧回答不能充当来源。
 
-当前产品运行路径使用真实 OpenAI-compatible API：
+## 11. 扩展原则
 
-- `MINI_AGENT_BASE_URL`
-- `MINI_AGENT_API_KEY`
-- `MINI_AGENT_MODEL`
+新增任务能力时，优先新增可组合元素，而不是新增执行器：
 
-也支持根目录 `mini-agent.config.json`：
+1. 在 `TaskContractBuilder` 中生成契约。
+2. 必要时添加工具或 Context Provider。
+3. 添加本地 Final Validator。
+4. 为契约能力隔离和证据门槛补测试。
+5. 继续复用同一个 AgentLoop。
 
-```json
-{
-  "version": 1,
-  "llm": {
-    "mode": "real",
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "your-api-key",
-    "model": "your-model"
-  }
-}
-```
-
-配置读取和 LLM 客户端保持独立，避免 AgentLoop 直接依赖某个厂商 SDK。
-
-## 12. 为什么现在不做后端和前端
-
-这个项目的核心价值是本地 CLI Agent 的闭环，而不是展示页面。后端和前端适合做成独立项目，例如软件商店后台、任务平台或企业控制台。
-
-当前仓库保留最小但完整的 Agent 本体，优点是：
-
-- 运行链路更短。
-- 面试讲解更聚焦。
-- 调试成本更低。
-- 不会把重点从 Agent 工程能力转移到普通 CRUD 页面。
+只有当任务具有完全不同的状态机和副作用语义时，才考虑新的 Runtime；单纯输出格式不同不构成拆分执行器的理由。

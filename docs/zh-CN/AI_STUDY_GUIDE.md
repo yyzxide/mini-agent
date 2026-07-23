@@ -214,7 +214,7 @@ RAG 不是“接一个向量数据库”。完整链路是：
 - `MemoryReranker`
 - `MemoryEvidenceSelector`
 - `EmbeddingProvider`
-- `WebAnswerSupport` 的 evidence assessment
+- `TaskContractBuilder` 与 `TaskGuardrails` 的 Web evidence assessment
 
 ### 当前已经实现
 
