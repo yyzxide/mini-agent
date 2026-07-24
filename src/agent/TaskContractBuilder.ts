@@ -3,11 +3,13 @@ import type { AgentTaskContract } from "./AgentTaskContract.js";
 import { looksLikeExplicitWebAction } from "./ProductCapability.js";
 import {
   looksLikeIndexedKnowledgeRequest,
-  looksLikeRepositoryAnalysisTask,
 } from "./TaskRouter.js";
 import type { TaskRoute } from "./TaskRouter.js";
 import { looksLikeCompleteFileReadRequest } from "./FileReadCoverage.js";
 import { looksLikeTemporalSuperlativeRequest } from "./WebResearchPolicy.js";
+import { buildAnswerQualityProfile } from "./AnswerQualityPolicy.js";
+import { understandTask } from "./TaskUnderstanding.js";
+import { classifySubAgentIntent } from "./SubAgentIntent.js";
 
 export interface BuildAgentTaskContractInput {
   userGoal: string;
@@ -18,10 +20,16 @@ export interface BuildAgentTaskContractInput {
 }
 
 export function buildAgentTaskContract(input: BuildAgentTaskContractInput): AgentTaskContract {
+  const understanding = input.route.understanding ?? understandTask(input.userGoal);
   if (input.operatingMode === "PLAN") {
-    const base = buildExecuteContract({ ...input, operatingMode: "EXECUTE" });
+    const base = withAnswerQuality(
+      buildExecuteContract({ ...input, operatingMode: "EXECUTE" }),
+      input.userGoal,
+      understanding,
+    );
     return {
       ...base,
+      understanding,
       outputKind: "IMPLEMENTATION_PLAN",
       executionStrategy: "ITERATIVE",
       resultMode: "PLAN",
@@ -43,7 +51,10 @@ export function buildAgentTaskContract(input: BuildAgentTaskContractInput): Agen
     };
   }
 
-  const contract = buildExecuteContract(input);
+  const contract = withCollaborationInstructions({
+    ...withAnswerQuality(buildExecuteContract(input), input.userGoal, understanding),
+    understanding,
+  }, input.userGoal);
   if (!input.forceIterative || contract.executionStrategy === "ITERATIVE") {
     return contract;
   }
@@ -59,7 +70,29 @@ export function buildAgentTaskContract(input: BuildAgentTaskContractInput): Agen
   };
 }
 
+function withCollaborationInstructions(
+  contract: AgentTaskContract,
+  userGoal: string,
+): AgentTaskContract {
+  const intent = classifySubAgentIntent(userGoal);
+  if (intent.preference !== "REQUIRED" || !contract.capabilities.delegation) return contract;
+  return {
+    ...contract,
+    instructions: [
+      ...contract.instructions,
+      `The user explicitly requested multi-agent collaboration${intent.requestedAgents ? ` with ${String(intent.requestedAgents)} child agent(s)` : ""}. Use DELEGATE before completing the task.`,
+      ...(contract.capabilities.repositoryWrite && intent.requestsChangeProposal
+        ? [
+          "Delegate implementation with access=PROPOSE_CHANGES. If review was requested, add a change_reviewer task with access=REVIEW_CHANGES and dependsOn the implementation task.",
+          "After inspecting the child proposal and review, merge an accepted proposal with APPLY_DELEGATED_PATCH, then run parent-level verification.",
+        ]
+        : []),
+    ],
+  };
+}
+
 function buildExecuteContract(input: BuildAgentTaskContractInput): AgentTaskContract {
+  const understanding = input.route.understanding ?? understandTask(input.userGoal);
   if (looksLikeIndexedKnowledgeRequest(input.userGoal)) {
     return {
       version: 1,
@@ -99,7 +132,11 @@ function buildExecuteContract(input: BuildAgentTaskContractInput): AgentTaskCont
       };
 
     case "WEB_ANSWER": {
-      const live = needsMultipleCurrentSources(input.userGoal);
+      const corroborationRequired = needsCorroboratedWebSources(
+        input.userGoal,
+        input.route.reason,
+        input.route.understanding,
+      );
       const temporalSuperlative = looksLikeTemporalSuperlativeRequest(input.userGoal);
       return {
         version: 1,
@@ -110,23 +147,25 @@ function buildExecuteContract(input: BuildAgentTaskContractInput): AgentTaskCont
         capabilities: capabilities({ webAccess: true }),
         evidence: evidence({
           webSearch: true,
-          fetchedWebSourceCount: live && !temporalSuperlative ? 2 : 1,
-          independentWebDomainCount: live && !temporalSuperlative ? 2 : 1,
+          fetchedWebSourceCount: corroborationRequired && !temporalSuperlative ? 2 : 1,
+          independentWebDomainCount: corroborationRequired && !temporalSuperlative ? 2 : 1,
           webCitation: true,
         }),
-        maxSteps: 10,
+        maxSteps: 14,
         routeReason: input.route.reason,
         instructions: [
           "The first web_search query must preserve the user's entity, scope, and qualifiers. Add retrieval synonyms only in later queries; never strengthen 知名/famous/notable into 最/most/top/best unless the user requested a ranking.",
           "Search first, then fetch important sources before answering.",
           ...(temporalSuperlative ? [
             "This is a temporal superlative claim. Run at least two non-equivalent searches, including an authority-targeted freshness search using official/官方, release notes, changelog, or a site: constraint; compare newer dated/versioned candidates before claiming what is latest.",
+            "After the first generic search view, make the next web_search authority-targeted instead of accumulating more generic result pages.",
             "Search-engine rank is not chronological order. Prefer a canonical first-party current-model, release-index, changelog, or product page over a stale secondary roundup.",
           ] : []),
           "Cite only URLs returned by web_search or fetch_url; never invent or repair a URL.",
           "If web_search fails at the transport/provider layer, do not retry equivalent wording or guess a likely fetch_url. Explicitly report insufficient web evidence.",
           "If the evidence threshold cannot be met, report insufficient evidence without asserting current facts.",
-          "For sports results, keep competitions separate; for ambiguous entities, preserve multiple verified interpretations instead of silently choosing one.",
+          "Treat the Web research progress section as the deterministic source of truth for the next action. When the final-synthesis reserve is active, do not call tools.",
+          "Keep materially different categories, scopes, and time periods separate; for ambiguous entities, preserve multiple verified interpretations instead of silently choosing one.",
         ],
       };
     }
@@ -138,15 +177,15 @@ function buildExecuteContract(input: BuildAgentTaskContractInput): AgentTaskCont
         "Report only actionable correctness, security, or maintainability findings grounded in repository evidence.",
         "For every finding include severity, repository path, line number, reasoning, and a concise remediation.",
         "If no grounded issue is found, say so explicitly and mention what was inspected.",
-      ]);
+      ], input.multiAgentEnabled === true);
 
     case "AGENT_LOOP":
-      if (looksLikeRepositoryAnalysisTask(input.userGoal)) {
+      if (understanding.operation === "ANALYZE_REPOSITORY") {
         return repositoryInvestigationContract("REPOSITORY_ANALYSIS", input.userGoal, input.route.reason, [
           "Inspect the repository tree and representative source, build, configuration, and documentation files.",
           "Separate confirmed facts from inference and cite supporting repository paths.",
           "Cover the major modules and runtime flow before proposing improvements.",
-        ]);
+        ], input.multiAgentEnabled === true);
       }
       return repositoryTaskContract(input.userGoal, input.route.reason, input.multiAgentEnabled === true);
   }
@@ -157,6 +196,7 @@ function repositoryInvestigationContract(
   userGoal: string,
   routeReason: string,
   instructions: string[],
+  delegation: boolean,
 ): AgentTaskContract {
   return {
     version: 1,
@@ -164,7 +204,7 @@ function repositoryInvestigationContract(
     outputKind,
     executionStrategy: "ITERATIVE",
     resultMode: outputKind === "CODE_REVIEW" ? "CODE_REVIEW" : "AGENT_LOOP",
-    capabilities: capabilities({ repositoryRead: true }),
+    capabilities: capabilities({ repositoryRead: true, delegation }),
     evidence: evidence({
       repositoryRead: true,
       completeFileRead: outputKind === "CODE_REVIEW" || looksLikeCompleteFileReadRequest(userGoal),
@@ -231,4 +271,35 @@ function evidence(overrides: Partial<AgentTaskContract["evidence"]>): AgentTaskC
 
 function needsMultipleCurrentSources(userGoal: string): boolean {
   return /(?:今天|今日|现在|当前|最新|实时|刚刚|最近|收盘|比分|价格|版本)|\b(?:today|now|current|latest|live|recent|price|score|version)\b/i.test(userGoal);
+}
+
+function needsCorroboratedWebSources(
+  userGoal: string,
+  routeReason: string,
+  existingUnderstanding = understandTask(userGoal),
+): boolean {
+  if (needsMultipleCurrentSources(userGoal)) return true;
+  return existingUnderstanding.signals.some((signal) => [
+    "precise-attribute",
+    "exhaustive-or-enumerated",
+    "polar-factual-claim",
+  ].includes(signal))
+    || /(?:bounded-relation|runtime-date-contradiction|recent-factual-correction)/i.test(routeReason);
+}
+
+function withAnswerQuality(
+  contract: AgentTaskContract,
+  userGoal: string,
+  understanding = understandTask(userGoal),
+): AgentTaskContract {
+  if (contract.outputKind !== "NATURAL_LANGUAGE" && contract.outputKind !== "GROUNDED_WEB_ANSWER") {
+    return contract;
+  }
+  return {
+    ...contract,
+    instructions: [
+      ...contract.instructions,
+      ...buildAnswerQualityProfile(userGoal, understanding).instructions,
+    ],
+  };
 }

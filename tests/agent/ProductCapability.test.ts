@@ -21,6 +21,7 @@ describe("product capability architecture", () => {
     ["刚才那个权限限制是永久的吗？", "ALL", "EXPLAIN_LIMITATION"],
     ["你的能力边界是什么？", "ALL", "INVENTORY"],
     ["你都能处理哪些类型的任务？", "ALL", "INVENTORY"],
+    ["我们有subagent能力吗？", "MULTI_AGENT_COLLABORATION", "AVAILABILITY"],
   ])("classifies compositional paraphrase %s", (input, topic, act) => {
     expect(classifyProductMetaIntent(input)).toMatchObject({
       kind: "PRODUCT_META",
@@ -55,6 +56,15 @@ describe("product capability architecture", () => {
     expect(formatCapabilityRegistryForPrompt()).toContain("supported=true");
     expect(formatCapabilityRegistryForPrompt()).toContain("WEB_RESEARCH");
     expect(formatCapabilityRegistryForPrompt()).toContain("apply_patch");
+    expect(formatCapabilityRegistryForPrompt()).toContain("MULTI_AGENT_COLLABORATION");
+  });
+
+  it("corrects false subagent capability denials", () => {
+    const bad = "目前我没有 subagent 的能力，也不能委托子代理。";
+    expect(detectResponseCapabilityDenials(bad)).toContain("MULTI_AGENT_COLLABORATION");
+    const correction = enforceCapabilityTruth("我们有subagent能力吗？", bad);
+    expect(correction.corrected).toBe(true);
+    expect(correction.text).toContain("多 Agent 协作");
   });
 
   it("detects and corrects a model answer that contradicts the registry", () => {

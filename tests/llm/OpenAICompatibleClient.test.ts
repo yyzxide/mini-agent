@@ -95,6 +95,64 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toContain("[user] 之前聊过时间");
   });
 
+  it("serializes the final-only synthesis constraint into the decision prompt", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "{\"type\":\"FAILED\",\"error\":\"Insufficient evidence\"}" } }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.chat({
+      ...sampleInput(),
+      availableTools: [],
+      decisionConstraint: "FINAL_ONLY",
+    });
+
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages.at(-1)?.content).toContain("FINAL SYNTHESIS ONLY");
+    expect(body.messages.at(-1)?.content).toContain("Do not call tools");
+  });
+
+  it("uses a dedicated JSON-only prompt for task understanding", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{
+            finish_reason: "stop",
+            message: { content: "{\"operation\":\"ANSWER\"}" },
+          }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    const result = await client.completeText({
+      userGoal: "Handle it",
+      context: "Deterministic interpretation: ANSWER",
+      mode: "task_understanding",
+    });
+
+    expect(result.success).toBe(true);
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages[0]?.content).toContain("semantic task-understanding layer");
+    expect(body.messages[0]?.content).toContain("Return one JSON object only");
+  });
+
   it("preserves recent conversation as role-separated messages", async () => {
     const calls: RequestInit[] = [];
     const client = new OpenAICompatibleClient({
@@ -183,7 +241,13 @@ describe("OpenAICompatibleClient", () => {
             reasoning_tokens: 2,
           },
         },
-        choices: [{ finish_reason: "stop", message: { content: "收到了。" } }],
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            content: "收到了。",
+            reasoning_content: "private reasoning trace",
+          },
+        }],
       }), { status: 200 }),
     });
 
@@ -198,6 +262,7 @@ describe("OpenAICompatibleClient", () => {
       {
         model: "agent-model",
         finishReason: "stop",
+        reasoningContentAvailable: true,
         usage: {
           promptTokens: 10,
           completionTokens: 6,
@@ -248,7 +313,7 @@ describe("OpenAICompatibleClient", () => {
     expect(retryBody.messages[1]?.content).toContain("Previously generated partial answer");
   });
 
-  it("accepts reasoning_content as text completion fallback", async () => {
+  it("does not expose reasoning_content as a direct answer", async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
       apiKey: "secret-key",
@@ -273,10 +338,11 @@ describe("OpenAICompatibleClient", () => {
       mode: "direct",
     });
 
-    expect(result).toEqual({
-      success: true,
-      text: "我们上次讨论了伦敦大师赛冠军是哪支队伍。",
-    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("reasoning_content");
+    expect(client.drainCallMetrics()).toEqual([
+      expect.objectContaining({ reasoningContentAvailable: true }),
+    ]);
   });
 
   it("returns a clear FAILED decision for HTTP errors", async () => {

@@ -107,6 +107,14 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
     try {
       const fetched = await fetchWithValidatedRedirects(parsedUrl, controller.signal, input.maxBytes);
       const response = fetched.response;
+      if (!response.ok) {
+        return toolFailure("FETCH_URL_HTTP_ERROR", `URL returned HTTP ${String(response.status)} ${response.statusText}`.trim(), {
+          url: parsedUrl.toString(),
+          finalUrl: fetched.finalUrl.toString(),
+          status: response.status,
+          statusText: response.statusText,
+        });
+      }
 
       const contentType = response.headers.get("content-type") ?? "";
       if (!isReadableContentType(contentType)) {
@@ -121,6 +129,15 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
       const normalizedText = input.extractText && contentType.toLowerCase().includes("html")
         ? htmlToText(rawText)
         : normalizeText(rawText);
+      const unusableContent = classifyUnusableFetchedContent(rawText, normalizedText);
+      if (unusableContent) {
+        return toolFailure("FETCH_URL_CONTENT_UNUSABLE", "URL returned an access challenge, login shell, or other non-article response instead of readable evidence", {
+          url: parsedUrl.toString(),
+          finalUrl: fetched.finalUrl.toString(),
+          status: response.status,
+          reason: unusableContent,
+        });
+      }
       const maxOutputChars = context.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
       const outputTruncated = normalizedText.length > maxOutputChars;
       const text = outputTruncated ? normalizedText.slice(0, maxOutputChars) : normalizedText;
@@ -476,6 +493,32 @@ function htmlToText(html: string): string {
 
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+function classifyUnusableFetchedContent(rawText: string, normalizedText: string): string | undefined {
+  const raw = rawText.trim().toLowerCase();
+  const text = normalizedText.toLowerCase();
+
+  if (
+    /^["{[]/.test(raw)
+    && /(?:["_](?:waf|captcha)[\w-]*"|"(?:captcha|challenge|verify_url|risk_control)")\s*:/i.test(raw)
+  ) {
+    return "structured access-challenge payload";
+  }
+
+  const strongChallenge = /(?:verify you are human|checking your browser|attention required.{0,20}cloudflare|cloudflare ray id|enable javascript and cookies to continue|访问过于频繁|安全验证|人机验证|请输入验证码|滑动验证|请完成验证|waf verification)/i;
+  if (strongChallenge.test(text)) {
+    return "access challenge or CAPTCHA";
+  }
+
+  if (
+    text.length < 1_200
+    && /(?:access denied|request blocked|temporarily blocked|登录后(?:查看|继续)|请先登录|需要登录)|(?:sign in|log in).{0,24}(?:continue|view|access)/i.test(text)
+  ) {
+    return "access-denied or login-only shell";
+  }
+
+  return undefined;
 }
 
 function decodeHtmlEntities(text: string): string {

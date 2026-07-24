@@ -49,6 +49,7 @@ describe("AgentBench", () => {
   it("runs an injected real client and records provider token telemetry", async () => {
     const client: LlmClient & { drainCallMetrics: () => unknown[] } = {
       chat: async () => ({ type: "FINAL", success: true, summary: "done" }),
+      completeText: async () => ({ success: true, text: "done" }),
       drainCallMetrics: () => [{
         model: "fixture-model",
         usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, cachedPromptTokens: 3 },

@@ -17,7 +17,7 @@ export interface TerminalRendererOptions {
 }
 
 export class TerminalRenderer {
-  private readonly contract: AgentTaskContract;
+  private contract: AgentTaskContract;
   private readonly verbosity: RuntimeVerbosity;
   private readonly write: (text: string) => void;
   private readonly color: boolean;
@@ -52,11 +52,24 @@ export class TerminalRenderer {
       case "conversation":
         this.renderConversation(event.trace);
         return;
-      case "decision":
-        if (this.verbosity === "trace") {
-          this.line(`${this.paint("dim", "│")}  [decision:${event.decisionType}] ${singleLine(event.message, 240)}`);
-          if (event.decision) this.detail(`payload=${safeJson(event.decision)}`);
+      case "understanding":
+        if (event.source !== "DETERMINISTIC" || this.verbosity !== "normal") {
+          this.line(`${this.paint("cyan", "├─")} [understanding] ${event.source.toLowerCase()} · ${event.operation}/${event.target} · confidence=${event.confidence.toFixed(2)}`);
+          if (this.verbosity !== "normal") this.detail(event.reason);
         }
+        return;
+      case "task_contract":
+        this.contract = {
+          ...this.contract,
+          kind: event.kind as AgentTaskContract["kind"],
+          outputKind: event.outputKind as AgentTaskContract["outputKind"],
+        };
+        return;
+      case "decision":
+        if (!["PLAN", "FINAL", "FAILED"].includes(event.decisionType)) {
+          this.line(`${this.paint("cyan", "├─")} [decision:${event.decisionType}] ${singleLine(event.message, 240)}`);
+        }
+        if (this.verbosity === "trace" && event.decision) this.detail(`payload=${safeJson(event.decision)}`);
         return;
       case "plan":
         this.line(`${this.paint("cyan", "◆")} [plan] ${sanitizeTerminalText(event.message)}`);
@@ -78,7 +91,46 @@ export class TerminalRenderer {
         return;
       case "agents":
         this.line(`${this.paint(event.phase === "failed" ? "red" : "magenta", "├─")} [agents] ${event.phase}: ${sanitizeTerminalText(event.message)}`);
+        for (const task of event.taskDetails ?? []) {
+          const dependency = task.dependsOn.length > 0 ? ` · after=${task.dependsOn.join(",")}` : "";
+          const status = task.status ? ` · ${task.status.toLowerCase()}` : "";
+          const files = task.changedFiles?.length ? ` · files=${task.changedFiles.join(",")}` : "";
+          this.detail(`${task.taskId} · ${task.role} · ${task.access}${dependency}${status}${files}`);
+          if (task.error) this.detail(`error=${task.error}`);
+        }
         return;
+      case "agent_task": {
+        const marker = event.phase === "task_finished"
+          || event.phase === "tool_finished"
+          || event.phase === "command_finished"
+          ? event.success === false || (event.status !== undefined && event.status !== "COMPLETED") ? "✗" : "✓"
+          : "├─";
+        const label = event.phase === "thinking"
+          ? `thinking${event.step === undefined ? "" : ` step=${String(event.step)}`}`
+          : event.phase === "decision"
+            ? `decision${event.decisionType ? `:${event.decisionType}` : ""}`
+            : event.phase.replace("_", " ");
+        this.line(`${this.paint(marker === "✗" ? "red" : "magenta", marker)} [agent:${event.taskId}] ${label} · ${event.role} · ${event.access}${event.toolName ? ` · ${event.toolName}` : ""}`);
+        if (event.message && event.phase !== "command_output") this.detail(singleLine(event.message, 240));
+        if (event.workspaceKind) {
+          this.detail(`workspace=${event.workspaceKind.toLowerCase()} · baseline=${event.baselineFingerprint?.slice(0, 12) ?? "unknown"}`);
+        }
+        if (event.command) {
+          this.detail(`command=${singleLine(event.command, 180)}${event.exitCode === undefined ? "" : ` · exit=${String(event.exitCode)}`}`);
+        }
+        if (event.phase === "command_output" && event.message) {
+          this.detail(`${event.stream ?? "stdout"}: ${singleLine(event.message, 240)}`);
+        }
+        if (event.phase === "patch_applied" && event.changedFiles?.length) {
+          this.detail(`isolated files=${event.changedFiles.join(",")}`);
+        }
+        if (event.dependsOn?.length) this.detail(`depends on ${event.dependsOn.join(", ")}`);
+        if (event.status) this.detail(`status=${event.status}${event.changedFiles?.length ? ` · files=${event.changedFiles.join(",")}` : ""}`);
+        if (event.toolsCalled?.length) this.detail(`tools=${event.toolsCalled.join(", ")}`);
+        if (event.error) this.detail(`error=${event.error}`);
+        if (event.action) this.detail(`recovery=${event.action}`);
+        return;
+      }
       case "patch":
         this.line(`${this.paint("yellow", "├─")} [patch] ${sanitizeTerminalText(event.description)}`);
         return;
@@ -158,7 +210,7 @@ export class TerminalRenderer {
     this.line(`${this.paint("blue", "├─")} [context]${step === undefined ? "" : ` step=${String(step + 1)}`} · selected=${formatTokens(includedTokens)}/${formatTokens(trace.maxTokens)} tokens${savedTokens > 0 ? ` · compacted ${formatTokens(savedTokens)} (${formatPercent(ratio)})` : ""}`);
 
     const sessionMemorySection = trace.sections.find((section) => section.id === "conversation_memory");
-    if (this.contract.kind !== "DIRECT_RESPONSE" && trace.sessionMemory) {
+    if (trace.sessionMemory) {
       const recordCount = trace.sessionMemory.selectedRecords === trace.sessionMemory.totalRecords
         ? `${String(trace.sessionMemory.selectedRecords)} records`
         : `${String(trace.sessionMemory.selectedRecords)}/${String(trace.sessionMemory.totalRecords)} records`;
@@ -213,6 +265,15 @@ export class TerminalRenderer {
       ? formatLlmUsage(usage)
       : "token usage unavailable";
     this.line(`${this.paint("magenta", "│  └─")} ✓ [llm] ${details}${event.durationMs === undefined ? "" : ` · ${formatDuration(event.durationMs)}`}`);
+    if ((usage?.reasoningTokens ?? 0) > 0 && this.verbosity !== "normal") {
+      const availability = usage?.reasoningContentAvailable
+        ? " · private reasoning field available"
+        : "";
+      const policy = this.verbosity === "trace"
+        ? "; raw chain-of-thought is not displayed—structured [decision] lines are the auditable action rationale"
+        : "";
+      this.detail(`[reasoning] ${formatTokens(usage?.reasoningTokens)} token(s) reported${availability}${policy}`);
+    }
     if (this.verbosity === "trace") {
       this.detail(`mode=${event.mode}${event.finishReason ? ` finish=${event.finishReason}` : ""}${event.calls ? ` calls=${event.calls}` : ""}`);
     }

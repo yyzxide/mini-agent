@@ -69,7 +69,7 @@ function detectArtifactKind(normalizedGoal: string): FilePlacementAdvice["artifa
     return "script";
   }
 
-  if (containsAnyText(normalizedGoal, ["页面", "html", "网页", "web", "浏览器", "2048", "游戏", "demo"])) {
+  if (/(?:页面|网页|浏览器|游戏)|\b(?:html|web|demo)\b/i.test(normalizedGoal)) {
     return "standalone_demo";
   }
 
@@ -85,34 +85,34 @@ function detectLanguage(
     return "Markdown";
   }
 
-  if (containsAnyText(normalizedGoal, ["c++", "cpp"])) {
+  if (containsLanguageSignal(normalizedGoal, ["c++", "cpp"])) {
     return "C++";
   }
-  if (containsAnyText(normalizedGoal, ["typescript", "ts"])) {
+  if (containsLanguageSignal(normalizedGoal, ["typescript", "ts"])) {
     return "TypeScript";
   }
-  if (containsAnyText(normalizedGoal, ["javascript", "js", "node"])) {
+  if (containsLanguageSignal(normalizedGoal, ["javascript", "js", "node"])) {
     return "JavaScript";
   }
-  if (containsAnyText(normalizedGoal, ["python", "py"])) {
+  if (containsLanguageSignal(normalizedGoal, ["python", "py"])) {
     return "Python";
   }
-  if (containsAnyText(normalizedGoal, ["java"])) {
+  if (containsLanguageSignal(normalizedGoal, ["java"])) {
     return "Java";
   }
-  if (containsAnyText(normalizedGoal, ["go", "golang"])) {
+  if (containsLanguageSignal(normalizedGoal, ["go", "golang"])) {
     return "Go";
   }
-  if (containsAnyText(normalizedGoal, ["rust"])) {
+  if (containsLanguageSignal(normalizedGoal, ["rust"])) {
     return "Rust";
   }
-  if (containsAnyText(normalizedGoal, ["kotlin"])) {
+  if (containsLanguageSignal(normalizedGoal, ["kotlin"])) {
     return "Kotlin";
   }
-  if (containsAnyText(normalizedGoal, ["c#", "csharp", "dotnet"])) {
+  if (containsLanguageSignal(normalizedGoal, ["c#", "csharp", "dotnet"])) {
     return "C#";
   }
-  if (containsAnyText(normalizedGoal, ["html", "css"])) {
+  if (containsLanguageSignal(normalizedGoal, ["html", "css"])) {
     return "HTML";
   }
 
@@ -134,24 +134,6 @@ function inferBaseName(
   }
 
   const normalized = userGoal.toLowerCase();
-  if (normalized.includes("2048")) {
-    return "game_2048";
-  }
-  if (normalized.includes("two sum") || normalized.includes("两数之和")) {
-    return inferredLanguage === "Java" || inferredLanguage === "Kotlin" || inferredLanguage === "C#"
-      ? "TwoSum"
-      : "two_sum";
-  }
-  if (normalized.includes("median") || normalized.includes("中位数") || normalized.includes("数据流")) {
-    return inferredLanguage === "Java" || inferredLanguage === "Kotlin" || inferredLanguage === "C#"
-      ? "MedianFinder"
-      : "median_finder";
-  }
-  if (normalized.includes("longest valid parentheses") || normalized.includes("最长有效括号")) {
-    return inferredLanguage === "Java" || inferredLanguage === "Kotlin" || inferredLanguage === "C#"
-      ? "LongestValidParentheses"
-      : "longest_valid_parentheses";
-  }
   if (artifactKind === "documentation") {
     if (normalized.includes("architecture") || normalized.includes("架构")) {
       return "architecture";
@@ -425,6 +407,13 @@ function buildReasons(
 
 function containsAnyText(value: string, keywords: string[]): boolean {
   return keywords.some((keyword) => value.includes(keyword));
+}
+
+function containsLanguageSignal(value: string, keywords: string[]): boolean {
+  return keywords.some((keyword) => {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(value);
+  });
 }
 
 function uniqueStrings(values: string[]): string[] {

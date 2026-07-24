@@ -15,7 +15,7 @@
     "maxContextChars": 6000
   },
   "multiAgent": {
-    "mode": "off",
+    "mode": "auto",
     "maxConcurrency": 2,
     "maxBatchesPerRun": 1,
     "maxTasksPerRun": 3,

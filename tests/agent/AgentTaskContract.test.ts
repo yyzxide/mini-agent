@@ -1,15 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
 import {
+  createDefaultAgentTaskContract,
   selectToolsForTaskContract,
   type AgentTaskContract,
 } from "../../src/agent/AgentTaskContract.js";
 import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
 import { validateAgentDecisionGuardrails } from "../../src/agent/TaskGuardrails.js";
 import { routeTask } from "../../src/agent/TaskRouter.js";
+import { understandTask } from "../../src/agent/TaskUnderstanding.js";
 import type { ToolSpec } from "../../src/llm/LlmClient.js";
 
 describe("AgentTaskContract", () => {
+  it("defaults to a deny-by-default direct contract", () => {
+    const contract = createDefaultAgentTaskContract();
+    expect(contract).toMatchObject({
+      kind: "DIRECT_RESPONSE",
+      executionStrategy: "SINGLE_SHOT",
+      capabilities: {
+        repositoryRead: false,
+        repositoryWrite: false,
+        commandExecution: false,
+        webAccess: false,
+      },
+    });
+  });
+
   it("models code review and repository analysis as one investigation runtime profile", () => {
     const review = contractFor("帮我检查 src/agent/AgentLoop.ts 有没有 bug");
     const analysis = contractFor("分析当前仓库的设计架构");
@@ -36,6 +52,32 @@ describe("AgentTaskContract", () => {
     });
   });
 
+  it("uses the resolved semantic operation as the permission source of truth", () => {
+    const userGoal = "如果发现问题就告诉我具体在哪里";
+    const understanding = {
+      ...understandTask(userGoal),
+      operation: "ANALYZE_REPOSITORY" as const,
+      target: "REPOSITORY" as const,
+      explicitRepositoryTarget: true,
+      explicitMutation: false,
+      signals: ["model-semantic-refinement"],
+    };
+    const contract = buildAgentTaskContract({
+      userGoal,
+      route: routeTask(userGoal, understanding),
+    });
+
+    expect(contract).toMatchObject({
+      kind: "REPOSITORY_INVESTIGATION",
+      outputKind: "REPOSITORY_ANALYSIS",
+      capabilities: {
+        repositoryRead: true,
+        repositoryWrite: false,
+        commandExecution: false,
+      },
+    });
+  });
+
   it("turns direct and web answers into bounded AgentLoop contracts", () => {
     const direct = contractFor("你好，你是谁");
     const web = contractFor("查询今天 TypeScript 的最新版本");
@@ -50,12 +92,17 @@ describe("AgentTaskContract", () => {
     expect(web).toMatchObject({
       kind: "WEB_RESEARCH",
       executionStrategy: "ITERATIVE",
+      maxSteps: 14,
       capabilities: { webAccess: true, repositoryRead: false, repositoryWrite: false },
       evidence: { webSearch: true, fetchedWebSourceCount: 1, independentWebDomainCount: 1 },
     });
     expect(contractFor("查询今天世界杯比分")).toMatchObject({
       evidence: { webSearch: true, fetchedWebSourceCount: 2, independentWebDomainCount: 2 },
     });
+    expect(contractFor("腾讯有多少子公司")).toMatchObject({
+      evidence: { webSearch: true, fetchedWebSourceCount: 2, independentWebDomainCount: 2 },
+    });
+    expect(web.instructions).toContainEqual(expect.stringContaining("Evidence sufficiency is only a minimum"));
   });
 
   it("does not expand task capabilities when iterative execution is forced", () => {

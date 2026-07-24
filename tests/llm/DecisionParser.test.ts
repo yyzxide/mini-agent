@@ -62,6 +62,18 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("preserves a concise tool-call rationale", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "TOOL_CALL",
+      toolName: "read_file",
+      input: { path: "src/index.ts" },
+      reason: "Inspect the target before editing it",
+    }))).toMatchObject({
+      type: "TOOL_CALL",
+      reason: "Inspect the target before editing it",
+    });
+  });
+
   it("parses bounded read-only delegation decisions", () => {
     expect(parser.parse(JSON.stringify({
       type: "delegate_readonly",
@@ -73,6 +85,37 @@ describe("DecisionParser", () => {
     }))).toMatchObject({
       type: "DELEGATE_READONLY",
       tasks: [{ id: "architecture" }, { id: "risks" }],
+    });
+  });
+
+  it("parses implementation and dependent review delegation", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "DELEGATE",
+      reason: "Implement then review",
+      tasks: [
+        {
+          id: "writer",
+          role: "implementation_agent",
+          objective: "Implement",
+          focusPaths: ["src"],
+          access: "PROPOSE_CHANGES",
+          dependsOn: [],
+        },
+        {
+          id: "reviewer",
+          role: "change_reviewer",
+          objective: "Review",
+          focusPaths: ["src"],
+          access: "REVIEW_CHANGES",
+          dependsOn: ["writer"],
+        },
+      ],
+    }))).toMatchObject({
+      type: "DELEGATE",
+      tasks: [
+        { id: "writer", access: "PROPOSE_CHANGES" },
+        { id: "reviewer", access: "REVIEW_CHANGES", dependsOn: ["writer"] },
+      ],
     });
   });
 

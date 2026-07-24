@@ -56,12 +56,99 @@ describe("TerminalRenderer", () => {
         promptTokens: 1000,
         completionTokens: 200,
         reasoningTokens: 50,
+        reasoningContentAvailable: true,
         cacheReadTokens: 800,
         cacheWriteTokens: 100,
       },
     });
+    renderer.render({
+      type: "decision",
+      decisionType: "TOOL_CALL",
+      message: "Inspect the target before editing → read_file",
+    });
     renderer.render({ type: "tool", toolName: "read_file", input: { path: "src/index.ts" } });
     renderer.render({ type: "tool_result", toolName: "read_file", success: true, durationMs: 18, summary: "src/index.ts" });
+    renderer.render({
+      type: "agent_task",
+      phase: "task_started",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      dependsOn: [],
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "worktree_started",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      workspaceKind: "GIT_WORKTREE",
+      baselineFingerprint: "abcdef1234567890",
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "thinking",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      step: 1,
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "decision",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      step: 1,
+      decisionType: "TOOL_CALL",
+      message: "Inspect the existing file → read_file",
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "patch_applied",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      changedFiles: ["src/index.ts"],
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "command_finished",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      command: "npm test",
+      success: true,
+      exitCode: 0,
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "recovery",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      error: "Invalid JSON",
+      action: "Retry with shorter JSON",
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "tool_finished",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      toolName: "read_file",
+      success: true,
+    });
+    renderer.render({
+      type: "agent_task",
+      phase: "task_finished",
+      taskId: "writer",
+      role: "implementation_agent",
+      access: "PROPOSE_CHANGES",
+      status: "COMPLETED",
+      changedFiles: ["src/index.ts"],
+      toolsCalled: ["read_file"],
+    });
     renderer.render({ type: "command", command: "npm test" });
     renderer.render({ type: "command_output", stream: "stdout", chunk: "367 tests passed\n" });
     renderer.render({ type: "command_result", command: "npm test", success: true, exitCode: 0, durationMs: 1600, timedOut: false, truncated: false });
@@ -80,10 +167,24 @@ describe("TerminalRenderer", () => {
     expect(text).toContain("[thinking]");
     expect(text).toContain("prompt-cache-read=800");
     expect(text).toContain("prompt-cache-write=100");
+    expect(text).toContain("[reasoning] 50 token(s) reported · private reasoning field available");
+    expect(text).toContain("raw chain-of-thought is not displayed");
+    expect(text).toContain("structured [decision] lines are the auditable action rationale");
+    expect(text).toContain("[decision:TOOL_CALL] Inspect the target before editing → read_file");
     expect(text).toContain("[tool] read_file · path=src/index.ts");
+    expect(text).toContain("error=Invalid JSON");
+    expect(text).toContain("recovery=Retry with shorter JSON");
+    expect(text).toContain("[agent:writer] task started · implementation_agent · PROPOSE_CHANGES");
+    expect(text).toContain("workspace=git_worktree · baseline=abcdef123456");
+    expect(text).toContain("[agent:writer] thinking step=1");
+    expect(text).toContain("[agent:writer] decision:TOOL_CALL");
+    expect(text).toContain("Inspect the existing file → read_file");
+    expect(text).toContain("isolated files=src/index.ts");
+    expect(text).toContain("command=npm test · exit=0");
+    expect(text).toContain("tools=read_file");
     expect(text).toContain("367 tests passed");
     expect(text).toContain("[usage] calls=1");
-    expect(text).toContain("[summary] Done.");
+    expect(text).toContain("[answer]\nDone.");
   });
 
   it("shows when conversation evidence was selected for a prior-response audit", () => {
@@ -138,6 +239,60 @@ describe("TerminalRenderer", () => {
     expect(text).toContain("[decision:TOOL_CALL]");
     expect(text).toContain("<redacted>");
     expect(text).not.toContain("should-not-leak");
+  });
+
+  it("hides the standalone reasoning notice in normal mode", () => {
+    const output: string[] = [];
+    const renderer = new TerminalRenderer({
+      contract: createDefaultAgentTaskContract(),
+      color: false,
+      write: (text) => { output.push(text); },
+    });
+
+    renderer.render({
+      type: "llm",
+      phase: "finished",
+      mode: "agent_decision",
+      calls: 1,
+      usage: {
+        usageAvailable: true,
+        promptTokens: 100,
+        completionTokens: 20,
+        reasoningTokens: 10,
+        reasoningContentAvailable: true,
+      },
+    });
+
+    const text = output.join("");
+    expect(text).toContain("reasoning=10");
+    expect(text).not.toContain("[reasoning]");
+    expect(text).not.toContain("chain-of-thought");
+  });
+
+  it("keeps the verbose reasoning notice concise", () => {
+    const output: string[] = [];
+    const renderer = new TerminalRenderer({
+      contract: createDefaultAgentTaskContract(),
+      verbosity: "verbose",
+      color: false,
+      write: (text) => { output.push(text); },
+    });
+
+    renderer.render({
+      type: "llm",
+      phase: "finished",
+      mode: "agent_decision",
+      calls: 1,
+      usage: {
+        usageAvailable: true,
+        reasoningTokens: 10,
+        reasoningContentAvailable: true,
+      },
+    });
+
+    const text = output.join("");
+    expect(text).toContain("[reasoning] 10 token(s) reported · private reasoning field available");
+    expect(text).not.toContain("chain-of-thought");
   });
 });
 

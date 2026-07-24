@@ -15,6 +15,10 @@ import {
   looksLikeTemporalSuperlativeRequest,
   validateWebSearchQueryScope,
 } from "./WebResearchPolicy.js";
+import { assessAuthoritativeFreshnessEvidence } from "./WebResearchEvidence.js";
+import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
+import { validateAnswerQuality } from "./AnswerQualityPolicy.js";
+import { classifySubAgentIntent } from "./SubAgentIntent.js";
 
 export { requiresRepositoryFileChange } from "./TaskCompletionContract.js";
 
@@ -36,6 +40,19 @@ export function validateAgentDecisionGuardrails(
 ): AgentDecisionGuardrailViolation | undefined {
   if (state.operatingMode === "PLAN") {
     return undefined;
+  }
+  if (
+    isWebSynthesisReserveActive(state)
+    && decision.type !== "FINAL"
+    && decision.type !== "FAILED"
+  ) {
+    return {
+      code: "WEB_FINAL_SYNTHESIS_RESERVED",
+      message: [
+        "The Web research final-synthesis reserve is active, so tool calls, plans, and questions are no longer allowed.",
+        "Use the Web research progress section: return a cited FINAL success=true when evidence is ready; otherwise return FINAL success=false or FAILED with a transparent insufficient-evidence explanation.",
+      ].join(" "),
+    };
   }
   if (decision.type === "FINAL") {
     return validateFinalDecision(state, decision);
@@ -70,13 +87,56 @@ function validateFinalDecision(
   ));
   const latestSufficientVerification = sufficientVerification.at(-1);
   const verificationSatisfied = latestSufficientVerification?.success === true;
+  const collaborationIntent = classifySubAgentIntent(state.userGoal);
+  const delegatedResults = state.delegationBatches.flatMap((batch) => batch.results);
+
+  if (
+    collaborationIntent.preference === "REQUIRED"
+    && state.taskContract.capabilities.delegation
+    && state.delegationBatches.length === 0
+  ) {
+    return {
+      code: "FINAL_WITHOUT_REQUESTED_DELEGATION",
+      message: "Postcondition failed: the user explicitly requested subagent collaboration, but no DELEGATE batch was executed.",
+    };
+  }
+  if (
+    collaborationIntent.preference === "REQUIRED"
+    && collaborationIntent.requestsChangeProposal
+    && state.taskContract.capabilities.repositoryWrite
+    && !delegatedResults.some((result) => result.status === "COMPLETED" && result.proposedPatch)
+  ) {
+    return {
+      code: "FINAL_WITHOUT_DELEGATED_CHANGE_PROPOSAL",
+      message: "Postcondition failed: the requested implementation subagent did not produce a validated patch proposal.",
+    };
+  }
+  if (
+    collaborationIntent.preference === "REQUIRED"
+    && collaborationIntent.requestsReview
+    && !delegatedResults.some((result) => result.status === "COMPLETED" && result.reviewedTaskIds?.length)
+  ) {
+    return {
+      code: "FINAL_WITHOUT_DELEGATED_REVIEW",
+      message: "Postcondition failed: the user requested a subagent review, but no dependent change_reviewer completed.",
+    };
+  }
 
   const taskContractViolation = validateTaskContractEvidence(state, decision.summary);
   if (taskContractViolation) {
     return taskContractViolation;
   }
-
-  if (looksLikeIndexedKnowledgeRequest(state.userGoal) && !hasSuccessfulKnowledgeSearch(state)) {
+  if (
+    state.taskContract.deterministicAnswer === undefined
+    && (
+      state.taskContract.outputKind === "NATURAL_LANGUAGE"
+      || state.taskContract.outputKind === "GROUNDED_WEB_ANSWER"
+    )
+  ) {
+    const answerQualityViolation = validateAnswerQuality(state.userGoal, decision.summary);
+    if (answerQualityViolation) return answerQualityViolation;
+  }
+  if (isKnowledgeTask(state) && !hasSuccessfulKnowledgeSearch(state)) {
     return {
       code: "FINAL_WITHOUT_KNOWLEDGE_SEARCH",
       message: [
@@ -89,7 +149,7 @@ function validateFinalDecision(
 
   const knowledgeOutcome = readLatestKnowledgeSearchOutcome(state);
   if (
-    looksLikeIndexedKnowledgeRequest(state.userGoal)
+    isKnowledgeTask(state)
     && knowledgeOutcome?.found === false
     && !reportsInsufficientKnowledgeEvidence(decision.summary)
   ) {
@@ -104,7 +164,7 @@ function validateFinalDecision(
   }
 
   if (
-    looksLikeIndexedKnowledgeRequest(state.userGoal)
+    isKnowledgeTask(state)
     && knowledgeOutcome?.found === true
     && (
       knowledgeOutcome.citations.length === 0
@@ -195,7 +255,7 @@ function validateTaskContractEvidence(
 ): AgentDecisionGuardrailViolation | undefined {
   const requirements = state.taskContract.evidence;
 
-  if (requirements.repositoryRead && !hasSuccessfulToolCall(state, "read_file")) {
+  if (requirements.repositoryRead && !hasSuccessfulRepositoryEvidence(state)) {
     return {
       code: "FINAL_WITHOUT_REPOSITORY_EVIDENCE",
       message: "Postcondition failed: this repository investigation must read relevant files before returning a final answer.",
@@ -266,12 +326,35 @@ function validateTaskContractEvidence(
         ].join(" "),
       };
     }
-    if (!searchQueries.some(looksLikeAuthoritativeFreshnessQuery)) {
+
+    const authorityEvidence = assessAuthoritativeFreshnessEvidence(state);
+    if (authorityEvidence.status === "NO_AUTHORITY_FRESHNESS_SEARCH") {
       return {
         code: "FINAL_WITHOUT_AUTHORITATIVE_FRESHNESS_SEARCH",
         message: [
-          "Postcondition failed: a latest/current model, version, release, or product claim cannot rely only on a generic search-engine ranking.",
-          "Run an authority-targeted freshness search using official/官方, release notes, changelog, or a site: constraint, then inspect the newest relevant candidate.",
+          "Postcondition failed: no successful search produced candidates from an authority-targeted freshness query.",
+          "The next decision must be TOOL_CALL web_search, not FINAL.",
+          "Use a query that combines an authority target with current-time intent, for example: site:<official-domain> <entity> latest model release <current-year>.",
+          "A current or adjacent year counts as retrieval intent, but search rank alone is never final evidence.",
+        ].join(" "),
+      };
+    }
+    if (authorityEvidence.status === "AUTHORITY_RESULT_NOT_FETCHED") {
+      return {
+        code: "FINAL_WITHOUT_AUTHORITATIVE_SOURCE_INSPECTION",
+        message: [
+          "Postcondition failed: an authority-targeted freshness search succeeded, but none of its exact returned candidate URLs was successfully fetched.",
+          "The next decision must be TOOL_CALL fetch_url using an exact candidate URL from that search, not FINAL.",
+          "Inspect the canonical product, release-index, release-note, or changelog page before asserting what is latest.",
+        ].join(" "),
+      };
+    }
+    if (authorityEvidence.status === "FETCHED_SOURCE_LACKS_TEMPORAL_EVIDENCE") {
+      return {
+        code: "FINAL_WITHOUT_VISIBLE_FRESHNESS_EVIDENCE",
+        message: [
+          "Postcondition failed: the fetched authority-search candidate does not expose a visible version, date, release, launch, update, or current/latest marker.",
+          "The next decision must gather another exact official candidate, preferably release notes, a changelog, or a dated release index; do not repeat FINAL.",
         ].join(" "),
       };
     }
@@ -307,18 +390,35 @@ function validateTaskContractEvidence(
   }
 
   if (requirements.webCitation) {
-    const gatheredUrls = successfulWebUrls(state);
+    const gatheredUrls = requirements.fetchedWebSourceCount > 0
+      ? successfulFetchedUrls(state)
+      : successfulWebUrls(state);
     if (gatheredUrls.length > 0
       && !gatheredUrls.some((url) => summary.includes(url))
       && !reportsInsufficientWebEvidence(summary)) {
       return {
         code: "FINAL_WITHOUT_WEB_CITATION",
-        message: "Postcondition failed: cite at least one exact URL gathered by web_search or fetch_url, or explicitly report insufficient evidence.",
+        message: "Postcondition failed: cite at least one exact URL whose page was successfully fetched and inspected, or explicitly report insufficient evidence.",
       };
     }
   }
 
   return undefined;
+}
+
+function hasSuccessfulRepositoryEvidence(state: AgentState): boolean {
+  if (hasSuccessfulToolCall(state, "read_file")) return true;
+  return state.delegationBatches.some((batch) => batch.results.some((result) => (
+    result.status === "COMPLETED"
+    && result.evidence.length > 0
+    && result.toolsCalled.some((tool) => [
+      "read_file",
+      "list_files",
+      "search_code",
+      "git_status",
+      "git_diff",
+    ].includes(tool))
+  )));
 }
 
 function formatCoverageRanges(ranges: Array<{ startLine: number; endLine: number }>): string {
@@ -362,10 +462,17 @@ function successfulSearchUrls(state: AgentState): string[] {
 }
 
 function successfulSearchQueries(state: AgentState): string[] {
-  return [...new Set(state.toolResults
+  const queries = state.toolResults
     .filter((result) => result.toolName === "web_search" && result.result.success)
     .map((result) => readObjectString(result.input, "query"))
-    .filter((value): value is string => value !== undefined))];
+    .filter((value): value is string => value !== undefined);
+  const seen = new Set<string>();
+  return queries.filter((query) => {
+    const normalized = query.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 function successfulWebEvidenceTexts(state: AgentState): string[] {
@@ -413,6 +520,22 @@ function validateToolCallDecision(
       };
     }
     const query = readObjectString(decision.input, "query");
+    if (
+      query
+      && looksLikeTemporalSuperlativeRequest(state.userGoal)
+      && successfulSearchQueries(state).length >= 1
+      && assessAuthoritativeFreshnessEvidence(state).status === "NO_AUTHORITY_FRESHNESS_SEARCH"
+      && !looksLikeAuthoritativeFreshnessQuery(query)
+    ) {
+      return {
+        code: "TEMPORAL_AUTHORITY_SEARCH_REQUIRED",
+        message: [
+          "A generic search view already succeeded for this latest/current claim.",
+          "The next web_search must be authority-targeted and freshness-aware before running more generic searches.",
+          "Use official/官方, release notes, changelog, or site:<official-domain>, together with latest/current/release/model or the current year.",
+        ].join(" "),
+      };
+    }
     return query ? validateWebSearchQueryScope(state.userGoal, query) : undefined;
   }
   if (decision.toolName !== "fetch_url") return undefined;
@@ -544,6 +667,11 @@ function readLatestKnowledgeSearchOutcome(state: AgentState): KnowledgeSearchOut
 function reportsInsufficientKnowledgeEvidence(summary: string): boolean {
   return /(?:未能?找到|没有找到|无(?:相关|可用|足够).{0,8}(?:证据|文档|内容|结果)|证据不足|知识库(?:中|里)?(?:没有|未找到|无)|无法(?:从|根据).{0,12}(?:知识库|索引文档).{0,12}(?:回答|确认)|无法回答)/i.test(summary)
     || /\b(?:(?:no|not enough|insufficient)\s+(?:relevant\s+)?(?:evidence|documents?|results?|context)|(?:could not|couldn't|cannot|can't)\s+(?:find|answer|verify)|not found)\b/i.test(summary);
+}
+
+function isKnowledgeTask(state: AgentState): boolean {
+  return state.taskContract.understanding?.operation === "QUERY_KNOWLEDGE"
+    || (!state.taskContract.understanding && looksLikeIndexedKnowledgeRequest(state.userGoal));
 }
 
 function hasUnresolvedVerificationFailure(state: AgentState): boolean {

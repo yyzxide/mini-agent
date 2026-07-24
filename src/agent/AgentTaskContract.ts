@@ -1,5 +1,6 @@
 import type { TaskChangeMode } from "../session/TaskChangeLogStore.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
+import type { TaskUnderstanding } from "./TaskUnderstanding.js";
 
 export type AgentTaskKind =
   | "DIRECT_RESPONSE"
@@ -48,6 +49,7 @@ export interface AgentTaskContract {
   instructions: string[];
   routeReason?: string;
   deterministicAnswer?: string;
+  understanding?: TaskUnderstanding;
 }
 
 const REPOSITORY_READ_TOOLS = new Set([
@@ -62,14 +64,14 @@ const WEB_TOOLS = new Set(["web_search", "fetch_url"]);
 export function createDefaultAgentTaskContract(): AgentTaskContract {
   return {
     version: 1,
-    kind: "REPOSITORY_TASK",
-    outputKind: "TASK_RESULT",
-    executionStrategy: "ITERATIVE",
-    resultMode: "AGENT_LOOP",
+    kind: "DIRECT_RESPONSE",
+    outputKind: "NATURAL_LANGUAGE",
+    executionStrategy: "SINGLE_SHOT",
+    resultMode: "DIRECT_ANSWER",
     capabilities: {
-      repositoryRead: true,
-      repositoryWrite: true,
-      commandExecution: true,
+      repositoryRead: false,
+      repositoryWrite: false,
+      commandExecution: false,
       webAccess: false,
       knowledgeAccess: false,
       delegation: false,
@@ -84,8 +86,10 @@ export function createDefaultAgentTaskContract(): AgentTaskContract {
       webCitation: false,
       knowledgeSearch: false,
     },
-    maxSteps: 20,
-    instructions: [],
+    maxSteps: 1,
+    instructions: [
+      "No capabilities are granted by default. Build an explicit task contract before using tools or changing repository state.",
+    ],
   };
 }
 
@@ -137,6 +141,12 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
     `Task kind: ${contract.kind}`,
     `Output kind: ${contract.outputKind}`,
     `Execution strategy: ${contract.executionStrategy}`,
+    ...(contract.understanding ? [
+      `Understood operation: ${contract.understanding.operation}`,
+      `Understood target: ${contract.understanding.target}`,
+      `Answer shape: ${contract.understanding.answerShape}`,
+      `Understanding confidence: ${contract.understanding.confidence.toFixed(2)}`,
+    ] : []),
     `Enabled capabilities: ${enabledCapabilities.join(", ") || "none"}`,
     `Evidence requirements: ${evidence.join("; ") || "none beyond an accurate answer"}`,
     "Task-specific instructions:",

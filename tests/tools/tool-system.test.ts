@@ -383,6 +383,47 @@ describe("read-only repository tools", () => {
     expect(result.data.truncated).toBe(false);
   });
 
+  it("fetch_url rejects HTTP-200 WAF and CAPTCHA shells as unusable evidence", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const registry = createDefaultToolRegistry();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        "{\"_waf_bd8c\":\"challenge\",\"verify_url\":\"/captcha\"}",
+        { status: 200, headers: { "content-type": "application/json" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        "<html><body><h1>安全验证</h1><p>请完成滑动验证后继续访问。</p></body></html>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const waf = await registry.execute("fetch_url", {
+      url: "https://example.com/waf",
+    }, fetchUrlContext());
+    const captcha = await registry.execute("fetch_url", {
+      url: "https://example.com/captcha",
+    }, fetchUrlContext());
+
+    expect(waf).toMatchObject({ success: false, error: { code: "FETCH_URL_CONTENT_UNUSABLE" } });
+    expect(captcha).toMatchObject({ success: false, error: { code: "FETCH_URL_CONTENT_UNUSABLE" } });
+  });
+
+  it("fetch_url rejects non-success HTTP responses as evidence", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", {
+      status: 404,
+      statusText: "Not Found",
+      headers: { "content-type": "text/plain" },
+    })));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", {
+      url: "https://example.com/missing",
+    }, fetchUrlContext());
+
+    expect(result).toMatchObject({ success: false, error: { code: "FETCH_URL_HTTP_ERROR" } });
+  });
+
   it("fetch_url refuses localhost and private network targets", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

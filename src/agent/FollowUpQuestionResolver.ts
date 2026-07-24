@@ -56,12 +56,9 @@ function extractFollowUpSubject(value: string): string | undefined {
 function extractFollowUpPredicate(previousUserMessage: string): string | undefined {
   const normalized = normalizeSpaces(previousUserMessage).replace(/[？?]+$/, "");
   const markerPatterns = [
-    /^(?:.+?)(是.+)$/,
-    /^(?:.+?)((?:世界杯|world cup).+)$/i,
-    /^(?:.+?)((?:最新|latest).+)$/i,
-    /^(?:.+?)((?:最近|recent).+)$/i,
-    /^(?:.+?)(.*(?:比分|得分|赛果|成绩|战绩|score|scores|result|results).*)$/i,
-    /^(?:.+?)(.*(?:强队|厉害|实力|怎么样|如何|冠军|夺冠|版本|发布|更新|新闻).*)$/i,
+    /^(?:.+?)((?:有多少|有几个|有哪些|哪几个|哪一些).+)$/,
+    /^(?:.+?)(的.{1,30}(?:是什么|是谁|在哪里|位于哪里|有多少|有哪些))$/,
+    /^(?:.+?)(是(?!什么|谁).+)$/,
   ];
   for (const pattern of markerPatterns) {
     const candidate = normalized.match(pattern)?.[1];

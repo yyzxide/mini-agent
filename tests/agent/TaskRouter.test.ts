@@ -3,7 +3,6 @@ import { looksLikeDocumentCreationTask } from "../../src/agent/ArtifactIntent.js
 import {
   looksLikeRepositoryAnalysisTask,
   routeTask,
-  shouldPreserveAgentLoopIntent,
 } from "../../src/agent/TaskRouter.js";
 
 describe("TaskRouter", () => {
@@ -46,7 +45,6 @@ describe("TaskRouter", () => {
   it("routes documentation creation requests to the agent loop on the first turn", () => {
     const exactRegression = "那你帮我写一个自身的设计文档";
     expect(routeTask(exactRegression)).toMatchObject({ intent: "AGENT_LOOP" });
-    expect(shouldPreserveAgentLoopIntent(exactRegression)).toBe(true);
     expect(routeTask("请撰写一份项目架构文档")).toMatchObject({ intent: "AGENT_LOOP" });
     expect(routeTask("帮我写设计文档")).toMatchObject({ intent: "AGENT_LOOP" });
     expect(routeTask("create README documentation")).toMatchObject({ intent: "AGENT_LOOP" });
@@ -147,6 +145,27 @@ describe("TaskRouter", () => {
     });
   });
 
+  it("does not use subject names alone as a web-routing shortcut", () => {
+    expect(routeTask("世界杯是什么")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("股票是什么")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("冠军是什么意思")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("排名是什么")).toMatchObject({
+      intent: "DIRECT_ANSWER",
+    });
+    expect(routeTask("世界杯最新比分")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+    expect(routeTask("股票今天收盘价格")).toMatchObject({
+      intent: "WEB_ANSWER",
+    });
+  });
+
   it("requires evidence for precise or exhaustive external facts even when they are not current", () => {
     expect(routeTask("列出这套小说全部作品及首次出版年份")).toMatchObject({
       intent: "WEB_ANSWER",
@@ -169,6 +188,17 @@ describe("TaskRouter", () => {
     expect(routeTask("kanye west有哪些知名的歌曲")).toMatchObject({
       intent: "DIRECT_ANSWER",
     });
+  });
+
+  it("does not mistake domain vocabulary for an instruction to operate on the repository", () => {
+    for (const question of [
+      "什么是项目管理？",
+      "解释一下测试驱动开发",
+      "How do I create an account?",
+      "What is a file system?",
+    ]) {
+      expect(routeTask(question)).toMatchObject({ intent: "DIRECT_ANSWER" });
+    }
   });
 
   it("uses conversation evidence first for audits of an earlier assistant answer", () => {
@@ -232,7 +262,6 @@ describe("TaskRouter", () => {
     expect(routeTask("请用知识库查一下上传策略")).toMatchObject({ intent: "AGENT_LOOP" });
     expect(routeTask("可以用知识库查询上传策略吗")).toMatchObject({ intent: "AGENT_LOOP" });
     expect(routeTask("请让这个项目支持 RAG 知识库")).toMatchObject({ intent: "AGENT_LOOP" });
-    expect(shouldPreserveAgentLoopIntent("查询知识库里的上传策略")).toBe(true);
   });
 
   it("routes cache ownership questions to deterministic product answers", () => {
@@ -246,7 +275,6 @@ describe("TaskRouter", () => {
       "如果是agent该做的事情，我们是不是缺失这个功能，需要补齐",
     ].join("");
     expect(routeTask(exactRegression)).toMatchObject({ intent: "AGENT_LOOP" });
-    expect(shouldPreserveAgentLoopIntent(exactRegression)).toBe(true);
     expect(routeTask("请补齐 Agent 的缓存读写功能")).toMatchObject({ intent: "AGENT_LOOP" });
     expect(routeTask("Should the model or Agent own the cache?")).toMatchObject({ intent: "DIRECT_ANSWER" });
   });

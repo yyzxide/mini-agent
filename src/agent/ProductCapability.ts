@@ -4,8 +4,9 @@ import {
   type ProductCapabilityDefinition,
   type ProductCapabilityId,
 } from "./CapabilityRegistry.js";
+import { classifySubAgentIntent } from "./SubAgentIntent.js";
 
-export type ProductMetaTopic = "ALL" | "WEB_RESEARCH" | "REPOSITORY_WRITE";
+export type ProductMetaTopic = "ALL" | "WEB_RESEARCH" | "REPOSITORY_WRITE" | "MULTI_AGENT_COLLABORATION";
 export type ProductMetaAct = "INVENTORY" | "AVAILABILITY" | "EXPLAIN_LIMITATION";
 
 export interface ProductMetaIntent {
@@ -29,6 +30,7 @@ export function classifyProductMetaIntent(value: string): ProductMetaIntent | un
   const subject = hasSubjectSignal(normalized.text);
   const web = hasWebTopic(normalized.text);
   const repositoryWrite = hasRepositoryWriteTopic(normalized.text);
+  const subAgent = classifySubAgentIntent(value);
   const generalScope = hasGeneralCapabilityScope(normalized.text);
   const modality = hasCapabilityModality(normalized.text);
   const explanation = hasExplanationFrame(normalized.text);
@@ -38,6 +40,7 @@ export function classifyProductMetaIntent(value: string): ProductMetaIntent | un
   if (subject) signals.push("product-subject");
   if (web) signals.push("web-topic");
   if (repositoryWrite) signals.push("repository-write-topic");
+  if (subAgent.mentioned) signals.push("multi-agent-topic");
   if (generalScope) signals.push("general-capability-scope");
   if (modality) signals.push("capability-modality");
   if (explanation) signals.push("historical-explanation");
@@ -46,21 +49,28 @@ export function classifyProductMetaIntent(value: string): ProductMetaIntent | un
   // “请联网查一下” is an action request even though it mentions networking.
   if (explicitAction && !explanation && !question) return undefined;
 
-  const topic: ProductMetaTopic = web && repositoryWrite
+  const topic: ProductMetaTopic = [web, repositoryWrite, subAgent.mentioned].filter(Boolean).length > 1
     ? "ALL"
-    : web ? "WEB_RESEARCH" : repositoryWrite ? "REPOSITORY_WRITE" : "ALL";
+    : web
+      ? "WEB_RESEARCH"
+      : repositoryWrite
+        ? "REPOSITORY_WRITE"
+        : subAgent.mentioned
+          ? "MULTI_AGENT_COLLABORATION"
+          : "ALL";
   const act: ProductMetaAct = explanation
     ? "EXPLAIN_LIMITATION"
-    : generalScope || (!web && !repositoryWrite) ? "INVENTORY" : "AVAILABILITY";
+    : generalScope || (!web && !repositoryWrite && !subAgent.mentioned) ? "INVENTORY" : "AVAILABILITY";
 
   const isCapabilityQuestion = generalScope
     || explanation
-    || ((web || repositoryWrite) && modality && (subject || question));
+    || subAgent.capabilityQuestion
+    || ((web || repositoryWrite || subAgent.mentioned) && modality && (subject || question));
   if (!isCapabilityQuestion) return undefined;
 
   let confidence = 0.45;
   if (subject) confidence += 0.12;
-  if (web || repositoryWrite) confidence += 0.16;
+  if (web || repositoryWrite || subAgent.mentioned) confidence += 0.16;
   if (generalScope) confidence += 0.22;
   if (modality) confidence += 0.12;
   if (explanation) confidence += 0.18;
@@ -90,6 +100,9 @@ export function renderProductCapabilityAnswer(
   if (intent.topic === "REPOSITORY_WRITE") {
     return renderFocusedCapability(getProductCapability("REPOSITORY_WRITE"), locale);
   }
+  if (intent.topic === "MULTI_AGENT_COLLABORATION") {
+    return renderFocusedCapability(getProductCapability("MULTI_AGENT_COLLABORATION"), locale);
+  }
   return renderInventory(locale);
 }
 
@@ -100,6 +113,9 @@ export function detectResponseCapabilityDenials(text: string): ProductCapability
   }
   if (containsGlobalDenial(text, "REPOSITORY_WRITE") && !containsAffirmation(text, "REPOSITORY_WRITE")) {
     conflicts.push("REPOSITORY_WRITE");
+  }
+  if (containsGlobalDenial(text, "MULTI_AGENT_COLLABORATION") && !containsAffirmation(text, "MULTI_AGENT_COLLABORATION")) {
+    conflicts.push("MULTI_AGENT_COLLABORATION");
   }
   return conflicts;
 }
@@ -159,7 +175,11 @@ function renderLimitationExplanation(
   locale: "zh" | "en",
 ): string {
   const entries = topic === "ALL"
-    ? [getProductCapability("WEB_RESEARCH"), getProductCapability("REPOSITORY_WRITE")]
+    ? [
+      getProductCapability("WEB_RESEARCH"),
+      getProductCapability("REPOSITORY_WRITE"),
+      getProductCapability("MULTI_AGENT_COLLABORATION"),
+    ]
     : [getProductCapability(topic)];
   if (locale === "en") {
     return [
@@ -177,14 +197,20 @@ function renderLimitationExplanation(
   ].join("\n\n");
 }
 
-function containsGlobalDenial(text: string, capability: "WEB_RESEARCH" | "REPOSITORY_WRITE"): boolean {
+function containsGlobalDenial(text: string, capability: "WEB_RESEARCH" | "REPOSITORY_WRITE" | "MULTI_AGENT_COLLABORATION"): boolean {
   const normalized = text.toLowerCase();
+  if (capability === "MULTI_AGENT_COLLABORATION") {
+    return /(?:我|mini\s*coding\s*agent|这个(?:cli|助手|agent))?.{0,12}(?:不能|无法|不支持|没有(?:办法|能力)?).{0,12}(?:sub[\s-]*agent|子代理|多\s*agent|多个\s*agent|代理协作)/i.test(normalized);
+  }
   return capability === "WEB_RESEARCH"
     ? /(?:我|mini\s*coding\s*agent|这个(?:cli|助手|agent))?.{0,8}(?:不能|无法|不支持|没有(?:办法|能力)?).{0,12}(?:联网|上网|互联网|外网|访问网页|web\s*搜索|browse|internet)/i.test(normalized)
     : /(?:我|mini\s*coding\s*agent|这个(?:cli|助手|agent))?.{0,8}(?:不能|无法|不支持|没有(?:办法|能力)?).{0,12}(?:写入|修改|编辑|创建|保存|落盘).{0,8}(?:文件|代码|仓库)/i.test(normalized);
 }
 
-function containsAffirmation(text: string, capability: "WEB_RESEARCH" | "REPOSITORY_WRITE"): boolean {
+function containsAffirmation(text: string, capability: "WEB_RESEARCH" | "REPOSITORY_WRITE" | "MULTI_AGENT_COLLABORATION"): boolean {
+  if (capability === "MULTI_AGENT_COLLABORATION") {
+    return /(?:可以|能够|支持|具备).{0,12}(?:sub[\s-]*agent|子代理|多\s*agent|多个\s*agent|代理协作)|(?:delegate|apply_delegated_patch)/i.test(text);
+  }
   return capability === "WEB_RESEARCH"
     ? /(?:可以|能够|支持|具备|有).{0,10}(?:联网|上网|访问网页|web_search|fetch_url)|(?:联网|web).{0,10}(?:能力|支持)/i.test(text)
     : /(?:可以|能够|支持|具备|有).{0,10}(?:写入|修改|编辑|创建|保存).{0,8}(?:文件|代码|仓库)|(?:apply_patch|repository_task)/i.test(text);

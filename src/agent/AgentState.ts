@@ -104,7 +104,7 @@ export class AgentState {
   readonly runId: string;
   readonly repoPath: string;
   readonly userGoal: string;
-  readonly maxSteps: number;
+  maxSteps: number;
   step = 0;
   status: AgentStatus = "RUNNING";
   messages: AgentMessage[] = [];
@@ -117,7 +117,7 @@ export class AgentState {
   readonly operatingMode: AgentOperatingMode;
   readonly recoveredCheckpoint: AgentCheckpoint | undefined;
   readonly multiAgentEnabled: boolean;
-  readonly taskContract: AgentTaskContract;
+  taskContract: AgentTaskContract;
   delegationBatches: SubAgentBatchResult[] = [];
   private fileReadCoverage: FileReadCoverage[] = [];
   private readonly executionActions: AgentExecutionAction[] = [];
@@ -127,7 +127,7 @@ export class AgentState {
     this.runId = options.runId ?? `${options.sessionId}:run`;
     this.repoPath = options.repoPath;
     this.userGoal = options.userGoal;
-    this.maxSteps = options.maxSteps ?? 20;
+    this.maxSteps = options.maxSteps ?? options.taskContract?.maxSteps ?? 20;
     this.operatingMode = options.operatingMode ?? "EXECUTE";
     this.recoveredCheckpoint = options.recoveredCheckpoint;
     this.multiAgentEnabled = options.multiAgentEnabled ?? false;
@@ -244,6 +244,13 @@ export class AgentState {
 
   setLastError(error: string | null): void {
     this.lastError = error;
+  }
+
+  upgradeTaskContract(contract: AgentTaskContract): void {
+    this.taskContract = contract;
+    // The current Direct decision is counted immediately after the upgrade.
+    // Preserve the upgraded contract's full budget for subsequent decisions.
+    this.maxSteps = Math.max(this.maxSteps, this.step + 1 + contract.maxSteps);
   }
 
   incrementStep(): void {

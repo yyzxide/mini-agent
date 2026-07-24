@@ -16,10 +16,17 @@ import { PermissionManager } from "../permission/PermissionManager.js";
 import { EventStore } from "../session/EventStore.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
-import type { LlmClient, LlmInput } from "../llm/LlmClient.js";
+import type {
+  LlmClient,
+  LlmInput,
+  LlmTextCompletionInput,
+  LlmTextCompletionResult,
+} from "../llm/LlmClient.js";
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 import { ScriptedLlmClient } from "./ScriptedLlmClient.js";
 import type { MultiAgentPolicy, SubAgentCoordinator } from "../agent/SubAgentTypes.js";
+import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
+import { routeTask } from "../agent/TaskRouter.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -127,11 +134,19 @@ export class AgentHarness {
     });
 
     const startedAt = Date.now();
+    const operatingMode = scenario.operatingMode ?? "EXECUTE";
+    const taskContract = buildAgentTaskContract({
+      userGoal: scenario.userGoal,
+      route: routeTask(scenario.userGoal),
+      operatingMode,
+      multiAgentEnabled: options.multiAgent?.enabled === true,
+    });
     const run = await loop.run({
       userGoal: scenario.userGoal,
       autoApprove: true,
       nonInteractive: true,
-      operatingMode: scenario.operatingMode ?? "EXECUTE",
+      operatingMode,
+      taskContract,
       ...(scenario.maxSteps === undefined ? {} : { maxSteps: scenario.maxSteps }),
       ...(options.multiAgent ? { multiAgent: options.multiAgent } : {}),
     });
@@ -331,6 +346,17 @@ class InstrumentedLlmClient implements LlmClient {
   async chat(input: LlmInput): Promise<AgentDecision> {
     this.calls += 1;
     return await this.delegate.chat(input);
+  }
+
+  async completeText(input: LlmTextCompletionInput): Promise<LlmTextCompletionResult> {
+    this.calls += 1;
+    if (!this.delegate.completeText) {
+      return {
+        success: false,
+        error: "The injected LLM client does not support single-shot text completion",
+      };
+    }
+    return await this.delegate.completeText(input);
   }
 
   drainCallMetrics(): LlmCallMetrics[] {

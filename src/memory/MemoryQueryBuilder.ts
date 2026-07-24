@@ -1,4 +1,5 @@
 import { extractKeywords, unique } from "./MemoryText.js";
+import { understandTask, type TaskUnderstanding } from "../agent/TaskUnderstanding.js";
 
 export type MemoryQueryIntent =
   | "CODE_TASK"
@@ -34,18 +35,21 @@ const QUERY_EXPANSIONS: Array<{ pattern: RegExp; terms: string[] }> = [
   { pattern: /怎么运行|运行|启动|run|start/i, terms: ["运行", "启动", "命令", "script", "package"] },
   { pattern: /报错|错误|失败|error|failed|exception|enoent|cannot find/i, terms: ["错误", "失败", "诊断", "修复", "command_result"] },
   { pattern: /审查|检查.*bug|review|bug/i, terms: ["代码审查", "bug", "finding", "verification"] },
-  { pattern: /联网|最新|今天|昨天|实时|新闻|比分|赛果|谁赢|比赛结果|\bvs\b|股市|汇率|latest|current|yesterday|who won/i, terms: ["联网", "搜索", "来源", "web_search", "fetch_url"] },
   { pattern: /记得|之前|上次|刚才|历史|memory|session/i, terms: ["记忆", "历史", "session", "summary"] },
 ];
 
 export function buildMemoryQuery(input: BuildMemoryQueryInput): MemoryQuery {
   const originalQuery = input.query.trim();
   const normalizedQuery = normalizeQuery(originalQuery);
-  const intent = inferMemoryQueryIntent(normalizedQuery);
+  const understanding = understandTask(originalQuery);
+  const intent = inferMemoryQueryIntent(normalizedQuery, understanding);
   const preferredModes = inferPreferredModes(intent, normalizedQuery);
-  const expansions = QUERY_EXPANSIONS
-    .filter((item) => item.pattern.test(normalizedQuery))
-    .flatMap((item) => item.terms);
+  const expansions = [
+    ...QUERY_EXPANSIONS
+      .filter((item) => item.pattern.test(normalizedQuery))
+      .flatMap((item) => item.terms),
+    ...semanticExpansionTerms(understanding),
+  ];
   const recentContextTerms = input.recentMemory
     ? extractKeywords(input.recentMemory).slice(0, 12)
     : [];
@@ -85,26 +89,50 @@ function normalizeQuery(value: string): string {
     .toLowerCase();
 }
 
-function inferMemoryQueryIntent(query: string): MemoryQueryIntent {
-  if (/写进去|保存|落盘|写入|创建文件|文件里面|save|write/.test(query)) {
-    return "CODE_TASK";
-  }
-  if (/审查|检查.*bug|review|code review/.test(query)) {
-    return "CODE_REVIEW";
-  }
-  if (/报错|错误|失败|exception|error|failed|cannot find|enoent|eaddrinuse|econnrefused/.test(query)) {
+function inferMemoryQueryIntent(
+  query: string,
+  understanding: TaskUnderstanding,
+): MemoryQueryIntent {
+  if (understanding.signals.includes("local-diagnostic")) {
     return "ERROR_DIAGNOSIS";
   }
-  if (/记得|之前|上次|刚才|历史|memory|session|聊了什么/.test(query)) {
+  if (understanding.target === "SESSION") {
     return "CONVERSATION";
   }
-  if (/联网|最新|今天|昨天|实时|新闻|比分|赛果|谁赢|比赛结果|\bvs\b|股市|行情|汇率|latest|current|yesterday|who won|news/.test(query)) {
+  if (understanding.operation === "RESEARCH") {
     return "WEB_RESEARCH";
   }
-  if (/写|实现|修复|创建|保存|落盘|测试|运行|代码|函数|类|demo|game|算法|中位数|括号|数组|链表|堆|栈|二叉树|排序|查找|file|patch|run/.test(query)) {
+  if (understanding.operation === "REVIEW_REPOSITORY") {
+    return "CODE_REVIEW";
+  }
+  if (
+    understanding.operation === "CHANGE_REPOSITORY"
+    || understanding.operation === "ANALYZE_REPOSITORY"
+    || understanding.operation === "QUERY_KNOWLEDGE"
+    || /怎么运行|运行|启动|\b(?:run|start)\b/.test(query)
+  ) {
     return "CODE_TASK";
   }
   return "GENERAL";
+}
+
+function semanticExpansionTerms(understanding: TaskUnderstanding): string[] {
+  switch (understanding.operation) {
+    case "RESEARCH":
+      return ["联网", "搜索", "来源", "web_search", "fetch_url"];
+    case "REVIEW_REPOSITORY":
+      return ["代码审查", "finding", "verification"];
+    case "ANALYZE_REPOSITORY":
+      return ["仓库分析", "repository", "evidence"];
+    case "CHANGE_REPOSITORY":
+      return ["仓库修改", "patch", "verification"];
+    case "QUERY_KNOWLEDGE":
+      return ["知识库", "knowledge_search", "citation"];
+    case "LOCAL_STATE":
+      return understanding.target === "SESSION" ? ["记忆", "session", "summary"] : [];
+    case "ANSWER":
+      return [];
+  }
 }
 
 function inferPreferredModes(intent: MemoryQueryIntent, query: string): string[] {

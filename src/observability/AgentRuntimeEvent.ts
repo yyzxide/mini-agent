@@ -23,6 +23,7 @@ export interface RuntimeLlmUsage {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   usageAvailable: boolean;
+  reasoningContentAvailable?: boolean;
 }
 
 export interface RuntimeConversationTrace {
@@ -47,6 +48,15 @@ export type AgentRuntimeEvent = RuntimeEventMetadata & (
     llmSkipped: boolean;
   }
   | { type: "conversation"; trace: RuntimeConversationTrace }
+  | {
+    type: "understanding";
+    source: "DETERMINISTIC" | "MODEL_REFINED" | "MODEL_FALLBACK";
+    operation: string;
+    target: string;
+    confidence: number;
+    reason: string;
+  }
+  | { type: "task_contract"; kind: string; outputKind: string }
   | { type: "decision"; decisionType: AgentDecision["type"]; message: string; decision?: AgentDecision }
   | { type: "plan"; message: string }
   | { type: "context"; trace: ContextTrace }
@@ -63,7 +73,44 @@ export type AgentRuntimeEvent = RuntimeEventMetadata & (
   }
   | { type: "tool"; toolName: string; input: JsonObject }
   | { type: "tool_result"; toolName: string; success: boolean; durationMs: number; summary?: string; resultPreview?: string; error?: string }
-  | { type: "agents"; phase: "started" | "finished" | "failed"; tasks: number; message: string }
+  | {
+    type: "agents";
+    phase: "started" | "finished" | "failed";
+    tasks: number;
+    message: string;
+    taskDetails?: Array<{
+      taskId: string;
+      role: string;
+      access: string;
+      dependsOn: string[];
+      status?: string;
+      changedFiles?: string[];
+      error?: string;
+    }>;
+  }
+  | {
+    type: "agent_task";
+    phase: "task_started" | "worktree_started" | "thinking" | "decision" | "tool_started" | "tool_finished" | "patch_applied" | "command_started" | "command_output" | "command_finished" | "recovery" | "task_finished";
+    taskId: string;
+    role: string;
+    access: string;
+    dependsOn?: string[];
+    step?: number;
+    decisionType?: string;
+    message?: string;
+    toolName?: string;
+    workspaceKind?: string;
+    baselineFingerprint?: string;
+    command?: string;
+    exitCode?: number | null;
+    stream?: "stdout" | "stderr";
+    success?: boolean;
+    status?: string;
+    changedFiles?: string[];
+    toolsCalled?: string[];
+    error?: string;
+    action?: string;
+  }
   | { type: "patch"; description: string }
   | { type: "patch_result"; success: boolean; durationMs: number; description: string; error?: string }
   | { type: "command"; command: string; description?: string; cwd?: string }

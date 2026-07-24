@@ -40,12 +40,24 @@ function normalizeDecisionCandidate(value: unknown): unknown {
         type,
         toolName: readString(value.toolName) ?? readString(value.name) ?? readString(value.tool),
         input: isObject(value.input) ? value.input : {},
+        ...(readString(value.reason) ?? readString(value.rationale)
+          ? { reason: readString(value.reason) ?? readString(value.rationale) }
+          : {}),
       };
+    case "DELEGATE":
     case "DELEGATE_READONLY":
       return {
         type,
         reason: readString(value.reason) ?? readString(value.message) ?? readString(value.description),
         tasks: Array.isArray(value.tasks) ? value.tasks : [],
+      };
+    case "APPLY_DELEGATED_PATCH":
+      return {
+        type,
+        taskId: readString(value.taskId),
+        description: readString(value.description)
+          ?? readString(value.message)
+          ?? "Apply delegated patch",
       };
     case "APPLY_PATCH":
       return {
@@ -228,7 +240,9 @@ function assertRequiredDecisionFields(value: unknown): void {
         throw new InvalidAgentDecisionError("TOOL_CALL decision is missing toolName");
       }
       return;
+    case "DELEGATE":
     case "DELEGATE_READONLY":
+    case "APPLY_DELEGATED_PATCH":
       return;
     case "APPLY_PATCH":
       if (typeof value.patch !== "string" || value.patch.trim().length === 0) {

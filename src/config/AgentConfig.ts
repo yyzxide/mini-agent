@@ -3,6 +3,7 @@ import { McpServerConfigSchema } from "../mcp/McpTypes.js";
 import type { McpServerConfig } from "../mcp/McpTypes.js";
 import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJsonFileAtomic } from "../utils/fs.js";
 import { DEFAULT_MULTI_AGENT_POLICY, type MultiAgentPolicy } from "../agent/SubAgentTypes.js";
+import type { SubAgentIntent } from "../agent/SubAgentIntent.js";
 
 export const USER_CONFIG_FILE = "mini-agent.config.json";
 export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
@@ -104,12 +105,21 @@ const agentConfigSchema = z.object({
   }).strict().optional(),
 }).passthrough();
 
-export function resolveMultiAgentPolicy(config: AgentConfig, agentsOverride?: number): MultiAgentPolicy {
+export function resolveMultiAgentPolicy(
+  config: AgentConfig,
+  agentsOverride?: number,
+  intent?: SubAgentIntent,
+): MultiAgentPolicy {
   const configured = config.multiAgent ?? {};
   const enabled = agentsOverride === undefined
-    ? configured.mode === "auto"
+    ? intent?.preference === "DISABLED"
+      ? false
+      : configured.mode !== "off"
     : agentsOverride > 1;
-  const maxConcurrency = agentsOverride ?? configured.maxConcurrency ?? DEFAULT_MULTI_AGENT_POLICY.maxConcurrency;
+  const maxConcurrency = agentsOverride
+    ?? intent?.requestedAgents
+    ?? configured.maxConcurrency
+    ?? DEFAULT_MULTI_AGENT_POLICY.maxConcurrency;
   return {
     enabled,
     maxConcurrency,

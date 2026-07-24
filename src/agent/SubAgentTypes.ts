@@ -2,23 +2,37 @@ export const SUBAGENT_ROLES = [
   "repository_analyst",
   "verification_planner",
   "risk_reviewer",
+  "implementation_agent",
+  "change_reviewer",
   "general_researcher",
 ] as const;
 
 export type SubAgentRole = typeof SUBAGENT_ROLES[number];
+export type SubAgentAccess = "READ_ONLY" | "PROPOSE_CHANGES" | "REVIEW_CHANGES";
 
 export interface SubAgentTask {
   id: string;
   role: SubAgentRole;
   objective: string;
   focusPaths: string[];
+  access: SubAgentAccess;
+  dependsOn: string[];
+}
+
+export function normalizeSubAgentTask(task: SubAgentTask): SubAgentTask {
+  return {
+    ...task,
+    access: task.access ?? "READ_ONLY",
+    dependsOn: task.dependsOn ?? [],
+  };
 }
 
 export type SubAgentStatus =
   | "COMPLETED"
   | "FAILED"
   | "BUDGET_EXHAUSTED"
-  | "PROTOCOL_VIOLATION";
+  | "PROTOCOL_VIOLATION"
+  | "CONFLICT";
 
 export interface SubAgentEvidenceRef {
   path: string;
@@ -47,6 +61,17 @@ export interface SubAgentResult {
   evidence: SubAgentEvidenceRef[];
   toolsCalled: string[];
   usage: SubAgentUsage;
+  proposedPatch?: string;
+  changedFiles?: string[];
+  reviewedTaskIds?: string[];
+  baselineFingerprint?: string;
+  workspaceKind?: "GIT_WORKTREE" | "ISOLATED_COPY";
+  verification?: Array<{
+    command: string;
+    success: boolean;
+    exitCode: number | null;
+    durationMs: number;
+  }>;
   error?: string;
 }
 
@@ -71,13 +96,13 @@ export interface MultiAgentPolicy {
 }
 
 export const DEFAULT_MULTI_AGENT_POLICY: MultiAgentPolicy = {
-  enabled: false,
+  enabled: true,
   maxConcurrency: 2,
-  maxBatchesPerRun: 1,
-  maxTasksPerRun: 3,
-  maxChildSteps: 4,
-  maxChildLlmCalls: 12,
-  maxChildToolCalls: 18,
+  maxBatchesPerRun: 2,
+  maxTasksPerRun: 6,
+  maxChildSteps: 8,
+  maxChildLlmCalls: 24,
+  maxChildToolCalls: 36,
   maxResultChars: 6_000,
 };
 
@@ -94,7 +119,91 @@ export interface SubAgentBatchInput {
   originalGoal: string;
   tasks: SubAgentTask[];
   policy: MultiAgentPolicy;
+  onProgress?: (event: SubAgentProgressEvent) => void | Promise<void>;
 }
+
+export type SubAgentProgressEvent =
+  | {
+    phase: "task_started";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    dependsOn: string[];
+  }
+  | {
+    phase: "thinking";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    step: number;
+  }
+  | {
+    phase: "worktree_started";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    workspaceKind: "GIT_WORKTREE" | "ISOLATED_COPY";
+    baselineFingerprint: string;
+  }
+  | {
+    phase: "decision";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    step: number;
+    decisionType: string;
+    message: string;
+  }
+  | {
+    phase: "tool_started" | "tool_finished";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    toolName: string;
+    success?: boolean;
+  }
+  | {
+    phase: "patch_applied";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    changedFiles: string[];
+  }
+  | {
+    phase: "command_started" | "command_finished";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    command: string;
+    success?: boolean;
+    exitCode?: number | null;
+  }
+  | {
+    phase: "command_output";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    stream: "stdout" | "stderr";
+    message: string;
+  }
+  | {
+    phase: "recovery";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    error: string;
+    action: string;
+  }
+  | {
+    phase: "task_finished";
+    taskId: string;
+    role: SubAgentRole;
+    access: SubAgentAccess;
+    status: SubAgentStatus;
+    changedFiles?: string[];
+    toolsCalled: string[];
+    error?: string;
+  };
 
 export interface SubAgentCoordinator {
   runBatch(input: SubAgentBatchInput): Promise<SubAgentBatchResult>;
@@ -102,16 +211,33 @@ export interface SubAgentCoordinator {
 
 export function formatSubAgentResults(results: SubAgentResult[]): string {
   return results.map((result) => [
-    `Task ${result.taskId} (${result.role}) — ${result.status}`,
+    `Task ${result.taskId} (${result.role}, ${findAccess(result)}) — ${result.status}`,
     `Objective: ${result.objective}`,
     `Summary: ${result.summary}`,
     `Evidence: ${result.evidence.length > 0
       ? result.evidence.map(formatEvidenceRef).join(" | ")
       : "(none)"}`,
     `Tools: ${result.toolsCalled.length > 0 ? result.toolsCalled.join(", ") : "(none)"}`,
+    ...(result.proposedPatch ? [
+      `Proposed patch (${String(result.proposedPatch.length)} chars):\n${result.proposedPatch}`,
+      `Changed files: ${result.changedFiles?.join(", ") || "(unknown)"}`,
+    ] : []),
+    ...(result.workspaceKind ? [
+      `Workspace: ${result.workspaceKind}${result.baselineFingerprint ? ` at baseline ${result.baselineFingerprint}` : ""}`,
+    ] : []),
+    ...(result.verification?.length ? [
+      `Verification: ${result.verification.map((entry) => `${entry.success ? "PASS" : "FAIL"} ${entry.command}`).join(" | ")}`,
+    ] : []),
+    ...(result.reviewedTaskIds?.length ? [`Reviewed tasks: ${result.reviewedTaskIds.join(", ")}`] : []),
     `Usage: steps=${String(result.usage.steps)}, llmCalls=${String(result.usage.llmCalls)}, toolCalls=${String(result.usage.toolCalls)}`,
     ...(result.error ? [`Error: ${result.error}`] : []),
   ].join("\n")).join("\n\n");
+}
+
+function findAccess(result: SubAgentResult): SubAgentAccess {
+  if (result.proposedPatch) return "PROPOSE_CHANGES";
+  if (result.reviewedTaskIds?.length) return "REVIEW_CHANGES";
+  return "READ_ONLY";
 }
 
 function formatEvidenceRef(ref: SubAgentEvidenceRef): string {

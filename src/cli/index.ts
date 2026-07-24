@@ -9,7 +9,6 @@ import { execa } from "execa";
 import {
   looksLikeCodeContinuationFollowUp,
   routeTask,
-  shouldPreserveAgentLoopIntent,
 } from "../agent/TaskRouter.js";
 import type { TaskRoute } from "../agent/TaskRouter.js";
 import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
@@ -22,7 +21,9 @@ import {
   loadAgentConfig,
   redactAgentConfig,
   resolveLlmConfig,
+  resolveMultiAgentPolicy,
 } from "../config/AgentConfig.js";
+import { classifySubAgentIntent } from "../agent/SubAgentIntent.js";
 import { MessageCompressor } from "../context/MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
 import { TaskDiffStore } from "../diff/TaskDiffStore.js";
@@ -183,7 +184,8 @@ export function createProgram(): Command {
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
     .option("--verbose", "Show tool inputs, context compaction, cache, and token details")
     .option("--trace", "Show complete redacted runtime decisions and context allocation traces")
-    .option("--agent-loop", "Use the iterative decision protocol for direct-answer tasks")
+    .option("--iterative", "Use the iterative decision protocol for direct-answer tasks")
+    .option("--agent-loop", "Deprecated alias for --iterative")
     .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
@@ -1753,14 +1755,17 @@ async function runAgentTask(
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
   const route = await resolveTaskRoute(repoPath, userGoal, options.session);
-  const multiAgentConfigured = route.intent === "AGENT_LOOP"
-    && await loadAgentConfig(repoPath).then((config) => config.multiAgent?.mode === "auto").catch(() => false);
+  const subAgentIntent = classifySubAgentIntent(userGoal);
+  const multiAgentPolicy = await loadAgentConfig(repoPath)
+    .then((config) => resolveMultiAgentPolicy(config, options.agents, subAgentIntent))
+    .catch(() => resolveMultiAgentPolicy({ version: 1 }, options.agents, subAgentIntent));
   const taskContract = buildAgentTaskContract({
     userGoal,
     route,
     ...(options.operatingMode ? { operatingMode: options.operatingMode } : {}),
-    forceIterative: options.operatingMode !== "PLAN" && options.agentLoop === true,
-    multiAgentEnabled: (options.agents ?? 1) > 1 || multiAgentConfigured,
+    forceIterative: options.operatingMode !== "PLAN"
+      && (options.iterative === true || options.agentLoop === true),
+    multiAgentEnabled: multiAgentPolicy.enabled,
   });
   const mode: TaskChangeMode = taskContract.resultMode;
   const logger = createRuntimeLogger(repoPath);
@@ -1772,7 +1777,8 @@ async function runAgentTask(
     mode,
     reason: route.reason,
     requestedSessionId: options.session ?? null,
-    multiAgentRequested: (options.agents ?? 1) > 1 || multiAgentConfigured,
+    multiAgentRequested: multiAgentPolicy.enabled,
+    multiAgentIntent: subAgentIntent.preference,
   }).catch(() => undefined);
 
   try {
@@ -1874,25 +1880,14 @@ async function resolveTaskRoute(
     return baseRoute;
   }
 
-  if (baseRoute.intent === "CODE_REVIEW" || (baseRoute.intent === "AGENT_LOOP" && lastMode === "AGENT_LOOP")) {
+  if (baseRoute.intent === "CODE_REVIEW" || baseRoute.intent === "AGENT_LOOP") {
     return baseRoute;
   }
 
-  if (baseRoute.intent === "AGENT_LOOP" && shouldPreserveAgentLoopIntent(userGoal)) {
-    return baseRoute;
-  }
-
-  if ((baseRoute.intent === "AGENT_LOOP" || baseRoute.intent === "DIRECT_ANSWER") && lastMode === "WEB_ANSWER") {
+  if (baseRoute.intent === "DIRECT_ANSWER" && lastMode === "WEB_ANSWER") {
     return {
       intent: "WEB_ANSWER",
       reason: "Short follow-up inherited the previous web-answer mode from the active session.",
-    };
-  }
-
-  if (baseRoute.intent === "AGENT_LOOP" && lastMode === "DIRECT_ANSWER") {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Short follow-up inherited the previous direct-answer mode from the active session.",
     };
   }
 

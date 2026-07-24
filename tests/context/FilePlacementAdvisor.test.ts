@@ -26,31 +26,34 @@ describe("FilePlacementAdvisor", () => {
     await fs.mkdir(path.join(repoPath, "public"), { recursive: true });
 
     const repoState = await new RepoStateAnalyzer({ repoPath }).analyze();
-    const advice = await new FilePlacementAdvisor({ repoPath }).advise("帮我写个2048游戏吧", repoState);
+    const advice = await new FilePlacementAdvisor({ repoPath }).advise("write a snake game demo", repoState);
 
     expect(advice.inferredLanguage).toBe("HTML");
     expect(advice.artifactKind).toBe("standalone_demo");
-    expect(advice.suggestedPaths[0]).toBe("public/game_2048.html");
+    expect(advice.suggestedPaths[0]).toBe("public/snake.html");
   });
 
   it("falls back to repository root for standalone C++ examples in a generic repo", async () => {
     const repoState = await new RepoStateAnalyzer({ repoPath }).analyze();
-    const advice = await new FilePlacementAdvisor({ repoPath }).advise("写一个两数之和的C++代码", repoState);
+    const advice = await new FilePlacementAdvisor({ repoPath }).advise("write C++ code in checksum.cpp", repoState);
 
     expect(advice.inferredLanguage).toBe("C++");
-    expect(advice.suggestedPaths).toContain("two_sum.cpp");
+    expect(advice.suggestedPaths).toContain("checksum.cpp");
   });
 
-  it("uses recognizable algorithm names for common follow-up problems", async () => {
+  it("does not infer languages or browser artifacts from keyword substrings", async () => {
     await fs.writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "ts-demo" }, null, 2), "utf8");
     await fs.mkdir(path.join(repoPath, "src"), { recursive: true });
     await fs.writeFile(path.join(repoPath, "src", "index.ts"), "export {};\n", "utf8");
 
     const repoState = await new RepoStateAnalyzer({ repoPath }).analyze();
-    const advice = await new FilePlacementAdvisor({ repoPath }).advise("数据流的中位数呢", repoState);
+    const django = await new FilePlacementAdvisor({ repoPath }).advise("create a django service", repoState);
+    const websocket = await new FilePlacementAdvisor({ repoPath }).advise("build a websocket server", repoState);
 
-    expect(advice.inferredLanguage).toBe("TypeScript");
-    expect(advice.suggestedPaths[0]).toBe("src/median_finder.ts");
+    expect(django.inferredLanguage).toBe("TypeScript");
+    expect(django.artifactKind).toBe("source");
+    expect(websocket.inferredLanguage).toBe("TypeScript");
+    expect(websocket.artifactKind).toBe("source");
   });
 
   it("places Chinese documentation requests in the existing localized docs directory", async () => {

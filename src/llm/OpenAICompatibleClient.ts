@@ -22,7 +22,7 @@ export interface LlmTextInput {
   userGoal: string;
   context?: string | undefined;
   conversation?: ConversationMessage[] | undefined;
-  mode?: "direct" | "web" | "web_rewrite" | undefined;
+  mode?: "direct" | "web" | "web_rewrite" | "task_understanding" | undefined;
 }
 
 export interface LlmTextResult {
@@ -47,6 +47,7 @@ export interface LlmUsageMetrics {
 export interface LlmCallMetrics {
   model?: string;
   finishReason?: string;
+  reasoningContentAvailable?: boolean;
   usage?: LlmUsageMetrics;
 }
 
@@ -236,6 +237,7 @@ export class OpenAICompatibleClient implements LlmClient {
         context: input.context,
         state: input.state,
         availableTools: input.availableTools,
+        ...(input.decisionConstraint ? { decisionConstraint: input.decisionConstraint } : {}),
       });
       const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
@@ -331,6 +333,9 @@ export class OpenAICompatibleClient implements LlmClient {
     this.callMetricsBuffer.push({
       ...(typeof body.model === "string" ? { model: body.model } : {}),
       ...(typeof firstChoice?.finish_reason === "string" ? { finishReason: firstChoice.finish_reason } : {}),
+      ...(extractTextContent(firstChoice?.message?.reasoning_content)
+        ? { reasoningContentAvailable: true }
+        : {}),
       ...(usage ? { usage } : {}),
     });
   }
@@ -476,7 +481,6 @@ function extractTextCompletionContent(body: OpenAIChatCompletionResponse): strin
     extractTextContent(message?.content),
     extractTextContent(firstChoice?.text),
     extractTextContent(body.output_text),
-    extractTextContent(message?.reasoning_content),
     extractTextContent(message?.refusal),
   ]);
 }
@@ -540,7 +544,19 @@ function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
   return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
 }
 
-function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite"): string {
+function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" | "task_understanding"): string {
+  if (mode === "task_understanding") {
+    return [
+      "You are the semantic task-understanding layer for a local coding agent.",
+      "Infer the user's intended operation, target, answer form, constraints, conditionals, negations, and repository mutation intent.",
+      "Use the supplied deterministic interpretation as evidence, but correct it when indirect or compound language clearly means something else.",
+      "Never ignore an explicit prohibition such as do not edit files, do not use the web, or do not run commands.",
+      "Do not answer the task and do not emit an AgentDecision.",
+      "Return one JSON object only with this exact shape:",
+      "{\"operation\":\"ANSWER|RESEARCH|REVIEW_REPOSITORY|ANALYZE_REPOSITORY|CHANGE_REPOSITORY|QUERY_KNOWLEDGE|LOCAL_STATE\",\"target\":\"WORLD|REPOSITORY|PRODUCT|SESSION|DERIVATION\",\"answerShape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"answerDepth\":\"BRIEF|BALANCED|DETAILED\",\"externalFactPolicy\":\"GENERAL_KNOWLEDGE|VERIFICATION_REQUIRED|NOT_EXTERNAL_FACT\",\"explicitWeb\":boolean,\"explicitRepositoryTarget\":boolean,\"explicitMutation\":boolean,\"completeFileRead\":boolean,\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
+      "confidence must be between 0 and 1. Use lower confidence when the request depends on missing conversation context.",
+    ].join("\n");
+  }
   const commonRules = [
     "You are Mini Coding Agent, a helpful local assistant inside the mini-agent coding CLI.",
     "If the user asks your name or identity, identify yourself as Mini Coding Agent. Do not claim that you have no name.",
@@ -559,7 +575,7 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite")
     "Do not claim that there is no memory when conversation context is present.",
     "In this product, RAG or the knowledge base means the separately indexed repository Markdown/TXT document corpus queried through knowledge_search. It does not mean conversation history or long-term task memory.",
     "Historical memory evidence comes from prior sessions and task summaries. Describe it as retrieval-based memory, never as the product's document RAG knowledge base.",
-    "For short follow-up fragments such as '葡萄牙呢', '那这个呢', or 'and Portugal?', infer the omitted topic or predicate from the conversation context when it is clear.",
+    "For short follow-up fragments, infer the omitted topic or predicate from the immediately relevant conversation turn when it is clear; otherwise ask a concise clarification.",
     "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
     "Prefer a complete, useful answer over a terse one-line summary.",
     "Without tool or source evidence, present model memory only as unverified general knowledge. Do not fabricate a complete-looking list or precise names, locations, dates, quantities, rewards, mechanics, or other details to fill a knowledge gap.",
@@ -580,7 +596,7 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite")
       "The context may include web_search and fetch_url results gathered by the CLI.",
       "Base current-fact answers on the provided web context.",
       "Use conversation context to resolve follow-up questions and keep the same topic/scope unless the user clearly changes it.",
-      "For sports questions, keep competitions separate. Do not mix World Cup matches with friendlies, qualifiers, or league matches unless the user asks for all competitions.",
+      "Keep materially different categories, scopes, time periods, and data series separate unless the user explicitly asks to combine them.",
       "For ambiguous entities or acronyms, do not assume the domain. If sources show multiple valid interpretations, list them by category and state what clarification would narrow the answer.",
       "For live scores or very recent results, say clearly when the provided sources do not verify the exact current score.",
       "Mention the main source titles or URLs when you rely on web context.",
@@ -594,7 +610,7 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite")
       "You are a web question planner for a local assistant.",
       "Your job is to rewrite the user's current question into a standalone web research plan.",
       "Use the conversation memory to resolve follow-up questions, pronouns, omitted topics, and scope.",
-      "For very short follow-up fragments such as '葡萄牙呢' or 'and Portugal?', infer the omitted predicate from the previous user question when it is clear.",
+      "For very short follow-up fragments, infer the omitted predicate from the previous relevant user question when confidence is high.",
       "Do not answer the user's question.",
       "Return JSON only, with no markdown and no prose.",
       "The JSON shape must be:",
@@ -602,9 +618,8 @@ function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite")
       "Create 1 to 4 search queries.",
       "If the user asks for current, latest, live, prices, scores, results, news, or recent facts, set needsLiveData to true.",
       "For follow-up questions, preserve the previous topic/scope unless the user clearly changed topic.",
-      "For sports questions, keep competitions separate in answerInstructions.",
+      "Preserve category, scope, and time-period boundaries in answerInstructions.",
       "If an entity/acronym can belong to multiple domains and the user did not specify the domain, do not silently choose one. Plan broad searches and add instructions to list major verified interpretations or ask for clarification.",
-      "For esports organizations, keep different games/titles and tournaments separate.",
     ].join("\n");
   }
 

@@ -22,6 +22,7 @@ export interface LlmInput {
   state: AgentStateSnapshot;
   availableTools: ToolSpec[];
   conversation?: ConversationMessage[];
+  decisionConstraint?: "FINAL_ONLY";
 }
 
 export interface LlmClient {
@@ -33,7 +34,7 @@ export interface LlmTextCompletionInput {
   userGoal: string;
   context?: string;
   conversation?: ConversationMessage[];
-  mode?: "direct" | "web" | "web_rewrite";
+  mode?: "direct" | "web" | "web_rewrite" | "task_understanding";
 }
 
 export interface LlmTextCompletionResult {

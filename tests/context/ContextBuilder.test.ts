@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
 import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
+import { routeTask } from "../../src/agent/TaskRouter.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
 import { LongTermMemoryStore } from "../../src/memory/LongTermMemoryStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
@@ -35,6 +36,7 @@ describe("ContextBuilder", () => {
       sessionId: "test-session",
       repoPath,
       userGoal: "inspect repository",
+      taskContract: contractFor("inspect repository"),
     });
     state.addToolResult({
       toolName: "git_status",
@@ -81,6 +83,7 @@ describe("ContextBuilder", () => {
       sessionId: session.sessionId,
       repoPath,
       userGoal: "你还记得刚才聊了什么吗",
+      taskContract: contractFor("你还记得刚才聊了什么吗"),
     });
 
     const context = await new ContextBuilder({ repoPath, maxChars: 10_000 }).build(state);
@@ -88,6 +91,27 @@ describe("ContextBuilder", () => {
     expect(context).toContain("Conversation memory:");
     expect(context).toContain("[user] 第一轮我们讨论了 session 记忆");
     expect(context).toContain("[assistant] 我会在后续轮次引用这段上下文");
+  });
+
+  it("injects deterministic Web research progress for temporal claims", async () => {
+    const userGoal = "Claude 最新的模型是什么？";
+    const state = new AgentState({
+      sessionId: "web-progress",
+      repoPath,
+      userGoal,
+      taskContract: buildAgentTaskContract({
+        userGoal,
+        route: { intent: "WEB_ANSWER", reason: "test" },
+      }),
+    });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 10_000 }).build(state);
+
+    expect(context).toContain("Web research progress:");
+    expect(context).toContain("Phase: DISCOVER");
+    expect(context).toContain("Search views: 0 / 2");
+    expect(context).toContain("Required next action: WEB_SEARCH");
+    expect(context).toContain("Remaining decisions: 14");
   });
 
   it("injects retrieved long-term memory into the agent context", async () => {
@@ -166,6 +190,7 @@ describe("ContextBuilder", () => {
       sessionId: "tight-budget-session",
       repoPath,
       userGoal: "fix the README regression",
+      taskContract: contractFor("fix the README regression"),
     });
     state.setLastError("last test failure");
 
@@ -184,6 +209,7 @@ describe("ContextBuilder", () => {
       sessionId: "implementation-session",
       repoPath,
       userGoal: "修复 src/index.ts 的布尔值，但不要修改公开 API",
+      taskContract: contractFor("修复 src/index.ts 的布尔值，但不要修改公开 API"),
     });
     state.addToolResult({
       toolName: "read_file",
@@ -269,3 +295,7 @@ describe("ContextBuilder", () => {
     await expect(new ContextBuilder({ repoPath }).build(temporal)).resolves.toContain("Runtime context:");
   });
 });
+
+function contractFor(userGoal: string) {
+  return buildAgentTaskContract({ userGoal, route: routeTask(userGoal) });
+}

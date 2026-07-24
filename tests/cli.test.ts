@@ -1721,7 +1721,7 @@ describe("mini-agent CLI", () => {
                     : "回答世界杯最新比分。",
                   sourceHints: ["official competition site", "live score source"],
                   answerInstructions: [
-                    "For sports results, keep competitions separate; do not mix friendlies, qualifiers, leagues, cups, or different tournaments unless the user asks for all competitions.",
+                    "Keep materially different categories, scopes, and time periods separate; for ambiguous entities, preserve multiple verified interpretations instead of silently choosing one.",
                   ],
                   needsLiveData: true,
                   confidence: "high",
@@ -1779,7 +1779,9 @@ describe("mini-agent CLI", () => {
         role: "user",
         content: "世界杯最新比分",
       });
-      expect(answerContexts.at(-1)?.at(-1)?.content).toContain("keep competitions separate");
+      expect(answerContexts.at(-1)?.at(-1)?.content).toContain(
+        "Keep materially different categories, scopes, and time periods separate",
+      );
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1796,6 +1798,7 @@ describe("mini-agent CLI", () => {
     const decisions = [
       { type: "TOOL_CALL", toolName: "web_search", input: { query: "EDG honours championships League of Legends Valorant" } },
       { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/edg-honours" } },
+      { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://esports.example/edg-titles" } },
       {
         type: "FINAL",
         summary: "EDG 没指定游戏项目：《英雄联盟》S11 全球总决赛为 2021 年；《无畏契约》Valorant Champions 为 2024 年。来源：https://example.com/edg-honours",
@@ -1816,6 +1819,12 @@ describe("mini-agent CLI", () => {
 
       if (urlText === "https://example.com/edg-honours") {
         return new Response("<html><body><main>EDG honours: League of Legends Worlds 2021 champion; Valorant Champions 2024 champion.</main></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+      if (urlText === "https://esports.example/edg-titles") {
+        return new Response("<html><body><main>Independent record: EDG won Worlds 2021 and Valorant Champions 2024.</main></body></html>", {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
         });
@@ -2254,6 +2263,7 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     const responses = [
       "{\"type\":\"PLAN\",\"message\":\"Inspect repository with real client\"}",
+      "{\"type\":\"TOOL_CALL\",\"toolName\":\"read_file\",\"input\":{\"path\":\"demo.txt\"}}",
       "{\"type\":\"FINAL\",\"summary\":\"Real client flow completed\",\"success\":true}",
     ];
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
@@ -2271,7 +2281,7 @@ describe("mini-agent CLI", () => {
           "--base-url",
           "https://llm.example/v1",
           "--max-steps",
-          "3",
+          "4",
         ], { from: "user" });
       });
 
@@ -2304,6 +2314,7 @@ describe("mini-agent CLI", () => {
 
     const responses = [
       "{\"type\":\"PLAN\",\"message\":\"Configured real client\"}",
+      "{\"type\":\"TOOL_CALL\",\"toolName\":\"read_file\",\"input\":{\"path\":\"demo.txt\"}}",
       "{\"type\":\"FINAL\",\"summary\":\"Configured client completed\",\"success\":true}",
     ];
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
@@ -2316,7 +2327,7 @@ describe("mini-agent CLI", () => {
         "run",
         "inspect repository from config",
         "--max-steps",
-        "3",
+        "4",
       ], { from: "user" });
     });
 
@@ -2456,6 +2467,10 @@ function fakeEdgDuckDuckGoHtml(): string {
     "<div class=\"result\">",
     "<a class=\"result__a\" href=\"https://example.com/edg-honours\">EDward Gaming honours</a>",
     "<div class=\"result__snippet\">EDG won League of Legends Worlds 2021 and Valorant Champions 2024.</div>",
+    "</div>",
+    "<div class=\"result\">",
+    "<a class=\"result__a\" href=\"https://esports.example/edg-titles\">Independent EDG title record</a>",
+    "<div class=\"result__snippet\">Independent record of EDG championships by game.</div>",
     "</div>",
     "</body></html>",
   ].join("");

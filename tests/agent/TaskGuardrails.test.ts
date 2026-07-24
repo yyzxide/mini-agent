@@ -7,6 +7,7 @@ import {
   validateAgentDecisionGuardrails,
 } from "../../src/agent/TaskGuardrails.js";
 import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
+import { routeTask } from "../../src/agent/TaskRouter.js";
 
 describe("TaskGuardrails", () => {
   it("requires a repository change for common configuration and text artifacts", () => {
@@ -17,6 +18,24 @@ describe("TaskGuardrails", () => {
 
   it("does not treat an explanation request as a required file mutation", () => {
     expect(requiresRepositoryFileChange("Explain what package.json is used for.")).toBe(false);
+  });
+
+  it("does not reject authoritative local replies because of surface wording", () => {
+    const userGoal = "你是什么模型";
+    const state = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal,
+      taskContract: {
+        ...buildAgentTaskContract({ userGoal, route: routeTask(userGoal) }),
+        deterministicAnswer: "我是 Mini Coding Agent，当前配置的模型标识是 test-model。",
+      },
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: state.taskContract.deterministicAnswer!,
+    })).toBeUndefined();
   });
 
   it("requires post-patch verification for source and configuration changes, but not documentation", () => {
@@ -121,6 +140,7 @@ describe("TaskGuardrails", () => {
       sessionId: "session",
       repoPath: "/repo",
       userGoal: completed.userGoal,
+      taskContract: completed.taskContract,
       recoveredCheckpoint: createAgentCheckpoint({ state: completed }),
     });
     expect(validateAgentDecisionGuardrails(resumedCompleted, successfulFinal())).toBeUndefined();
@@ -132,6 +152,7 @@ describe("TaskGuardrails", () => {
       sessionId: "session",
       repoPath: "/repo",
       userGoal: stale.userGoal,
+      taskContract: stale.taskContract,
       recoveredCheckpoint: createAgentCheckpoint({ state: stale }),
     });
     expect(validateAgentDecisionGuardrails(resumedStale, successfulFinal())).toMatchObject({
@@ -190,6 +211,48 @@ describe("TaskGuardrails", () => {
     })).toBeUndefined();
   });
 
+  it("requires the second latest-model search view to be authority-targeted", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `Claude latest model ${String(currentYear)}`, [{
+      title: "Claude roundup",
+      url: "https://example.com/claude",
+      snippet: "Secondary overview.",
+    }]);
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: `Claude model comparison ${String(currentYear)}` },
+    })).toMatchObject({
+      code: "TEMPORAL_AUTHORITY_SEARCH_REQUIRED",
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: `site:anthropic.com Claude latest model ${String(currentYear)}` },
+    })).toBeUndefined();
+  });
+
+  it("blocks every non-final decision during the Web synthesis reserve", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    while (state.maxSteps - state.step > 2) state.incrementStep();
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "TOOL_CALL",
+      toolName: "fetch_url",
+      input: { url: "https://www.anthropic.com/news" },
+    })).toMatchObject({
+      code: "WEB_FINAL_SYNTHESIS_RESERVED",
+    });
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "ASK_USER",
+      message: "Should I continue searching?",
+    })).toMatchObject({
+      code: "WEB_FINAL_SYNTHESIS_RESERVED",
+    });
+  });
+
   it("allows a grounded limitation after web search transport failure", () => {
     const state = webStateFor("核实某项公开事实");
     state.addToolResult({
@@ -219,6 +282,39 @@ describe("TaskGuardrails", () => {
       summary: "这项事实肯定是真的。",
     })).toMatchObject({
       code: "FINAL_WITHOUT_WEB_SEARCH",
+    });
+  });
+
+  it("blocks finals that satisfy evidence counts but do not answer the requested shape", () => {
+    const state = webStateFor("这家公司有多少子公司");
+    addWebSearch(state, "公司 子公司 数量", [
+      { title: "Annual report", url: "https://company.example/report", snippet: "Subsidiaries." },
+      { title: "Registry", url: "https://registry.example/company", snippet: "Corporate records." },
+    ]);
+    addFetchedPage(state, "https://company.example/report", "Annual report subsidiary disclosure.");
+    addFetchedPage(state, "https://registry.example/company", "Registry subsidiary disclosure.");
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "这家公司业务很多，详情参考 https://company.example/report",
+    })).toMatchObject({ code: "FINAL_DOES_NOT_ANSWER_COUNT" });
+  });
+
+  it("requires citations to point to inspected pages instead of search-only candidates", () => {
+    const state = webStateFor("核实某项公开事实");
+    addWebSearch(state, "某项公开事实", [
+      { title: "Inspected", url: "https://first.example/source", snippet: "Evidence." },
+      { title: "Search only", url: "https://second.example/candidate", snippet: "Candidate." },
+    ]);
+    addFetchedPage(state, "https://first.example/source", "Inspected factual evidence.");
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "这项事实已经得到正文支持。https://second.example/candidate",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_WEB_CITATION",
     });
   });
 
@@ -334,10 +430,146 @@ describe("TaskGuardrails", () => {
       summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/",
     })).toBeUndefined();
   });
+
+  it("accepts a current-year site search only after an exact official candidate is fetched", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `Claude 最新模型 ${String(currentYear)}`, [
+      {
+        title: "Claude models overview",
+        url: "https://www.anthropic.com/claude",
+        snippet: `Claude model overview updated in ${String(currentYear)}.`,
+      },
+    ]);
+    addWebSearch(state, `site:anthropic.com Claude ${String(currentYear)}`, [
+      {
+        title: "Claude Opus",
+        url: "https://www.anthropic.com/claude/opus",
+        snippet: "Claude Opus product page.",
+      },
+      {
+        title: "Unrelated result outside the constrained domain",
+        url: "https://example.com/claude",
+        snippet: "This result must not count as an authority candidate.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://www.anthropic.com/claude/opus",
+      `Claude Opus 4.1 is an available model in ${String(currentYear)}.`,
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "当前型号是 Claude Opus 4.1。https://www.anthropic.com/claude/opus",
+    })).toBeUndefined();
+  });
+
+  it("requires fetching an exact candidate from the authority freshness search", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `Claude latest model ${String(currentYear)}`, [
+      {
+        title: "Claude roundup",
+        url: "https://example.com/claude-roundup",
+        snippet: "A secondary roundup.",
+      },
+    ]);
+    addWebSearch(state, `site:anthropic.com Claude ${String(currentYear)}`, [
+      {
+        title: "Claude Opus",
+        url: "https://www.anthropic.com/claude/opus",
+        snippet: "Claude Opus product page.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://example.com/claude-roundup",
+      `Claude roundup updated in ${String(currentYear)}.`,
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新型号是 Claude Opus。https://example.com/claude-roundup",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_AUTHORITATIVE_SOURCE_INSPECTION",
+    });
+  });
+
+  it("requires visible temporal or version evidence on the inspected authority page", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `Claude latest model ${String(currentYear)}`, [
+      {
+        title: "Claude model results",
+        url: "https://example.com/claude",
+        snippet: "Search result.",
+      },
+    ]);
+    addWebSearch(state, `site:anthropic.com Claude ${String(currentYear)}`, [
+      {
+        title: "Anthropic company page",
+        url: "https://www.anthropic.com/company",
+        snippet: "Company information.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://www.anthropic.com/company",
+      "Anthropic builds reliable and beneficial artificial intelligence systems.",
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新型号已经确认。https://www.anthropic.com/company",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_VISIBLE_FRESHNESS_EVIDENCE",
+    });
+  });
+
+  it("does not let an off-domain result satisfy a site-constrained authority search", () => {
+    const state = webStateFor("Claude 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `Claude latest model ${String(currentYear)}`, [
+      {
+        title: "Claude roundup",
+        url: "https://example.com/claude",
+        snippet: "Secondary result.",
+      },
+    ]);
+    addWebSearch(state, `site:anthropic.com Claude ${String(currentYear)}`, [
+      {
+        title: "Unexpected off-domain result",
+        url: "https://example.com/not-anthropic",
+        snippet: "Search engines may return an off-domain candidate.",
+      },
+    ]);
+    addFetchedPage(
+      state,
+      "https://example.com/not-anthropic",
+      `A Claude model roundup from ${String(currentYear)}.`,
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新型号已经确认。https://example.com/not-anthropic",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_AUTHORITATIVE_FRESHNESS_SEARCH",
+    });
+  });
 });
 
 function stateFor(userGoal: string): AgentState {
-  return new AgentState({ sessionId: "session", repoPath: "/repo", userGoal });
+  return new AgentState({
+    sessionId: "session",
+    repoPath: "/repo",
+    userGoal,
+    taskContract: buildAgentTaskContract({ userGoal, route: routeTask(userGoal) }),
+  });
 }
 
 function webStateFor(userGoal: string): AgentState {

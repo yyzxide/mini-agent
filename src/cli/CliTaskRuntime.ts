@@ -16,6 +16,7 @@ export interface AgentCliOptions {
   verbose?: boolean;
   trace?: boolean;
   agentLoop?: boolean;
+  iterative?: boolean;
   keepSessionActive?: boolean;
   operatingMode?: AgentOperatingMode;
   agents?: number;

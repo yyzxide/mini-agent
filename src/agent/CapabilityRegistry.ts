@@ -5,7 +5,8 @@ export type ProductCapabilityId =
   | "REPOSITORY_WRITE"
   | "COMMAND_EXECUTION"
   | "KNOWLEDGE_RAG"
-  | "READ_ONLY_PLAN";
+  | "READ_ONLY_PLAN"
+  | "MULTI_AGENT_COLLABORATION";
 
 export interface ProductCapabilityDefinition {
   id: ProductCapabilityId;
@@ -73,6 +74,21 @@ export const PRODUCT_CAPABILITY_REGISTRY: Readonly<Record<ProductCapabilityId, P
     tools: [],
     zh: { name: "只读规划", description: "调查仓库并生成实施计划，同时在运行时阻止补丁和命令。" },
     en: { name: "Read-only planning", description: "Investigates the repository and produces an implementation plan while blocking patches and commands." },
+  }),
+  MULTI_AGENT_COLLABORATION: capability({
+    id: "MULTI_AGENT_COLLABORATION",
+    contracts: ["REPOSITORY_INVESTIGATION", "REPOSITORY_TASK"],
+    tools: ["DELEGATE", "APPLY_DELEGATED_PATCH"],
+    zh: {
+      name: "多 Agent 协作",
+      description: "根据任务语义自动委托仓库分析、临时 worktree 实现验证和变更审查；写入型子代理返回带基线与验证证据的补丁，由主 Agent 审核后合入。",
+      limitation: "子代理不会直接修改主工作区；验证命令受允许列表限制，且不能再次委托或与用户交互。",
+    },
+    en: {
+      name: "Multi-agent collaboration",
+      description: "Semantically delegates repository analysis, implementation and verification in temporary worktrees, and change review; writing children return baseline-aware patches for parent review and merge.",
+      limitation: "Children never mutate the parent worktree directly; verification commands are allowlisted, and children cannot delegate again or interact with the user.",
+    },
   }),
 };
 

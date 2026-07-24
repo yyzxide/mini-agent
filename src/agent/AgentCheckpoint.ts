@@ -126,7 +126,7 @@ const checkpointSchema = z.object({
       status: z.enum(["COMPLETED", "PARTIAL", "FAILED"]),
       results: z.array(z.object({
         taskId: z.string(),
-        role: z.enum(["repository_analyst", "verification_planner", "risk_reviewer", "general_researcher"]),
+        role: z.enum(["repository_analyst", "verification_planner", "risk_reviewer", "implementation_agent", "change_reviewer", "general_researcher"]),
         objective: z.string(),
         status: z.enum(["COMPLETED", "FAILED", "BUDGET_EXHAUSTED", "PROTOCOL_VIOLATION"]),
         summary: z.string(),
@@ -136,6 +136,9 @@ const checkpointSchema = z.object({
           endLine: z.number().int().optional(),
         }).strict()),
         toolsCalled: z.array(z.string()),
+        proposedPatch: z.string().optional(),
+        changedFiles: z.array(z.string()).max(20).optional(),
+        reviewedTaskIds: z.array(z.string()).max(3).optional(),
         usage: z.object({
           steps: z.number().int().nonnegative(),
           llmCalls: z.number().int().nonnegative(),

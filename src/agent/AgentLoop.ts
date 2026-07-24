@@ -8,7 +8,7 @@ import type {
   LlmTextCompletionResult,
   ToolSpec,
 } from "../llm/LlmClient.js";
-import type { PatchManager } from "../patch/PatchManager.js";
+import { PatchManager } from "../patch/PatchManager.js";
 import { TaskDiffService } from "../diff/TaskDiffService.js";
 import { TaskDiffStore } from "../diff/TaskDiffStore.js";
 import type { TaskDiffArtifact, WorkingTreeSnapshot } from "../diff/TaskDiffTypes.js";
@@ -37,6 +37,7 @@ import { isPlanModeReadOnlyTool, selectToolsForOperatingMode } from "./AgentOper
 import { checkpointToPayload, createAgentCheckpoint } from "./AgentCheckpoint.js";
 import { AgentStateReducer } from "./AgentStateReducer.js";
 import type { MultiAgentPolicy, SubAgentBatchResult, SubAgentCoordinator } from "./SubAgentTypes.js";
+import { normalizeSubAgentTask } from "./SubAgentTypes.js";
 import type { AgentTaskContract } from "./AgentTaskContract.js";
 import type { ArtifactFollowUpResolution } from "./ArtifactFollowUp.js";
 import { enforceCapabilityTruth } from "./CapabilityTruthGuard.js";
@@ -48,7 +49,6 @@ import {
   type PriorResponseConsistencyViolation,
 } from "./PriorResponseTruthGuard.js";
 import {
-  createDefaultAgentTaskContract,
   isToolAllowedByTaskContract,
   selectToolsForTaskContract,
 } from "./AgentTaskContract.js";
@@ -62,6 +62,14 @@ import type {
   RuntimeConversationTrace,
   RuntimeLlmUsage,
 } from "../observability/AgentRuntimeEvent.js";
+import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
+import { assessEvidenceRisk } from "./EvidenceRiskAssessor.js";
+import { classifySubAgentIntent } from "./SubAgentIntent.js";
+import { fingerprintWorkingTree } from "./SubAgentWorktree.js";
+import {
+  resolveTaskUnderstanding,
+  shouldUseSemanticRefinement,
+} from "./TaskUnderstandingResolver.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -117,9 +125,12 @@ export type AgentProgressHandler = AgentRuntimeEventHandler;
 interface StepOutcome {
   result?: AgentRunResult;
   failed: boolean;
+  failureKind?: "ACTION" | "GUARDRAIL";
+  guardrailCode?: string;
 }
 
 const MAX_CONSECUTIVE_FAILURES = 3;
+const MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES = 3;
 const MAX_REPEATED_DECISIONS = 3;
 
 export class AgentLoop {
@@ -173,22 +184,60 @@ export class AgentLoop {
       operatingMode,
       multiAgentEnabled: input.multiAgent?.enabled === true,
     });
-    // The CLI always supplies an explicit contract. Keep the lower-level AgentLoop
-    // compatible with programmatic/evaluation callers whose terse goals do not
-    // carry enough routing intent, while still inferring specialized web,
-    // knowledge, investigation, and delegation contracts.
-    const taskContract = input.taskContract
-      ?? (inferredContract.kind === "DIRECT_RESPONSE"
-        ? {
-          ...createDefaultAgentTaskContract(),
-          capabilities: {
-            ...createDefaultAgentTaskContract().capabilities,
-            delegation: input.multiAgent?.enabled === true,
-          },
-        }
-        : inferredContract);
+    // Programmatic callers receive the same least-privilege semantic contract
+    // as the CLI. Omitting a contract must never silently grant repository
+    // writes or command execution.
+    let taskContract = input.taskContract ?? inferredContract;
     const sessionId = await this.ensureSession(originalUserGoal, input.sessionId, operatingMode);
     await this.emit({ type: "session", sessionId });
+    let understandingMetrics: LlmCallMetrics[] = [];
+    let understandingDurationMs = 0;
+    let understandingEvent: Extract<AgentRuntimeEvent, { type: "understanding" }> | undefined;
+    if (
+      taskContract.deterministicAnswer === undefined
+      && taskContract.understanding
+      && shouldUseSemanticRefinement(originalUserGoal, taskContract.understanding)
+    ) {
+      const startedAt = Date.now();
+      const resolved = await resolveTaskUnderstanding({
+        userGoal,
+        llmClient: this.llmClient,
+        deterministic: taskContract.understanding,
+        ...(input.conversation ? { conversation: input.conversation } : {}),
+      });
+      understandingDurationMs = Date.now() - startedAt;
+      understandingMetrics = drainLlmCallMetrics(this.llmClient);
+      if (resolved.source === "MODEL_REFINED") {
+        const rebuilt = buildAgentTaskContract({
+          userGoal,
+          route: routeTask(originalUserGoal, resolved.understanding),
+          operatingMode,
+          forceIterative: taskContract.executionStrategy === "ITERATIVE",
+          multiAgentEnabled: input.multiAgent?.enabled === true,
+        });
+        taskContract = {
+          ...rebuilt,
+          instructions: [...new Set([...rebuilt.instructions, ...taskContract.instructions])],
+        };
+      }
+      understandingEvent = {
+        type: "understanding",
+        source: resolved.source,
+        operation: resolved.understanding.operation,
+        target: resolved.understanding.target,
+        confidence: resolved.understanding.confidence,
+        reason: resolved.reason,
+      };
+    } else if (taskContract.understanding) {
+      understandingEvent = {
+        type: "understanding",
+        source: "DETERMINISTIC",
+        operation: taskContract.understanding.operation,
+        target: taskContract.understanding.target,
+        confidence: taskContract.understanding.confidence,
+        reason: "High-confidence deterministic safety interpretation.",
+      };
+    }
 
     const recoveredCheckpoint = input.sessionId
       ? await new AgentStateReducer(this.sessionStore).recover(sessionId, operatingMode, userGoal)
@@ -208,6 +257,21 @@ export class AgentLoop {
       taskContract,
     });
     this.activeState = state;
+    if (understandingEvent) await this.emit(understandingEvent);
+    await this.emit({
+      type: "task_contract",
+      kind: taskContract.kind,
+      outputKind: taskContract.outputKind,
+    });
+    if (understandingDurationMs > 0) {
+      await this.emit({ type: "llm", phase: "started", mode: "task_understanding" });
+      await this.recordLlmUsage(
+        state,
+        understandingMetrics,
+        "task_understanding",
+        understandingDurationMs,
+      );
+    }
     if (taskContract.capabilities.repositoryWrite) {
       this.activeTaskDiffBaseline = await new TaskDiffService({ repoPath: this.repoPath })
         .captureWorkingTree()
@@ -261,12 +325,17 @@ export class AgentLoop {
     }
     await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
+    let consecutiveSameGuardrailFailures = 0;
+    let previousGuardrailCode: string | undefined;
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
 
     while (!state.isStepLimitReached()) {
       const contractTools = selectToolsForTaskContract(this.availableTools, state.taskContract);
-      const availableTools = selectToolsForOperatingMode(contractTools, state.operatingMode);
+      const synthesisReserveActive = isWebSynthesisReserveActive(state);
+      const availableTools = synthesisReserveActive
+        ? []
+        : selectToolsForOperatingMode(contractTools, state.operatingMode);
       const deterministicDecision = state.step === 0 && state.taskContract.deterministicAnswer
         ? { type: "FINAL", summary: state.taskContract.deterministicAnswer, success: true } as const
         : undefined;
@@ -294,7 +363,18 @@ export class AgentLoop {
           input.conversation,
           originalUserGoal,
           input.conversationTrace?.truncated === true,
+          synthesisReserveActive,
         );
+
+      if (await this.maybeEscalateDirectDraft(
+        state,
+        decision,
+        input.conversation,
+      )) {
+        state.incrementStep();
+        await this.recordCheckpoint(state);
+        continue;
+      }
 
       state.addDecision(decision);
       await this.emit({
@@ -316,7 +396,9 @@ export class AgentLoop {
       }
 
       if (repeatedDecisionCount > MAX_REPEATED_DECISIONS) {
-        const error = "Agent repeated the same decision too many times";
+        const error = state.lastError
+          ? `Agent repeated a decision without resolving the active guardrail: ${state.lastError}`
+          : "Agent repeated the same decision too many times";
         await this.recordError(state.sessionId, error);
         return await this.fail(state, error, input);
       }
@@ -326,7 +408,28 @@ export class AgentLoop {
         return outcome.result;
       }
 
-      consecutiveFailures = outcome.failed ? consecutiveFailures + 1 : 0;
+      if (outcome.failed && outcome.failureKind === "GUARDRAIL") {
+        consecutiveFailures = 0;
+        if (outcome.guardrailCode === previousGuardrailCode) {
+          consecutiveSameGuardrailFailures += 1;
+        } else {
+          previousGuardrailCode = outcome.guardrailCode;
+          consecutiveSameGuardrailFailures = 1;
+        }
+      } else {
+        consecutiveSameGuardrailFailures = 0;
+        previousGuardrailCode = undefined;
+        consecutiveFailures = outcome.failed ? consecutiveFailures + 1 : 0;
+      }
+
+      if (consecutiveSameGuardrailFailures > MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES) {
+        const error = [
+          `Agent could not satisfy guardrail ${previousGuardrailCode ?? "(unknown)"} after repeated attempts.`,
+          state.lastError ?? "No recovery detail was recorded.",
+        ].join(" ");
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error, input);
+      }
       if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
         const error = "Agent failed too many consecutive steps";
         await this.recordError(state.sessionId, error);
@@ -337,7 +440,9 @@ export class AgentLoop {
       await this.recordCheckpoint(state);
     }
 
-    const error = `Agent stopped after reaching max steps (${state.maxSteps})`;
+    const error = state.lastError
+      ? `Agent stopped after reaching max steps (${state.maxSteps}). Last unresolved issue: ${state.lastError}`
+      : `Agent stopped after reaching max steps (${state.maxSteps})`;
     await this.recordError(sessionId, error);
     return await this.fail(state, error, input);
   }
@@ -352,7 +457,11 @@ export class AgentLoop {
       state.setLastError(planViolation);
       await this.recordError(state.sessionId, planViolation);
       await this.emit({ type: "guardrail", code: planViolation.split(":", 1)[0] ?? "PLAN_MODE_VIOLATION", message: planViolation });
-      return { failed: true };
+      return {
+        failed: true,
+        failureKind: "GUARDRAIL",
+        guardrailCode: planViolation.split(":", 1)[0] ?? "PLAN_MODE_VIOLATION",
+      };
     }
 
     switch (decision.type) {
@@ -366,47 +475,105 @@ export class AgentLoop {
             this.availableTools.find((tool) => tool.name === decision.toolName),
             state.taskContract,
           )) {
-          return { failed: await this.recordCapabilityViolation(
-            state,
-            `TASK_CAPABILITY_TOOL_BLOCKED: tool ${decision.toolName} is not enabled for ${state.taskContract.kind}`,
-          ) };
+          const code = "TASK_CAPABILITY_TOOL_BLOCKED";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: tool ${decision.toolName} is not enabled for ${state.taskContract.kind}`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
         }
         {
           const guardrail = await this.guardDecisionThenContinue(state, decision);
           if (guardrail) return guardrail;
         }
         if (isRedundantSuccessfulWebToolCall(state, decision.toolName, decision.input)) {
-          return { failed: await this.recordCapabilityViolation(
-            state,
-            `REDUNDANT_WEB_TOOL_CALL: ${decision.toolName} already succeeded with the same input in this run; use the gathered evidence or choose a materially different source`,
-          ) };
+          const code = "REDUNDANT_WEB_TOOL_CALL";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: ${decision.toolName} already succeeded with the same input in this run; use the gathered evidence or choose a materially different source`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
         }
         return { failed: await this.executeToolDecision(state, decision.toolName, decision.input, input) };
 
+      case "DELEGATE":
       case "DELEGATE_READONLY":
         if (!state.taskContract.capabilities.delegation) {
-          return { failed: await this.recordCapabilityViolation(
-            state,
-            `TASK_CAPABILITY_DELEGATION_BLOCKED: delegation is not enabled for ${state.taskContract.kind}`,
-          ) };
+          const code = "TASK_CAPABILITY_DELEGATION_BLOCKED";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: delegation is not enabled for ${state.taskContract.kind}`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
         }
         return await this.executeDelegationDecision(state, decision, input);
 
+      case "APPLY_DELEGATED_PATCH":
+        if (!state.taskContract.capabilities.repositoryWrite) {
+          const code = "TASK_CAPABILITY_PATCH_BLOCKED";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: delegated repository writes are not enabled for ${state.taskContract.kind}`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
+        }
+        return await this.executeDelegatedPatchDecision(state, decision, input);
+
       case "APPLY_PATCH":
         if (!state.taskContract.capabilities.repositoryWrite) {
-          return { failed: await this.recordCapabilityViolation(
-            state,
-            `TASK_CAPABILITY_PATCH_BLOCKED: repository writes are not enabled for ${state.taskContract.kind}`,
-          ) };
+          const code = "TASK_CAPABILITY_PATCH_BLOCKED";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: repository writes are not enabled for ${state.taskContract.kind}`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
+        }
+        {
+          const collaborationIntent = classifySubAgentIntent(state.userGoal);
+          if (
+            collaborationIntent.preference === "REQUIRED"
+            && collaborationIntent.requestsChangeProposal
+            && !hasAppliedDelegatedPatch(state)
+          ) {
+            const code = "PARENT_PATCH_BLOCKED_PENDING_DELEGATED_PROPOSAL";
+            return {
+              failed: await this.recordCapabilityViolation(
+                state,
+                `${code}: the user explicitly assigned implementation to a subagent; obtain a successful child proposal and merge it with APPLY_DELEGATED_PATCH instead of writing directly from the parent`,
+              ),
+              failureKind: "GUARDRAIL",
+              guardrailCode: code,
+            };
+          }
         }
         return await this.executePatchDecision(state, decision, input);
 
       case "RUN_COMMAND":
         if (!state.taskContract.capabilities.commandExecution) {
-          return { failed: await this.recordCapabilityViolation(
-            state,
-            `TASK_CAPABILITY_COMMAND_BLOCKED: command execution is not enabled for ${state.taskContract.kind}`,
-          ) };
+          const code = "TASK_CAPABILITY_COMMAND_BLOCKED";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: command execution is not enabled for ${state.taskContract.kind}`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
         }
         return await this.executeCommandDecision(state, decision, input);
 
@@ -423,6 +590,56 @@ export class AgentLoop {
     }
   }
 
+  private async maybeEscalateDirectDraft(
+    state: AgentState,
+    decision: AgentDecision,
+    conversation: ConversationMessage[] | undefined,
+  ): Promise<boolean> {
+    if (
+      state.taskContract.kind !== "DIRECT_RESPONSE"
+      || state.taskContract.deterministicAnswer !== undefined
+      || decision.type !== "FINAL"
+      || !decision.success
+    ) {
+      return false;
+    }
+
+    const risk = assessEvidenceRisk({
+      userGoal: state.userGoal,
+      draft: decision.summary,
+      ...(state.taskContract.understanding ? { understanding: state.taskContract.understanding } : {}),
+      ...(conversation ? { conversation } : {}),
+    });
+    if (!risk.requiresVerification) return false;
+
+    // Persist the withheld draft for observability, but do not add it to the
+    // live state: ContextBuilder must not present an unverified FINAL as usable
+    // evidence during the upgraded web-research phase.
+    await this.recordDecision(state.sessionId, decision);
+    const upgradedContract = buildAgentTaskContract({
+      userGoal: state.userGoal,
+      route: {
+        intent: "WEB_ANSWER",
+        reason: `Direct draft evidence escalation (${risk.signals.join(", ")}).`,
+      },
+    });
+    state.upgradeTaskContract(upgradedContract);
+    const message = [
+      "DIRECT_DRAFT_EVIDENCE_ESCALATION:",
+      "The single-shot draft was withheld because its concrete external claims require evidence.",
+      `Signals: ${risk.signals.join(", ") || "(none)"}.`,
+      "The same AgentLoop has upgraded the task to WEB_RESEARCH; search and fetch grounded sources before returning FINAL.",
+    ].join(" ");
+    state.setLastError(message);
+    await this.recordError(state.sessionId, message);
+    await this.emit({
+      type: "guardrail",
+      code: "DIRECT_DRAFT_EVIDENCE_ESCALATION",
+      message,
+    });
+    return true;
+  }
+
   private async recordCapabilityViolation(state: AgentState, error: string): Promise<true> {
     state.setLastError(error);
     await this.recordError(state.sessionId, error);
@@ -432,12 +649,12 @@ export class AgentLoop {
 
   private async executeDelegationDecision(
     state: AgentState,
-    decision: Extract<AgentDecision, { type: "DELEGATE_READONLY" }>,
+    decision: Extract<AgentDecision, { type: "DELEGATE" | "DELEGATE_READONLY" }>,
     input: AgentRunInput,
   ): Promise<StepOutcome> {
     const policy = input.multiAgent;
     if (!state.multiAgentEnabled || !policy || !this.subAgentCoordinator) {
-      const error = "MULTI_AGENT_DISABLED: DELEGATE_READONLY requires an enabled multi-agent policy";
+      const error = "MULTI_AGENT_DISABLED: DELEGATE requires an enabled multi-agent policy";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
       return { failed: true };
@@ -448,8 +665,9 @@ export class AgentLoop {
       await this.recordError(state.sessionId, error);
       return { failed: true };
     }
+    const tasks = decision.tasks.map(normalizeSubAgentTask);
     const previousTaskCount = state.delegationBatches.reduce((total, batch) => total + batch.results.length, 0);
-    if (previousTaskCount + decision.tasks.length > policy.maxTasksPerRun) {
+    if (previousTaskCount + tasks.length > policy.maxTasksPerRun) {
       const error = `MULTI_AGENT_BUDGET_EXHAUSTED: maximum ${String(policy.maxTasksPerRun)} child tasks reached`;
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
@@ -459,12 +677,18 @@ export class AgentLoop {
     await this.emit({
       type: "agents",
       phase: "started",
-      tasks: decision.tasks.length,
+      tasks: tasks.length,
       message: decision.reason,
+      taskDetails: tasks.map((task) => ({
+        taskId: task.id,
+        role: task.role,
+        access: task.access,
+        dependsOn: task.dependsOn,
+      })),
     });
     await this.eventStore.appendEvent(state.sessionId, {
       type: "SUBAGENT_BATCH_STARTED",
-      payload: { reason: decision.reason, taskCount: decision.tasks.length },
+      payload: { reason: decision.reason, taskCount: tasks.length },
     });
 
     let batch: SubAgentBatchResult;
@@ -472,8 +696,14 @@ export class AgentLoop {
       batch = await this.subAgentCoordinator.runBatch({
         parentRunId: state.runId,
         originalGoal: state.userGoal,
-        tasks: decision.tasks,
+        tasks,
         policy,
+        onProgress: async (event) => {
+          await this.emit({
+            type: "agent_task",
+            ...event,
+          });
+        },
       });
     } catch (error) {
       const message = `MULTI_AGENT_COORDINATOR_FAILED: ${errorToMessage(error)}`;
@@ -481,28 +711,152 @@ export class AgentLoop {
       await this.recordError(state.sessionId, message, error);
       await this.eventStore.appendEvent(state.sessionId, {
         type: "SUBAGENT_BATCH_FAILED",
-        payload: { status: "FAILED", taskCount: decision.tasks.length, error: message },
+        payload: { status: "FAILED", taskCount: tasks.length, error: message },
       });
-      await this.emit({ type: "agents", phase: "failed", tasks: decision.tasks.length, message });
+      await this.emit({ type: "agents", phase: "failed", tasks: tasks.length, message });
       return { failed: true };
     }
     state.addDelegationBatch(batch);
     await this.recordSubAgentBatch(state.sessionId, batch);
     const failed = batch.status === "FAILED";
-    const message = `${batch.status}: ${String(batch.results.filter((result) => result.status === "COMPLETED").length)}/${String(batch.results.length)} child tasks completed`;
+    const incomplete = batch.status !== "COMPLETED";
+    const failureDetails = batch.results
+      .filter((result) => result.status !== "COMPLETED")
+      .map((result) => `${result.taskId}: ${result.error ?? result.summary}`);
+    const message = [
+      `${batch.status}: ${String(batch.results.filter((result) => result.status === "COMPLETED").length)}/${String(batch.results.length)} child tasks completed`,
+      ...(failureDetails.length > 0 ? [`Failures: ${failureDetails.join(" | ")}`] : []),
+    ].join(". ");
     await this.emit({
       type: "agents",
       phase: failed ? "failed" : "finished",
       tasks: batch.results.length,
       message,
+      taskDetails: tasks.map((task) => {
+        const result = batch.results.find((candidate) => candidate.taskId === task.id);
+        return {
+          taskId: task.id,
+          role: task.role,
+          access: task.access,
+          dependsOn: task.dependsOn,
+          ...(result ? {
+            status: result.status,
+            ...(result.changedFiles ? { changedFiles: result.changedFiles } : {}),
+            ...(result.error ? { error: result.error } : {}),
+          } : {}),
+        };
+      }),
     });
-    if (failed) {
+    if (incomplete) {
       state.setLastError(`MULTI_AGENT_BATCH_FAILED: ${message}`);
       await this.recordError(state.sessionId, state.lastError);
-      return { failed: true };
+      const collaborationIntent = classifySubAgentIntent(state.userGoal);
+      const requiredWriterDeadEnd = collaborationIntent.preference === "REQUIRED"
+        && collaborationIntent.requestsChangeProposal
+        && !hasSuccessfulDelegatedPatchProposal(state)
+        && state.delegationBatches.length >= policy.maxBatchesPerRun;
+      const requiredReviewDeadEnd = collaborationIntent.preference === "REQUIRED"
+        && collaborationIntent.requestsReview
+        && !hasSuccessfulDelegatedReview(state)
+        && state.delegationBatches.length >= policy.maxBatchesPerRun;
+      if (requiredWriterDeadEnd || requiredReviewDeadEnd) {
+        const unmetRequirement = requiredWriterDeadEnd
+          ? "child-authored change"
+          : "dependent child review";
+        const error = [
+          `REQUIRED_DELEGATION_EXHAUSTED: all ${String(policy.maxBatchesPerRun)} allowed delegation batches were used`,
+          `without satisfying the requested ${unmetRequirement}, so it can no longer be completed in this run.`,
+          `Child failures: ${failureDetails.join(" | ") || "no detailed child error was recorded"}.`,
+          "The parent worktree was not modified as a fallback.",
+        ].join(" ");
+        await this.recordError(state.sessionId, error);
+        return { failed: true, result: await this.fail(state, error, input) };
+      }
+      return { failed };
     }
     state.setLastError(null);
     return { failed: false };
+  }
+
+  private async executeDelegatedPatchDecision(
+    state: AgentState,
+    decision: Extract<AgentDecision, { type: "APPLY_DELEGATED_PATCH" }>,
+    input: AgentRunInput,
+  ): Promise<StepOutcome> {
+    const result = [...state.delegationBatches]
+      .reverse()
+      .flatMap((batch) => [...batch.results].reverse())
+      .find((candidate) => candidate.taskId === decision.taskId);
+    if (!result?.proposedPatch || result.status !== "COMPLETED") {
+      const code = "DELEGATED_PATCH_NOT_FOUND";
+      return {
+        failed: await this.recordCapabilityViolation(
+          state,
+          `${code}: no completed patch proposal exists for child task ${decision.taskId}`,
+        ),
+        failureKind: "GUARDRAIL",
+        guardrailCode: code,
+      };
+    }
+    if (result.baselineFingerprint) {
+      const currentFingerprint = await fingerprintWorkingTree(this.repoPath);
+      if (currentFingerprint !== result.baselineFingerprint) {
+        const recheck = await new PatchManager({ repoPath: this.repoPath })
+          .validatePatch({ patch: result.proposedPatch });
+        if (!recheck.success) {
+          const code = "DELEGATED_PATCH_CONFLICT";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: parent worktree changed after child ${decision.taskId} started and its proposal no longer applies cleanly; re-delegate against the current baseline. ${recheck.stderr ?? recheck.error ?? ""}`.trim(),
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
+        }
+        await this.emit({
+          type: "agents",
+          phase: "finished",
+          tasks: 1,
+          message: `Parent worktree changed after ${decision.taskId} started; the delegated patch was revalidated and still applies cleanly.`,
+        });
+      }
+    }
+    const declaredReviewers = state.delegationBatches
+      .flatMap((batch) => batch.results)
+      .filter((candidate) => candidate.reviewedTaskIds?.includes(decision.taskId));
+    if (declaredReviewers.some((reviewer) => reviewer.status !== "COMPLETED")) {
+      const code = "DELEGATED_PATCH_REVIEW_INCOMPLETE";
+      return {
+        failed: await this.recordCapabilityViolation(
+          state,
+          `${code}: a declared reviewer for ${decision.taskId} did not complete`,
+        ),
+        failureKind: "GUARDRAIL",
+        guardrailCode: code,
+      };
+    }
+    const collaborationIntent = classifySubAgentIntent(state.userGoal);
+    if (
+      collaborationIntent.preference === "REQUIRED"
+      && collaborationIntent.requestsReview
+      && !hasSuccessfulDelegatedReview(state, decision.taskId)
+    ) {
+      const code = "DELEGATED_PATCH_REVIEW_INCOMPLETE";
+      return {
+        failed: await this.recordCapabilityViolation(
+          state,
+          `${code}: the user explicitly requested a dependent subagent review for ${decision.taskId}, but none completed`,
+        ),
+        failureKind: "GUARDRAIL",
+        guardrailCode: code,
+      };
+    }
+    return await this.executePatchDecision(state, {
+      type: "APPLY_PATCH",
+      patch: result.proposedPatch,
+      description: `${decision.description} (delegated by ${decision.taskId})`,
+    }, input);
   }
 
   private validatePlanModeDecision(state: AgentState, decision: AgentDecision): string | undefined {
@@ -510,7 +864,11 @@ export class AgentLoop {
       return undefined;
     }
 
-    if (decision.type === "APPLY_PATCH" || decision.type === "RUN_COMMAND") {
+    if (
+      decision.type === "APPLY_PATCH"
+      || decision.type === "APPLY_DELEGATED_PATCH"
+      || decision.type === "RUN_COMMAND"
+    ) {
       return `PLAN_MODE_MUTATION_BLOCKED: ${decision.type} is not allowed in read-only plan mode`;
     }
 
@@ -535,7 +893,11 @@ export class AgentLoop {
     state.setLastError(`${violation.code}: ${violation.message}`);
     await this.recordError(state.sessionId, state.lastError);
     await this.emit({ type: "guardrail", code: violation.code, message: violation.message });
-    return { failed: true };
+    return {
+      failed: true,
+      failureKind: "GUARDRAIL",
+      guardrailCode: violation.code,
+    };
   }
 
   private async executeToolDecision(
@@ -926,6 +1288,7 @@ export class AgentLoop {
     conversation: ConversationMessage[] | undefined,
     singleShotUserGoal: string,
     conversationHistoryTruncated: boolean,
+    finalOnly: boolean,
   ): Promise<AgentDecision> {
     const mode = state.taskContract.executionStrategy === "SINGLE_SHOT" ? "agent_single_shot" : "agent_decision";
     const startedAt = Date.now();
@@ -966,6 +1329,7 @@ export class AgentLoop {
         context,
         state: state.toSnapshot(),
         availableTools,
+        ...(finalOnly ? { decisionConstraint: "FINAL_ONLY" as const } : {}),
         ...(conversation && conversation.length > 0 ? { conversation } : {}),
       });
       await this.recordLlmUsage(state, drainLlmCallMetrics(this.llmClient), mode, Date.now() - startedAt);
@@ -1153,8 +1517,12 @@ export class AgentLoop {
       await this.recordCheckpoint(state, "RUNNING", `tool:${decision.toolName}`);
       return;
     }
-    if (decision.type === "DELEGATE_READONLY") {
+    if (decision.type === "DELEGATE" || decision.type === "DELEGATE_READONLY") {
       await this.recordCheckpoint(state, "RUNNING", `delegation:${decision.reason}`);
+      return;
+    }
+    if (decision.type === "APPLY_DELEGATED_PATCH") {
+      await this.recordCheckpoint(state, "RUNNING", `delegated-patch:${decision.taskId}`);
       return;
     }
     if (decision.type === "APPLY_PATCH") {
@@ -1315,6 +1683,7 @@ export class AgentLoop {
           cachedPromptTokens: metric.usage?.cachedPromptTokens ?? null,
           cacheWriteTokens: metric.usage?.cacheWriteTokens ?? null,
           reasoningTokens: metric.usage?.reasoningTokens ?? null,
+          reasoningContentAvailable: metric.reasoningContentAvailable === true,
         }),
       });
     }
@@ -1417,6 +1786,7 @@ function aggregateLlmMetrics(metrics: LlmCallMetrics[]): {
     ...(lastFinishReason ? { finishReason: lastFinishReason } : {}),
     usage: {
       usageAvailable: usageMetrics.length > 0,
+      reasoningContentAvailable: metrics.some((metric) => metric.reasoningContentAvailable === true),
       ...(promptTokens === undefined ? {} : { promptTokens }),
       ...(completionTokens === undefined ? {} : { completionTokens }),
       ...(reportedTotal === undefined
@@ -1619,6 +1989,27 @@ function collaborationResultMetadata(state: AgentState): Pick<AgentRunResult, "d
     delegationBatches: state.delegationBatches.length,
     subAgents: state.delegationBatches.reduce((total, batch) => total + batch.results.length, 0),
   };
+}
+
+function hasSuccessfulDelegatedPatchProposal(state: AgentState): boolean {
+  return state.delegationBatches.some((batch) => batch.results.some((result) => (
+    result.status === "COMPLETED" && typeof result.proposedPatch === "string" && result.proposedPatch.length > 0
+  )));
+}
+
+function hasSuccessfulDelegatedReview(state: AgentState, taskId?: string): boolean {
+  return state.delegationBatches.some((batch) => batch.results.some((result) => (
+    result.status === "COMPLETED"
+    && result.reviewedTaskIds !== undefined
+    && result.reviewedTaskIds.length > 0
+    && (taskId === undefined || result.reviewedTaskIds.includes(taskId))
+  )));
+}
+
+function hasAppliedDelegatedPatch(state: AgentState): boolean {
+  return state.patchResults.some((result) => (
+    result.result.success && /\(delegated by [^)]+\)$/.test(result.description ?? "")
+  ));
 }
 
 function sortJsonValue(value: unknown): unknown {

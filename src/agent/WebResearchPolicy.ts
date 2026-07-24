@@ -43,8 +43,45 @@ export function looksLikeTemporalSuperlativeRequest(value: string): boolean {
 export function looksLikeAuthoritativeFreshnessQuery(value: string): boolean {
   const text = normalize(value);
   const authority = /(?:官方|官网|发布页|发布说明|更新日志)|\b(?:official|primary source|release notes?|changelog)\b|\bsite:\s*[a-z0-9.-]+/i.test(text);
-  const freshness = /(?:最新|当前|现在|发布|版本|型号)|\b(?:latest|current|newest|release|version|model)\b/i.test(text);
-  return authority && freshness;
+  return authority && looksLikeFreshnessIntent(text);
+}
+
+/**
+ * A dated query is a freshness query even when the model omitted a literal
+ * "latest" synonym. The year is only retrieval intent; it is never treated as
+ * proof that a returned result is current.
+ */
+export function looksLikeFreshnessIntent(
+  value: string,
+  currentYear = new Date().getFullYear(),
+): boolean {
+  const text = normalize(value);
+  if (/(?:最新|当前|现在|发布|版本|型号|更新)|\b(?:latest|current|newest|release|version|model|updated?)\b/i.test(text)) {
+    return true;
+  }
+
+  return [...text.matchAll(/\b((?:19|20)\d{2})\b/g)]
+    .some((match) => {
+      const year = Number(match[1]);
+      return year >= currentYear - 1 && year <= currentYear + 1;
+    });
+}
+
+export function extractSiteConstraintDomains(value: string): string[] {
+  const domains = [...normalize(value).matchAll(/\bsite:\s*([a-z0-9.-]+\.[a-z]{2,})\b/gi)]
+    .map((match) => normalizeHostname(match[1] ?? ""))
+    .filter((domain) => domain.length > 0);
+  return [...new Set(domains)];
+}
+
+export function urlMatchesSiteConstraint(url: string, domains: string[]): boolean {
+  if (domains.length === 0) return true;
+  try {
+    const hostname = normalizeHostname(new URL(url).hostname);
+    return domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -117,4 +154,8 @@ function compareVersionParts(left: number[], right: number[]): number {
 
 function normalize(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeHostname(value: string): string {
+  return value.trim().toLowerCase().replace(/^www\./, "").replace(/\.+$/, "");
 }

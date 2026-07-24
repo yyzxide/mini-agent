@@ -1,79 +1,21 @@
-import { hasHighConfidenceDiagnostic } from "../diagnostics/ErrorClassifier.js";
-import { extractLikelyReviewFilePath, looksLikeReviewableFilePath } from "./RepositoryInvestigation.js";
 import {
-  hasExplicitChatOnlyConstraint,
-  looksLikeDocumentCreationTask,
-  mentionsDocumentArtifact,
-} from "./ArtifactIntent.js";
-import { looksLikeFileWriteConfirmation, looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
-import {
-  classifyProductMetaIntent,
-  looksLikeExplicitWebAction,
-} from "./ProductCapability.js";
-import { classifyExternalFactPolicy } from "./ExternalFactPolicy.js";
-import { isPriorResponseAuditRequest } from "../session/ConversationHistory.js";
+  looksLikeIndexedKnowledgeRequest as taskLooksLikeIndexedKnowledgeRequest,
+  understandTask,
+  type TaskUnderstanding,
+} from "./TaskUnderstanding.js";
 
 export type TaskIntent = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP";
 
 export interface TaskRoute {
   intent: TaskIntent;
   reason: string;
+  understanding?: TaskUnderstanding;
 }
-
-const REPOSITORY_ACTION_KEYWORDS = [
-  "仓库",
-  "项目",
-  "文件",
-  "目录",
-  "当前仓库",
-  "当前项目",
-  "当前目录",
-  "当前文件",
-  "这里的仓库",
-  "这里的项目",
-  "这个 repo",
-  "这个代码",
-  "修改",
-  "新增",
-  "创建",
-  "删除",
-  "保存",
-  "写入",
-  "补充",
-  "修复",
-  "重构",
-  "测试",
-  "readme",
-  "src/",
-  "repo",
-  "repository",
-  "project",
-  "file",
-  "directory",
-  "modify",
-  "add",
-  "create",
-  "delete",
-  "fix",
-  "refactor",
-  "test",
-];
-
-const REPOSITORY_KEYWORDS = [
-  ...REPOSITORY_ACTION_KEYWORDS,
-  ".ts",
-  ".js",
-  ".java",
-  ".go",
-  ".py",
-  ".cpp",
-];
 
 const DIRECT_SNIPPET_KEYWORDS = [
   "代码片段",
   "示例代码",
   "写一段",
-  "two sum",
   "snippet",
   "example code",
   "sample code",
@@ -91,149 +33,35 @@ const DIRECT_SNIPPET_ONLY_SIGNALS = [
   "do not edit files",
 ];
 
-const CODE_GENERATION_ACTION_KEYWORDS = [
-  "写个",
-  "写一个",
-  "帮我写个",
-  "做个",
-  "做一个",
-  "实现一个",
-  "实现下",
-  "生成一个",
-  "创建一个",
-  "build a",
-  "create a",
-  "write a",
-  "implement a",
-];
-
-const CODE_GENERATION_TARGET_KEYWORDS = [
+const CODE_CONTINUATION_TERMS = [
   "代码",
   "程序",
-  "游戏",
-  "页面",
-  "脚本",
-  "组件",
-  "服务",
-  "接口",
-  "工具",
-  "2048",
-  "c++",
-  "cpp",
-  "python",
-  "java",
-  "go",
-  "rust",
-  "html",
-  "css",
-  "javascript",
-  "typescript",
-  "node",
-  "react",
-  "vue",
-  "前端",
-  "后端",
-  "算法题",
-];
-
-const ALGORITHM_PROBLEM_KEYWORDS = [
-  "算法",
-  "题",
-  "括号",
-  "数组",
-  "链表",
-  "二叉树",
-  "字符串",
-  "回文",
-  "最长",
-  "中位数",
-  "数据流",
-  "堆",
-  "最短",
-  "子串",
-  "子序列",
-  "动态规划",
-  "贪心",
-  "滑动窗口",
-  "哈希",
-  "栈",
-  "队列",
-  "图",
-  "树",
-  "dfs",
-  "bfs",
-  "dp",
-  "leetcode",
-];
-
-const QUESTION_KEYWORDS = [
-  "你是谁",
-  "知道",
-  "知道吗",
-  "是谁",
-  "是什么",
-  "为什么",
-  "怎么",
-  "如何",
-  "哪里",
-  "哪个",
-  "哪支",
-  "哪位",
-  "哪一年",
-  "哪年",
-  "多少",
-  "吗",
-  "？",
-  "?",
-  "解释",
-  "说明",
-  "记得",
-  "还记得",
-  "刚才",
-  "上次",
-  "之前",
-  "现在呢",
-  "我们聊",
-  "我们说",
-  "what is",
-  "who are you",
-  "who is",
-  "why",
-  "how to",
-  "where",
-  "when",
-  "which",
-  "how many",
-  "explain",
-  "remember",
-  "previous",
-  "last time",
-  "what did we discuss",
-];
-
-const SHORT_CHAT_EXCLUSION_KEYWORDS = [
-  "仓库",
-  "项目",
-  "文件",
-  "目录",
-  "代码",
-  "编程",
   "函数",
   "类",
   "接口",
-  "bug",
-  "debug",
-  "fix",
-  "patch",
-  "review",
-  "测试",
-  "命令",
-  "运行",
-  "编译",
-  "构建",
-  "部署",
+  "模块",
+  "组件",
   "脚本",
-  "程序",
+  "算法",
+  "数据结构",
+  "数据流",
+  "页面",
+  "服务",
+  "工具",
+  "code",
+  "program",
+  "function",
+  "class",
+  "interface",
+  "module",
+  "component",
+  "script",
+  "algorithm",
+  "data structure",
+  "data stream",
+  "page",
+  "service",
+  "tool",
 ];
 
 const CASUAL_DIRECT_REPLY_PHRASES = [
@@ -259,73 +87,6 @@ const CASUAL_DIRECT_REPLY_PHRASES = [
   "misclick",
 ];
 
-const WEB_RESEARCH_KEYWORDS = [
-  "最新",
-  "最近",
-  "热门",
-  "热榜",
-  "趋势榜",
-  "新闻",
-  "比分",
-  "赛果",
-  "赛程",
-  "成绩",
-  "战绩",
-  "排名",
-  "冠军",
-  "夺冠",
-  "夺得",
-  "获得冠军",
-  "夺冠了",
-  "世界杯",
-  "大师赛",
-  "比赛结果",
-  "谁赢",
-  "股市",
-  "股票",
-  "a股",
-  "A股",
-  "大盘",
-  "指数",
-  "上证",
-  "深证",
-  "创业板",
-  "沪深",
-  "收盘",
-  "开盘",
-  "涨跌",
-  "涨幅",
-  "跌幅",
-  "行情",
-  "证券",
-  "金融市场",
-  "汇率",
-  "价格",
-  "latest",
-  "recent",
-  "trending",
-  "most popular",
-  "news",
-  "source",
-  "score",
-  "scores",
-  "result",
-  "results",
-  "standings",
-  "champion",
-  "world cup",
-  "stock",
-  "stocks",
-  "stock market",
-  "market index",
-  "indices",
-  "index",
-  "closing price",
-  "market close",
-  "exchange rate",
-  "price",
-];
-
 const WEB_SWITCH_CONFIRMATION_PHRASES = [
   "切换吧",
   "切到联网",
@@ -340,61 +101,6 @@ const WEB_SWITCH_CONFIRMATION_PHRASES = [
   "use web",
   "switch to web",
   "search online then",
-];
-
-const CODE_REVIEW_KEYWORDS = [
-  "检查",
-  "审查",
-  "review",
-  "code review",
-  "看看",
-  "排查",
-  "bug",
-  "bugs",
-  "问题",
-  "缺陷",
-  "隐患",
-  "有没有 bug",
-  "是否存在bug",
-  "check this file",
-  "inspect this file",
-  "review this file",
-];
-
-const FILE_CONTEXT_KEYWORDS = [
-  "文件",
-  "代码",
-  "当前文件",
-  "这个文件",
-  "打开文件",
-  "source file",
-  "file",
-  "code",
-];
-
-const REPOSITORY_ANALYSIS_KEYWORDS = [
-  "分析",
-  "总结",
-  "概括",
-  "介绍",
-  "看看项目",
-  "项目分析",
-  "项目结构",
-  "仓库结构",
-  "模块职责",
-  "模块结构",
-  "当前文件夹的项目",
-  "当前项目",
-  "当前仓库",
-  "explain this repository",
-  "analyze this repository",
-  "analyze the repository",
-  "summarize this repository",
-  "repository overview",
-  "project overview",
-  "explain this project",
-  "summarize modules",
-  "analyze the project",
 ];
 
 const REPOSITORY_MUTATION_KEYWORDS = [
@@ -417,212 +123,42 @@ const REPOSITORY_MUTATION_KEYWORDS = [
   "apply",
 ];
 
-export function routeTask(userGoal: string): TaskRoute {
+export function routeTask(userGoal: string, providedUnderstanding?: TaskUnderstanding): TaskRoute {
   const normalized = normalizeTask(userGoal);
-  const productMeta = classifyProductMetaIntent(userGoal);
-  const externalFactPolicy = classifyExternalFactPolicy(userGoal);
-  const needsWeb = looksLikeExplicitWebAction(userGoal)
-    || containsAny(normalized, WEB_RESEARCH_KEYWORDS);
-  const reviewTarget = extractLikelyReviewFilePath(userGoal);
-  const reviewRequest = containsAny(normalized, CODE_REVIEW_KEYWORDS)
-    && (containsAny(normalized, FILE_CONTEXT_KEYWORDS) || reviewTarget !== undefined || normalized.includes("当前") || normalized.includes("打开"));
-  const repositoryMutationRequest = containsAny(normalized, REPOSITORY_MUTATION_KEYWORDS)
-    && (containsAny(normalized, REPOSITORY_ACTION_KEYWORDS) || reviewTarget !== undefined);
-
+  const understanding = providedUnderstanding ?? understandTask(userGoal);
   if (matchesCasualDirectReply(normalized)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task looks like a casual acknowledgement, cancellation, or mis-click style message.",
-    };
+    return route("DIRECT_ANSWER", "Casual conversational control message.", understanding);
   }
-
-  if (looksLikeFileWriteConfirmation(userGoal)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task asks whether a previous file write actually happened, which should be answered from local session state.",
-    };
-  }
-
-  if (hasHighConfidenceDiagnostic({ text: userGoal, repoPath: "." })) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task includes a recognizable runtime error that should be diagnosed locally before asking the model.",
-    };
-  }
-
-  if (isPriorResponseAuditRequest(userGoal) && looksLikeExplicitWebAction(userGoal)) {
-    return {
-      intent: "WEB_ANSWER",
-      reason: "Task explicitly asks to research the truth of a previously discussed external claim.",
-    };
-  }
-
-  if (productMeta && productMeta.confidence >= 0.65) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task asks about the CLI's product capabilities, which should be answered from local product knowledge.",
-    };
-  }
-
-  if (looksLikeRagCapabilityQuestion(normalized)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task asks about the CLI's repository-local document RAG capability.",
-    };
-  }
-
-  if (
-    isPriorResponseAuditRequest(userGoal)
-    && !looksLikeExplicitWebAction(userGoal)
-    && !externalFactPolicy.signals.includes("explicit-research")
-    && !externalFactPolicy.signals.includes("explicit-verification")
-  ) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task audits an earlier assistant response, so the conversation record is the primary evidence source.",
-    };
-  }
-
-  if (looksLikeCacheImplementationRequest(normalized)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task explicitly asks to implement or repair Agent-owned cache behavior.",
-    };
-  }
-
-  if (looksLikeCacheResponsibilityQuestion(normalized)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task asks which product layer owns cache reads, writes, and hits.",
-    };
-  }
-
   if (looksLikeWebSwitchConfirmation(normalized)) {
-    return {
-      intent: "WEB_ANSWER",
-      reason: "Task confirms switching the current question to the web-answer flow.",
-    };
+    return route("WEB_ANSWER", "The user explicitly confirms using Web research.", {
+      ...understanding,
+      operation: "RESEARCH",
+      target: "WORLD",
+      explicitWeb: true,
+      signals: [...understanding.signals, "web-switch-confirmation"],
+    });
   }
-
-  if (looksLikeSaveToFileFollowUp(userGoal)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task asks to save previously generated code into repository files.",
-    };
-  }
-
-  if (mentionsDocumentArtifact(userGoal) && hasExplicitChatOnlyConstraint(userGoal)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task explicitly asks to keep a documentation draft in chat without editing files.",
-    };
-  }
-
-  if (looksLikeDocumentCreationTask(userGoal)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task asks to create a documentation artifact in the repository.",
-    };
-  }
-
-  if (looksLikeIndexedKnowledgeRequest(userGoal)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task explicitly asks to query the indexed repository knowledge base.",
-    };
-  }
-
-  if (repositoryMutationRequest) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Explicit repository mutation intent takes precedence over file review or path inspection.",
-    };
-  }
-
-  if (looksLikeReviewableFilePath(userGoal.trim())) {
-    return {
-      intent: "CODE_REVIEW",
-      reason: "Input looks like a repository file path, so default to a file review flow.",
-    };
-  }
-
-  if (reviewRequest) {
-    return {
-      intent: "CODE_REVIEW",
-      reason: "Task appears to request a file-focused code review or bug inspection.",
-    };
-  }
-
   if (
-    externalFactPolicy.policy === "VERIFICATION_REQUIRED"
-    && !containsAny(normalized, REPOSITORY_KEYWORDS)
+    looksLikeExplicitSnippetRequest(normalized)
+    && understanding.operation !== "REVIEW_REPOSITORY"
+    && understanding.operation !== "ANALYZE_REPOSITORY"
   ) {
-    return {
-      intent: "WEB_ANSWER",
-      reason: `Precise external facts require evidence (${externalFactPolicy.signals.join(", ")}).`,
-    };
+    return route("DIRECT_ANSWER", "The user explicitly requests chat-only code.", understanding);
   }
 
-  if (needsWeb && !containsAny(normalized, REPOSITORY_ACTION_KEYWORDS)) {
-    return {
-      intent: "WEB_ANSWER",
-      reason: "Task appears to require current or external web information.",
-    };
+  switch (understanding.operation) {
+    case "RESEARCH":
+      return route("WEB_ANSWER", "Task understanding requires external evidence.", understanding);
+    case "REVIEW_REPOSITORY":
+      return route("CODE_REVIEW", "Task understanding identifies a repository review.", understanding);
+    case "ANALYZE_REPOSITORY":
+    case "CHANGE_REPOSITORY":
+    case "QUERY_KNOWLEDGE":
+      return route("AGENT_LOOP", `Task understanding selected ${understanding.operation}.`, understanding);
+    case "ANSWER":
+    case "LOCAL_STATE":
+      return route("DIRECT_ANSWER", `Task understanding selected ${understanding.operation}.`, understanding);
   }
-
-  if (looksLikeExplicitSnippetRequest(normalized)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task explicitly asks for a code snippet without repository edits.",
-    };
-  }
-
-  if (looksLikeStandaloneCodeGenerationTask(normalized, userGoal)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task looks like a request to implement code in repository files rather than only chat about code.",
-    };
-  }
-
-  if (containsAny(normalized, REPOSITORY_KEYWORDS)) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Task appears to reference repository files or requests a repository change.",
-    };
-  }
-
-  if (containsAny(normalized, DIRECT_SNIPPET_KEYWORDS)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task looks like a standalone code snippet request.",
-    };
-  }
-
-  if (needsWeb) {
-    return {
-      intent: "WEB_ANSWER",
-      reason: "Task appears to require current or external web information.",
-    };
-  }
-
-  if (containsAny(normalized, QUESTION_KEYWORDS)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Task looks like a general question rather than a repository edit.",
-    };
-  }
-
-  if (looksLikeShortPlainChat(normalized, userGoal)) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: "Short plain-text input is safer to handle as normal conversation than as a repository edit.",
-    };
-  }
-
-  return {
-    intent: "AGENT_LOOP",
-    reason: "Defaulting to repository agent loop for ambiguous coding tasks.",
-  };
 }
 
 export function looksLikeWebSwitchConfirmation(normalized: string): boolean {
@@ -630,28 +166,7 @@ export function looksLikeWebSwitchConfirmation(normalized: string): boolean {
 }
 
 export function looksLikeRepositoryAnalysisTask(userGoal: string): boolean {
-  const normalized = normalizeTask(userGoal);
-  if (!containsAny(normalized, REPOSITORY_KEYWORDS)) {
-    return false;
-  }
-
-  if (!containsAny(normalized, REPOSITORY_ANALYSIS_KEYWORDS)) {
-    return false;
-  }
-
-  return !containsAny(normalized, REPOSITORY_MUTATION_KEYWORDS);
-}
-
-export function shouldPreserveAgentLoopIntent(userGoal: string): boolean {
-  const normalized = normalizeTask(userGoal);
-  return looksLikeStandaloneCodeGenerationTask(normalized, userGoal)
-    || looksLikeDocumentCreationTask(userGoal)
-    || looksLikeIndexedKnowledgeRequest(userGoal)
-    || looksLikeCacheImplementationRequest(userGoal)
-    || looksLikeCodeContinuationFollowUp(normalized)
-    || looksLikeSaveToFileFollowUp(userGoal)
-    || containsAny(normalized, REPOSITORY_ACTION_KEYWORDS)
-    || looksLikeRepositoryAnalysisTask(userGoal);
+  return understandTask(userGoal).operation === "ANALYZE_REPOSITORY";
 }
 
 export function looksLikeCodeContinuationFollowUp(userGoal: string): boolean {
@@ -660,15 +175,7 @@ export function looksLikeCodeContinuationFollowUp(userGoal: string): boolean {
     return false;
   }
 
-  return containsAny(normalized, ALGORITHM_PROBLEM_KEYWORDS)
-    || containsAny(normalized, CODE_GENERATION_TARGET_KEYWORDS);
-}
-
-export function looksLikeWebCapabilityQuestion(normalized: string): boolean {
-  const intent = classifyProductMetaIntent(normalized);
-  return Boolean(intent && intent.confidence >= 0.65 && (
-    intent.topic === "WEB_RESEARCH" || intent.topic === "ALL"
-  ));
+  return containsAny(normalized, CODE_CONTINUATION_TERMS);
 }
 
 export function looksLikeRagCapabilityQuestion(value: string): boolean {
@@ -691,31 +198,7 @@ export function looksLikeRagCapabilityQuestion(value: string): boolean {
 }
 
 export function looksLikeIndexedKnowledgeRequest(value: string): boolean {
-  if (looksLikeRagCapabilityQuestion(value)) {
-    return false;
-  }
-
-  const normalized = normalizeTask(value);
-  return [
-    /(?:根据|查询|检索|搜索|查找|从).{0,12}(?:已索引的?)?(?:知识库|知识文档|文档索引)/i,
-    /(?:知识库|已索引的?文档|文档索引)(?:里|中|内|里的|中的).+/i,
-    /(?:请)?(?:用|使用|通过|调用)(?:已索引的?)?(?:知识库|rag).{0,8}(?:查|查询|检索|搜索|回答)/i,
-    /(?:知识库|已索引的?文档|文档索引).{0,8}(?:查|查询|检索|搜索|回答).+/i,
-    /\b(?:search|query|look up|according to|from)\s+(?:the\s+)?(?:indexed\s+)?(?:knowledge base|knowledge documents?)\b/i,
-    /\b(?:knowledge base|indexed documents?)\s+(?:says?|contains?|search|query)\b/i,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-export function looksLikeCacheImplementationRequest(value: string): boolean {
-  const normalized = normalizeTask(value);
-  if (!/(?:缓存|\bcache\b|cached tokens?|kv cache|prompt cache|embedding cache)/i.test(normalized)) {
-    return false;
-  }
-
-  return /(?:补齐|补上|补全|新增|添加|接入|完善|开发|修复|改造|落地).{0,30}(?:缓存|\bcache\b)?/i.test(normalized)
-    || /(?:请|帮我|需要|必须|直接|把).{0,20}(?:实现|implement).{0,30}(?:缓存|\bcache\b)/i.test(normalized)
-    || /^(?:实现|implement)(?:\b|\s).{0,30}(?:缓存|cache)/i.test(normalized)
-    || /\b(?:please|need to|must|should)\s+(?:implement|add|fix|complete|build)\b[^.?!]{0,50}\bcach/i.test(normalized);
+  return taskLooksLikeIndexedKnowledgeRequest(value);
 }
 
 export function looksLikeCacheResponsibilityQuestion(value: string): boolean {
@@ -732,51 +215,6 @@ export function looksLikeCacheResponsibilityQuestion(value: string): boolean {
   return chineseOwnershipQuestion
     || /\bwho\b[^?]{0,40}\b(?:owns?|handles?|manages?)\b[^?]{0,30}\bcach/i.test(normalized)
     || /(?:\?|\b(?:who|which|should|whether)\b)[^?]{0,80}\bcach[^?]{0,30}\b(?:model|agent|provider|server)\b[^?]{0,30}\b(?:responsib|own|handle|manage)/i.test(normalized);
-}
-
-function looksLikeShortPlainChat(normalized: string, userGoal: string): boolean {
-  const trimmed = userGoal.trim();
-  if (!trimmed || trimmed.startsWith("/")) {
-    return false;
-  }
-
-  if (containsAny(normalized, SHORT_CHAT_EXCLUSION_KEYWORDS)) {
-    return false;
-  }
-
-  if (/[{}[\];=<>]/.test(trimmed)) {
-    return false;
-  }
-
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  if (tokens.length === 1) {
-    return true;
-  }
-
-  return tokens.length <= 4 && trimmed.length <= 32;
-}
-
-function looksLikeStandaloneCodeGenerationTask(normalized: string, userGoal: string): boolean {
-  const trimmed = userGoal.trim();
-  if (!trimmed || trimmed.startsWith("/")) {
-    return false;
-  }
-
-  if (containsAny(normalized, DIRECT_SNIPPET_KEYWORDS)) {
-    return false;
-  }
-
-  const hasAction = containsAny(normalized, CODE_GENERATION_ACTION_KEYWORDS);
-  if (!hasAction) {
-    return false;
-  }
-
-  const hasTarget = containsAny(normalized, CODE_GENERATION_TARGET_KEYWORDS)
-    || containsAny(normalized, ALGORITHM_PROBLEM_KEYWORDS)
-    || /\b(c\+\+|cpp|python|java|go|rust|html|css|javascript|typescript|node|react|vue)\b/i.test(userGoal)
-    || /\.(ts|js|jsx|tsx|java|go|py|cpp|c|cc|html|css|sh)\b/i.test(userGoal);
-
-  return hasTarget;
 }
 
 function looksLikeExplicitSnippetRequest(normalized: string): boolean {
@@ -808,4 +246,8 @@ function containsKeyword(value: string, keyword: string): boolean {
   }
 
   return value.includes(keyword);
+}
+
+function route(intent: TaskIntent, reason: string, understanding: TaskUnderstanding): TaskRoute {
+  return { intent, reason, understanding };
 }

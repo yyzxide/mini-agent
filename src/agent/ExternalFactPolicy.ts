@@ -150,6 +150,9 @@ function collectVerificationSignals(raw: string, text: string): string[] {
   if (/(?:谁(?:是|获得|赢得|担任|创立|发明)|哪(?:一)?(?:年|月|天|日|届|季|集|章|版|版本|国家|城市|地点|位置|公司|人物|作品)|何时|什么时候|在哪里|位于哪里|地点(?:是|在哪)|多少(?:个|位|家|年|次|部|项|钱|颗|种)?|几(?:个|位|家|年|次|部|项|颗|种)|哪来(?:的)?|不是.{0,24}吗|是否(?:为|是|有|存在|发生|包含)|有没有.{0,18}(?:发生|存在|包含|获得))|\b(?:who (?:is|was|won|founded|invented|created)|when (?:did|was|is)|where (?:did|was|is|does)|what (?:year|date|version|price|score)|which (?:year|date|version|country|city|place|person)|how (?:many|much|old|long ago))\b/i.test(text)) {
     signals.push("precise-attribute");
   }
+  if (/(?:第\s*(?:\d+|[一二三四五六七八九十百两]+)\s*(?:章|关|幕|季|集|部|卷|任|届|次|个|位).{0,24}(?:是谁|是什么|有哪些|发生了什么|结果)|\b(?:chapter|episode|season|volume|round|term)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b.{0,24}\b(?:who|what|which|result)\b)/i.test(text)) {
+    signals.push("bounded-relation");
+  }
   if (/(?:^|[，。！？?\s])(?:是|不是|有|没有|会|不会|能|不能|可以|不可以).{1,36}吗(?:[？?]|$)|^(?:is|are|was|were|did|does|do|has|have|can|could|will|would)\b(?![^?]{0,24}\b(?:explain|describe|summarize|brainstorm)\b)/i.test(text)) {
     signals.push("polar-factual-claim");
   }

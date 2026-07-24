@@ -23,6 +23,7 @@ import { checkpointToPayload, createAgentCheckpoint } from "../../src/agent/Agen
 import { AgentState } from "../../src/agent/AgentState.js";
 import type { SubAgentCoordinator } from "../../src/agent/SubAgentTypes.js";
 import { DEFAULT_MULTI_AGENT_POLICY } from "../../src/agent/SubAgentTypes.js";
+import { fingerprintWorkingTree } from "../../src/agent/SubAgentWorktree.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,6 +43,58 @@ afterEach(async () => {
 });
 
 describe("AgentLoop", () => {
+  it("withholds a risky Direct draft and upgrades the same loop to web research", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const sessionStore = new SessionStore({ repoPath });
+    let iterativeInput: Parameters<LlmClient["chat"]>[0] | undefined;
+    const llmClient: LlmClient = {
+      completeText: async () => ({
+        success: true,
+        text: "这款游戏尚未正式发售，计划于2024年8月20日发布，因此第三章没有已确认的 Boss。",
+      }),
+      chat: async (input) => {
+        iterativeInput = input;
+        return { type: "FAILED", error: "stop after observing the upgraded contract" };
+      },
+    };
+    const taskContract = buildAgentTaskContract({
+      userGoal: "黑神话悟空第三章boss是谁",
+      route: { intent: "DIRECT_ANSWER", reason: "simulate an initial routing miss" },
+    });
+    const loop = createLoop({
+      sessionStore,
+      llmClient,
+      onProgress: (event) => { progress.push(event); },
+    });
+
+    const result = await loop.run({
+      userGoal: "黑神话悟空第三章boss是谁",
+      taskContract,
+      conversation: [
+        { role: "user", content: "你刚才是不是编的？" },
+        { role: "assistant", content: "我承认错误，刚才的内容没有核实。" },
+      ],
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.taskKind).toBe("WEB_RESEARCH");
+    expect(iterativeInput?.state.taskKind).toBe("WEB_RESEARCH");
+    expect((iterativeInput?.state.maxSteps ?? 0) - (iterativeInput?.state.step ?? 0)).toBe(14);
+    expect(iterativeInput?.availableTools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["web_search", "fetch_url"]),
+    );
+    expect(iterativeInput?.context).toContain("fetch at least 2 web source(s)");
+    expect(iterativeInput?.context).toContain("complete, useful answer");
+    expect(iterativeInput?.context).toContain("DIRECT_DRAFT_EVIDENCE_ESCALATION");
+    expect(iterativeInput?.context).not.toContain("第三章没有已确认的 Boss");
+    expect(progress.some((event) =>
+      event.type === "guardrail" && event.code === "DIRECT_DRAFT_EVIDENCE_ESCALATION",
+    )).toBe(true);
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(recordTypes(records)).not.toContain("ASSISTANT_MESSAGE");
+  });
+
   it("retries a direct answer that denies a visible prior assistant claim", async () => {
     const progress: AgentProgressEvent[] = [];
     const sessionStore = new SessionStore({ repoPath });
@@ -194,6 +247,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "give demo.txt hello from mini-agent",
+      taskContract: repositoryContract("give demo.txt hello from mini-agent"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -264,6 +318,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "demo: stop early",
+      taskContract: repositoryContract("demo: stop early"),
       maxSteps: 1,
       autoApprove: true,
       nonInteractive: true,
@@ -333,6 +388,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "Analyze the agent architecture",
+      taskContract: repositoryContract("Analyze the agent architecture"),
       autoApprove: true,
       nonInteractive: true,
       multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
@@ -346,6 +402,381 @@ describe("AgentLoop", () => {
       "SUBAGENT_BATCH_STARTED",
       "SUBAGENT_BATCH_FINISHED",
     ]));
+  });
+
+  it("applies a reviewed child patch only after an explicit parent merge decision", async () => {
+    const client = new ScriptedLlmClient([
+      {
+        type: "DELEGATE",
+        reason: "Implement and review independently",
+        tasks: [
+          {
+            id: "writer",
+            role: "implementation_agent",
+            objective: "Update demo.txt",
+            focusPaths: ["demo.txt"],
+            access: "PROPOSE_CHANGES",
+            dependsOn: [],
+          },
+          {
+            id: "reviewer",
+            role: "change_reviewer",
+            objective: "Review the writer patch",
+            focusPaths: ["demo.txt"],
+            access: "REVIEW_CHANGES",
+            dependsOn: ["writer"],
+          },
+        ],
+      },
+      { type: "APPLY_DELEGATED_PATCH", taskId: "writer", description: "Merge reviewed child proposal" },
+      {
+        type: "RUN_COMMAND",
+        executable: "git",
+        args: ["diff", "--check"],
+        description: "Verify delegated change",
+      },
+      { type: "FINAL", success: true, summary: "Used a writer and reviewer, merged the proposal, and verified it." },
+    ]);
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => ({
+        batchId: "write-review",
+        status: "COMPLETED",
+        results: [
+          {
+            taskId: "writer",
+            role: "implementation_agent",
+            objective: tasks[0]!.objective,
+            status: "COMPLETED",
+            summary: "Proposed update",
+            evidence: [{ path: "demo.txt" }],
+            toolsCalled: ["read_file"],
+            usage: emptySubAgentUsage(),
+            proposedPatch: [
+              "diff --git a/demo.txt b/demo.txt",
+              "--- a/demo.txt",
+              "+++ b/demo.txt",
+              "@@ -1 +1,2 @@",
+              " demo file",
+              "+delegated change",
+              "",
+            ].join("\n"),
+            changedFiles: ["demo.txt"],
+          },
+          {
+            taskId: "reviewer",
+            role: "change_reviewer",
+            objective: tasks[1]!.objective,
+            status: "COMPLETED",
+            summary: "APPROVE",
+            evidence: [{ path: "demo.txt" }],
+            toolsCalled: ["read_file"],
+            usage: emptySubAgentUsage(),
+            reviewedTaskIds: ["writer"],
+          },
+        ],
+        usage: emptySubAgentUsage(),
+        maxParallelAgents: 1,
+        durationMs: 20,
+      }),
+    };
+    const loop = createLoop({ llmClient: client, subAgentCoordinator: coordinator });
+    const userGoal = "请用两个subagent修改 demo.txt，一个实现，一个review";
+
+    const result = await loop.run({
+      userGoal,
+      taskContract: repositoryContract(userGoal),
+      autoApprove: true,
+      nonInteractive: true,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8"))
+      .resolves.toContain("delegated change");
+  });
+
+  it("fails immediately when required writer delegation is exhausted and never falls back to a parent patch", async () => {
+    const client = new ScriptedLlmClient([
+      {
+        type: "DELEGATE",
+        reason: "Use the requested writer",
+        tasks: [{
+          id: "writer",
+          role: "implementation_agent",
+          objective: "Create delegated.html",
+          focusPaths: ["delegated.html"],
+          access: "PROPOSE_CHANGES",
+          dependsOn: [],
+        }],
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Parent fallback must not run",
+        patch: [
+          "diff --git a/delegated.html b/delegated.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/delegated.html",
+          "@@ -0,0 +1 @@",
+          "+fallback",
+          "",
+        ].join("\n"),
+      },
+    ]);
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => ({
+        batchId: "failed-writer",
+        status: "FAILED",
+        results: [{
+          taskId: "writer",
+          role: "implementation_agent",
+          objective: tasks[0]!.objective,
+          status: "FAILED",
+          summary: "Invalid JSON in LLM response",
+          error: "Invalid JSON in LLM response",
+          evidence: [],
+          toolsCalled: [],
+          usage: emptySubAgentUsage(),
+        }],
+        usage: emptySubAgentUsage(),
+        maxParallelAgents: 1,
+        durationMs: 10,
+      }),
+    };
+    const loop = createLoop({ llmClient: client, subAgentCoordinator: coordinator });
+    const userGoal = "请用subagent写一个 delegated.html";
+    const result = await loop.run({
+      userGoal,
+      taskContract: repositoryContract(userGoal),
+      autoApprove: true,
+      nonInteractive: true,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true, maxBatchesPerRun: 1 },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("REQUIRED_DELEGATION_EXHAUSTED");
+    expect(result.error).toContain("Invalid JSON in LLM response");
+    await expect(fs.access(path.join(repoPath, "delegated.html"))).rejects.toBeDefined();
+    expect(client.getCallInputs()).toHaveLength(1);
+  });
+
+  it("upgrades an indirect repository request through model-refined task understanding", async () => {
+    const decisions: AgentDecision[] = [
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "demo.txt" }, reason: "Inspect the implementation" },
+      {
+        type: "APPLY_PATCH",
+        description: "Correct the implementation",
+        patch: [
+          "diff --git a/demo.txt b/demo.txt",
+          "--- a/demo.txt",
+          "+++ b/demo.txt",
+          "@@ -1 +1 @@",
+          "-demo file",
+          "+handled",
+          "",
+        ].join("\n"),
+      },
+      { type: "FINAL", success: true, summary: "Updated demo.txt." },
+    ];
+    let decisionCalls = 0;
+    const client: LlmClient = {
+      completeText: async (input) => {
+        expect(input.mode).toBe("task_understanding");
+        return {
+          success: true,
+          text: JSON.stringify({
+            operation: "CHANGE_REPOSITORY",
+            target: "REPOSITORY",
+            answerShape: "FREEFORM",
+            answerDepth: "BALANCED",
+            externalFactPolicy: "NOT_EXTERNAL_FACT",
+            explicitWeb: false,
+            explicitRepositoryTarget: true,
+            explicitMutation: true,
+            completeFileRead: false,
+            confidence: 0.95,
+            ambiguities: [],
+            rationale: "The user asks to correct the named repository file.",
+          }),
+        };
+      },
+      chat: async () => decisions[Math.min(decisionCalls++, decisions.length - 1)]!,
+    };
+    const progress: AgentProgressEvent[] = [];
+    const loop = createLoop({ llmClient: client, onProgress: (event) => { progress.push(event); } });
+
+    const result = await loop.run({
+      userGoal: "demo.txt 这个实现看着不太对，你处理一下",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe("handled\n");
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "understanding",
+      source: "MODEL_REFINED",
+      operation: "CHANGE_REPOSITORY",
+    }));
+  });
+
+  it("does not apply a writer proposal when a required dependent review exhausts its budget", async () => {
+    const client = new ScriptedLlmClient([{
+      type: "DELEGATE",
+      reason: "Use the requested writer and reviewer",
+      tasks: [
+        {
+          id: "writer",
+          role: "implementation_agent",
+          objective: "Update demo.txt",
+          focusPaths: ["demo.txt"],
+          access: "PROPOSE_CHANGES",
+          dependsOn: [],
+        },
+        {
+          id: "reviewer",
+          role: "change_reviewer",
+          objective: "Review the proposal",
+          focusPaths: ["demo.txt"],
+          access: "REVIEW_CHANGES",
+          dependsOn: ["writer"],
+        },
+      ],
+    }]);
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => ({
+        batchId: "partial-review",
+        status: "PARTIAL",
+        results: [
+          {
+            taskId: "writer",
+            role: "implementation_agent",
+            objective: tasks[0]!.objective,
+            status: "COMPLETED",
+            summary: "Writer proposal",
+            evidence: [{ path: "demo.txt" }],
+            toolsCalled: ["read_file"],
+            proposedPatch: [
+              "diff --git a/demo.txt b/demo.txt",
+              "--- a/demo.txt",
+              "+++ b/demo.txt",
+              "@@ -1 +1 @@",
+              "-seed",
+              "+delegated",
+              "",
+            ].join("\n"),
+            changedFiles: ["demo.txt"],
+            usage: emptySubAgentUsage(),
+          },
+          {
+            taskId: "reviewer",
+            role: "change_reviewer",
+            objective: tasks[1]!.objective,
+            status: "FAILED",
+            summary: "Invalid JSON in LLM response",
+            error: "Invalid JSON in LLM response",
+            evidence: [],
+            toolsCalled: [],
+            usage: emptySubAgentUsage(),
+          },
+        ],
+        usage: emptySubAgentUsage(),
+        maxParallelAgents: 1,
+        durationMs: 10,
+      }),
+    };
+    const loop = createLoop({ llmClient: client, subAgentCoordinator: coordinator });
+    const userGoal = "请用两个subagent修改 demo.txt，一个实现，一个review";
+    const result = await loop.run({
+      userGoal,
+      taskContract: repositoryContract(userGoal),
+      autoApprove: true,
+      nonInteractive: true,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true, maxBatchesPerRun: 1 },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("REQUIRED_DELEGATION_EXHAUSTED");
+    expect(result.error).toContain("dependent child review");
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe("demo file\n");
+    expect(client.getCallInputs()).toHaveLength(1);
+  });
+
+  it("rejects a delegated patch that conflicts with parent changes after the child baseline", async () => {
+    const baselineFingerprint = await fingerprintWorkingTree(repoPath);
+    const client = new ScriptedLlmClient([
+      {
+        type: "DELEGATE",
+        reason: "Use the requested writer",
+        tasks: [{
+          id: "writer",
+          role: "implementation_agent",
+          objective: "Update demo.txt",
+          focusPaths: ["demo.txt"],
+          access: "PROPOSE_CHANGES",
+          dependsOn: [],
+        }],
+      },
+      { type: "APPLY_DELEGATED_PATCH", taskId: "writer", description: "Merge writer proposal" },
+    ]);
+    const coordinator: SubAgentCoordinator = {
+      runBatch: async ({ tasks }) => {
+        await fs.writeFile(path.join(repoPath, "demo.txt"), "parent concurrent change\n", "utf8");
+        return {
+          batchId: "conflicting-writer",
+          status: "COMPLETED",
+          results: [{
+            taskId: "writer",
+            role: "implementation_agent",
+            objective: tasks[0]!.objective,
+            status: "COMPLETED",
+            summary: "Writer proposal",
+            evidence: [{ path: "demo.txt" }],
+            toolsCalled: ["read_file", "apply_patch"],
+            proposedPatch: [
+              "diff --git a/demo.txt b/demo.txt",
+              "--- a/demo.txt",
+              "+++ b/demo.txt",
+              "@@ -1 +1 @@",
+              "-demo file",
+              "+delegated",
+              "",
+            ].join("\n"),
+            changedFiles: ["demo.txt"],
+            baselineFingerprint,
+            workspaceKind: "GIT_WORKTREE",
+            usage: emptySubAgentUsage(),
+          }],
+          usage: emptySubAgentUsage(),
+          maxParallelAgents: 1,
+          durationMs: 10,
+        };
+      },
+    };
+    const progress: AgentProgressEvent[] = [];
+    const loop = createLoop({
+      llmClient: client,
+      subAgentCoordinator: coordinator,
+      onProgress: (event) => { progress.push(event); },
+    });
+    const userGoal = "请用subagent修改 demo.txt";
+    const result = await loop.run({
+      userGoal,
+      taskContract: repositoryContract(userGoal),
+      autoApprove: true,
+      nonInteractive: true,
+      maxSteps: 3,
+      multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("DELEGATED_PATCH_CONFLICT");
+    await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8"))
+      .resolves.toBe("parent concurrent change\n");
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "DELEGATED_PATCH_CONFLICT",
+    }));
   });
 
   it("restores an interrupted checkpoint and isolates it after successful completion", async () => {
@@ -377,6 +808,7 @@ describe("AgentLoop", () => {
     const resumed = await createLoop({ sessionStore, eventStore, llmClient: resumedClient }).run({
       sessionId: session.sessionId,
       userGoal: "Create notes.txt containing hello.",
+      taskContract: repositoryContract("Create notes.txt containing hello."),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -398,7 +830,8 @@ describe("AgentLoop", () => {
       nonInteractive: true,
     });
     expect(next.success).toBe(true);
-    expect(nextClient.getCallInputs()[0]?.state.recoveredFromCheckpoint).toBe(false);
+    expect(nextClient.getTextCallInputs()).toHaveLength(1);
+    expect(nextClient.getTextCallInputs()[0]?.context).not.toContain("Recovered after interruption");
   });
 
   it("records last error context when a command fails and continues", async () => {
@@ -431,6 +864,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "simulate command failure",
+      taskContract: repositoryContract("simulate command failure"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -467,6 +901,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "verify the current behavior",
+      taskContract: repositoryContract("verify the current behavior"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -483,6 +918,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "demo: needs patch approval",
+      taskContract: repositoryContract("demo: needs patch approval"),
       autoApprove: false,
       nonInteractive: true,
     });
@@ -510,6 +946,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "try shell bypass",
+      taskContract: repositoryContract("try shell bypass"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -530,6 +967,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "request an unknown tool",
+      taskContract: repositoryContract("request an unknown tool"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -551,6 +989,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "send invalid tool input",
+      taskContract: repositoryContract("send invalid tool input"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -680,6 +1119,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "Update value.mjs to export 2 and verify its syntax.",
+      taskContract: repositoryContract("Update value.mjs to export 2 and verify its syntax."),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -883,7 +1323,11 @@ describe("AgentLoop", () => {
       llmClient: new ScriptedLlmClient([
         { type: "TOOL_CALL", toolName: "web_search", input: { query: "Kanye West most famous songs" } },
         { type: "TOOL_CALL", toolName: "web_search", input: { query: "Kanye West famous notable songs" } },
-        { type: "FINAL", success: true, summary: "已按“知名歌曲”范围检索，没有改成歌曲排名。" },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "已按“知名歌曲”而非排名范围检索，代表性结果包括：Stronger、Gold Digger、Heartless。",
+        },
       ]),
     });
 
@@ -1000,6 +1444,7 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "keep failing",
+      taskContract: repositoryContract("keep failing"),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -1008,6 +1453,49 @@ describe("AgentLoop", () => {
     expect(result.error).toContain("failed too many consecutive steps");
     const events = await eventStore.readEvents(result.sessionId);
     expect(eventTypes(events)).toContain("TASK_FAILED");
+  });
+
+  it("reports repeated guardrail failures separately from model or tool failures", async () => {
+    const loop = createLoop({
+      llmClient: new ScriptedLlmClient([
+        { type: "FINAL", success: true, summary: "Unverified answer one." },
+        { type: "FINAL", success: true, summary: "Unverified answer two." },
+        { type: "FINAL", success: true, summary: "Unverified answer three." },
+        { type: "FINAL", success: true, summary: "Unverified answer four." },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "OpenAI 最新的模型是什么？",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("could not satisfy guardrail FINAL_WITHOUT_WEB_SEARCH");
+    expect(result.error).not.toContain("failed too many consecutive steps");
+  });
+
+  it("removes tools and constrains the model when the Web final-synthesis reserve starts", async () => {
+    const client = new ScriptedLlmClient([
+      { type: "PLAN", message: "Inspect the task." },
+      { type: "PLAN", message: "Prepare the research plan." },
+      { type: "FAILED", error: "Insufficient evidence in the reserved synthesis step." },
+    ]);
+    const loop = createLoop({ llmClient: client });
+
+    await loop.run({
+      userGoal: "Claude 最新的模型是什么？",
+      maxSteps: 4,
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    const synthesisInput = client.getCallInputs()[2];
+    expect(synthesisInput?.decisionConstraint).toBe("FINAL_ONLY");
+    expect(synthesisInput?.availableTools).toEqual([]);
+    expect(synthesisInput?.context).toContain("Phase: SYNTHESIZE");
+    expect(synthesisInput?.context).toContain("Required next action: LIMITATION_FINAL");
   });
 
   it("uses only read-only tools and completes a write-task plan without changing files", async () => {
@@ -1112,6 +1600,14 @@ function webSearchOnlyContract(userGoal: string) {
   };
 }
 
+function repositoryContract(userGoal: string) {
+  return buildAgentTaskContract({
+    userGoal,
+    route: { intent: "AGENT_LOOP", reason: "explicit AgentLoop test harness contract" },
+    multiAgentEnabled: true,
+  });
+}
+
 function scriptedDemoDecisions(): AgentDecision[] {
   return [
     {
@@ -1173,4 +1669,18 @@ function toolNames(records: SessionRecord[]): string[] {
     .filter((record) => record.type === "TOOL_CALL")
     .map((record) => record.payload.toolName)
     .filter((toolName): toolName is string => typeof toolName === "string");
+}
+
+function emptySubAgentUsage() {
+  return {
+    steps: 1,
+    llmCalls: 1,
+    toolCalls: 1,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cachedPromptTokens: 0,
+    reasoningTokens: 0,
+    usageAvailable: false,
+  };
 }

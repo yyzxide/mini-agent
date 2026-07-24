@@ -9,6 +9,7 @@ import {
   resolveLlmConfig,
   resolveMultiAgentPolicy,
 } from "../../src/config/AgentConfig.js";
+import { classifySubAgentIntent } from "../../src/agent/SubAgentIntent.js";
 
 let tempRoot: string;
 
@@ -151,8 +152,12 @@ describe("AgentConfig", () => {
     expect(redactAgentConfig(config).llm?.apiKey).toBe("<redacted>");
   });
 
-  it("keeps multi-agent off by default and supports bounded config or CLI opt-in", async () => {
-    expect(resolveMultiAgentPolicy({ version: 1 })).toMatchObject({ enabled: false, maxConcurrency: 2 });
+  it("keeps multi-agent available by default with semantic and CLI overrides", async () => {
+    expect(resolveMultiAgentPolicy({ version: 1 })).toMatchObject({ enabled: true, maxConcurrency: 2 });
+    expect(resolveMultiAgentPolicy({
+      version: 1,
+      multiAgent: { mode: "off" },
+    })).toMatchObject({ enabled: false });
     expect(resolveMultiAgentPolicy({
       version: 1,
       multiAgent: { mode: "auto", maxConcurrency: 3, maxChildSteps: 6 },
@@ -162,6 +167,11 @@ describe("AgentConfig", () => {
       maxConcurrency: 1,
     });
     expect(resolveMultiAgentPolicy({ version: 1 }, 3)).toMatchObject({ enabled: true, maxConcurrency: 3 });
+    expect(resolveMultiAgentPolicy(
+      { version: 1, multiAgent: { mode: "off" } },
+      undefined,
+      classifySubAgentIntent("请使用3个subagent并行分析这个仓库"),
+    )).toMatchObject({ enabled: false, maxConcurrency: 3 });
   });
 });
 

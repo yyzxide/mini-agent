@@ -9,11 +9,14 @@ import { createConfiguredToolRegistry } from "../mcp/McpRegistryLoader.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import { createOpenAICompatibleClient, createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
-import { ReadonlySubAgentCoordinator } from "../agent/ReadonlySubAgentCoordinator.js";
+import { IsolatedSubAgentCoordinator } from "../agent/IsolatedSubAgentCoordinator.js";
 import { loadAgentConfig, resolveMultiAgentPolicy } from "../config/AgentConfig.js";
+import { classifySubAgentIntent } from "../agent/SubAgentIntent.js";
 import { resolveLlmConfig } from "../config/AgentConfig.js";
 import type { AgentTaskContract } from "../agent/AgentTaskContract.js";
 import { createDefaultAgentTaskContract } from "../agent/AgentTaskContract.js";
+import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
+import { routeTask } from "../agent/TaskRouter.js";
 import {
   buildConversationHistoryWithTrace,
   estimateConversationTokens,
@@ -58,6 +61,14 @@ export async function runAgentLoopTask(
   const resolvedQuestion = taskContract.kind === "DIRECT_RESPONSE" || taskContract.kind === "WEB_RESEARCH"
     ? resolveFollowUpQuestion(userGoal, conversationHistory.messages)
     : undefined;
+  const resolvedQuestionContract = resolvedQuestion && resolvedQuestion !== userGoal
+    ? buildAgentTaskContract({
+      userGoal: resolvedQuestion,
+      route: routeTask(resolvedQuestion),
+      operatingMode: options.operatingMode ?? "EXECUTE",
+      multiAgentEnabled: false,
+    })
+    : taskContract;
   const configuredModel = options.model ?? await loadAgentConfig(repoPath)
     .then((config) => resolveLlmConfig(config).openai.model)
     .catch(() => undefined);
@@ -85,8 +96,8 @@ export async function runAgentLoopTask(
       : []),
   ];
   const effectiveContract: AgentTaskContract = {
-    ...taskContract,
-    instructions: [...taskContract.instructions, ...contextualInstructions],
+    ...resolvedQuestionContract,
+    instructions: [...resolvedQuestionContract.instructions, ...contextualInstructions],
     ...(deterministicAnswer ? { deterministicAnswer } : {}),
   };
   const verbosity: RuntimeVerbosity = options.trace === true
@@ -100,7 +111,13 @@ export async function runAgentLoopTask(
     }
   };
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
-  const multiAgent = resolveMultiAgentPolicy(await loadAgentConfig(repoPath), options.agents);
+  const effectiveGoal = resolvedUserGoal ?? resolvedQuestion ?? userGoal;
+  const subAgentIntent = classifySubAgentIntent(effectiveGoal);
+  const multiAgent = resolveMultiAgentPolicy(
+    await loadAgentConfig(repoPath),
+    options.agents,
+    subAgentIntent,
+  );
   const llmClient = await createOpenAICompatibleClient(repoPath, options);
   const { registry: toolRegistry, diagnostics } = effectiveContract.capabilities.mcpAccess
     ? await createConfiguredToolRegistry(repoPath)
@@ -124,7 +141,7 @@ export async function runAgentLoopTask(
     ...(prompt ? { askUser: prompt } : {}),
     ...(multiAgent.enabled
       ? {
-        subAgentCoordinator: new ReadonlySubAgentCoordinator({
+        subAgentCoordinator: new IsolatedSubAgentCoordinator({
           repoPath,
           createLlmClient: async () => await createOpenAICompatibleClient(repoPath, options),
         }),
@@ -133,7 +150,7 @@ export async function runAgentLoopTask(
   });
 
   const result = await loop.run({
-    userGoal: resolvedUserGoal ?? resolvedQuestion ?? userGoal,
+    userGoal: effectiveGoal,
     ...((resolvedUserGoal || resolvedQuestion) ? { originalUserGoal: userGoal } : {}),
     ...(options.session ? { sessionId: options.session } : {}),
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
