@@ -8,6 +8,7 @@
 
 - 交互式 CLI 和一次性 `run`。
 - 单一 `AgentLoop` + `AgentTaskContract`，统一执行 Direct、Web、Review、Repository Analysis 和 Repository Task。
+- `TaskUnderstanding` 统一解释操作、目标、回答形态、证据等级和仓库意图；默认契约 deny-by-default。
 - 真实 OpenAI-compatible API 接入。
 - 结构化 `AgentDecision`。
 - `ToolRegistry`、zod 输入校验和结构化 `ToolResult`。
@@ -24,6 +25,7 @@
 - 版本化运行事件、实时命令输出、Token/缓存/压缩遥测，以及按需打开的任务级终端 Diff Viewer。
 - 声明式 Skill 发现、校验、自动/显式选择以及全模式上下文注入。
 - Session 持久化的只读 Plan 模式和 `/plan` -> `/execute` 闭环，带运行时写操作硬拦截。
+- 默认可用的语义多 Agent 协作：并行只读调查、临时 worktree 实现与受限验证、依赖式变更审查、基线冲突检测和主 Agent 显式合入。
 - Agent Harness：脚本化 LLM + 临时仓库 + AgentLoop 场景评测。
 - 当前测试基线以 [中文 README](README.md#核心回归测试) 的最近一次全量验证结果为准。
 
@@ -46,7 +48,9 @@
 当前已有 `DecisionParser` 和 `TaskGuardrails`，下一步重点：
 
 - 对工具调用参数做更细的语义校验。
-- 对 `FINAL success` 加更多后置条件。
+- 扩展已落地的 `AnswerQualityPolicy`，用释义/对抗离线 Eval 校准定义、数量、枚举、有界关系和解释型回答的漏拦与误拦。
+- 为 `TaskUnderstanding` 增加按语义维度生成的误路由、权限过宽和短追问谓词丢失指标，避免回到主题白名单。
+- 将 Web 页面可用性从 WAF/CAPTCHA/登录壳扩展到软 404、无正文 SPA、地区限制和订阅墙。
 - 对连续无效 patch / 同一错误循环做更明确的 recovery prompt。
 - 把 guardrail violation 变成可统计指标。
 

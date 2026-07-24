@@ -43,7 +43,7 @@ Chinese project notes live under [`docs/zh-CN`](docs/zh-CN/README.md), including
 - Provides AgentBench v1 with versioned scripted/real-model datasets, pass@1/pass@k, quality gates, baseline regression checks, token/cache/latency/context metrics, and failure classification.
 - Persists compact versioned Agent checkpoints and restores interrupted Working Set, side-effect, verification, and in-flight-action state without replaying raw patches or command output.
 - Enforces a deterministic task-completion contract: source/configuration changes require a successful verification after the latest patch, while documentation-only changes do not pay that cost.
-- Supports opt-in controlled multi-agent investigation: one parent is the sole writer, while two or three isolated children inspect independent repository concerns in parallel using only local closed-world read-only tools.
+- Supports semantic multi-agent collaboration by default: natural-language requests can delegate parallel investigation, isolated patch proposals, and dependent change review; only the parent can merge a child patch into the working tree.
 - Grades verification evidence as `DIFF_HYGIENE < SYNTAX < STATIC < TEST`, checks file scope, and requires stronger evidence for compiled source, configuration, bug-fix, regression, refactor, and test changes.
 - Classifies common pasted runtime errors locally before asking the model, including wrong working directory, missing commands, occupied ports, refused connections, and permission errors.
 - Searches code with `rg`.
@@ -121,10 +121,10 @@ Edit `mini-agent.config.json`:
     "maxContextChars": 6000
   },
   "multiAgent": {
-    "mode": "off",
+    "mode": "auto",
     "maxConcurrency": 2,
-    "maxBatchesPerRun": 1,
-    "maxTasksPerRun": 3
+    "maxBatchesPerRun": 2,
+    "maxTasksPerRun": 6
   }
 }
 ```
@@ -196,23 +196,23 @@ mini-agent run "inspect repository" --base-url "https://api.example.com/v1"
 mini-agent run "inspect repository" --event-stream
 mini-agent run "fix the failing test" --verbose
 mini-agent run "inspect repository" --trace
-mini-agent run "explain the current design trade-offs" --agent-loop
+mini-agent run "explain the current design trade-offs" --iterative
 mini-agent run "inspect the context and memory architecture" --agents 3
 ```
 
 `--event-stream` prints machine-readable `MINI_AGENT_EVENT {...}` lines while still writing normal local session/event files.
 `--verbose` expands tool inputs, context compaction, cache, token, and timing telemetry. `--trace` additionally prints redacted AgentDecision payloads and per-section context allocation.
-`--agent-loop` keeps the routed task capabilities unchanged but forces a direct response to use the iterative decision protocol instead of the single-shot optimization.
-`--agents 2..3` opts repository tasks into one bounded read-only delegation batch. `--agents 1` disables delegation. It is off by default; config can enable it with `multiAgent.mode: "auto"`.
+`--iterative` keeps the routed task capabilities unchanged but forces a direct response to use the iterative decision protocol instead of the single-shot optimization. `--agent-loop` remains as a deprecated compatibility alias.
+Multi-agent collaboration is available by default for repository tasks. The Agent may select it when decomposition materially helps, and an explicit natural-language request such as “use two subagents: one implements and one reviews” makes delegation a completion requirement. `--agents 2..3` overrides concurrency; `--agents 1`, `multiAgent.mode: "off"`, or “do not use subagents” disables it for the applicable scope.
 
 ## Unified Agent Runtime
 
-Every request now runs through one `AgentLoop`. `TaskRouter` no longer selects four independent executors; it provides a semantic hint that is compiled into an `AgentTaskContract`. The contract controls tools, write/command permissions, evidence thresholds, output shape, and step budget:
+Every request now runs through one `AgentLoop`. `TaskUnderstanding` first produces one shared semantic record. Structurally simple requests and high-confidence short follow-ups stay deterministic; conditionals, complex negation, and indirect actions can receive a conversation-aware, schema-validated model refinement whose result is merged under local deny-by-default safety rules. `TaskRouter` maps the final record to compatibility labels, and `TaskContractBuilder` compiles it into an `AgentTaskContract`. The contract controls tools, write/command permissions, evidence thresholds, output shape, and step budget. The fallback contract grants no tools or repository permissions:
 
 - `DIRECT_RESPONSE`: one AgentLoop step, no tools, no repository access, output `[answer]`.
 - `WEB_RESEARCH`: iterative AgentLoop with only `web_search` and `fetch_url`; live claims require fetched pages from two independent domains and citations must use URLs gathered in the current run. Output `[answer]`.
 - `REPOSITORY_INVESTIGATION`: the shared read-only profile for both code review and repository analysis. Their only architectural difference is the output contract (`CODE_REVIEW` or `REPOSITORY_ANALYSIS`).
-- `REPOSITORY_TASK`: repository reading, patches, controlled commands, verification, optional RAG/MCP, and bounded read-only delegation.
+- `REPOSITORY_TASK`: repository reading, patches, controlled commands, verification, optional RAG/MCP, and bounded multi-agent collaboration.
 - `KNOWLEDGE_QUERY`: only the indexed `knowledge_search` capability, with exact file-and-line citation postconditions.
 - `PLAN`: a persisted read-only operating mode layered over the relevant task contract. Patches and commands are blocked again at execution time.
 
@@ -226,7 +226,7 @@ LLM telemetry distinguishes prompt, completion, reasoning, prompt-cache read, an
 
 Task-contract capabilities are per-request least-privilege boundaries, not a global product capability list. Product meta-questions such as “what can you do?”, “can you access the web?”, “can you write files?”, or “why did you say you could not?” are answered deterministically from local product/session facts. They do not trigger web research merely because their text mentions networking.
 
-The timeline deliberately does not expose hidden model chain-of-thought. It shows the explicit plan, structured decisions, evidence, tool inputs/results, and deterministic guardrail reasons instead. Machine-readable events and trace payloads are redacted before being printed.
+The timeline deliberately does not expose hidden model chain-of-thought. It shows explicit plans, concise action rationales, structured decisions, evidence, tool inputs/results, subagent protocol recovery, exact terminal errors, and deterministic guardrail reasons instead. Provider-reported reasoning tokens remain in normal LLM/usage telemetry; `--verbose` adds the private-field availability signal, while `--trace` also explains the display policy. Raw `reasoning_content` is neither printed as a trace nor used as a Direct answer. Machine-readable events and trace payloads are redacted before being printed.
 
 Repository-writing tasks finish with a compact `Changes` card instead of dumping unified diff text into the execution timeline. In an interactive TTY, click the card or press Enter at the changes action to open the built-in full-screen terminal diff viewer; use arrow keys to select a file, PageUp/PageDown or the mouse wheel to scroll, and `q`/Escape to return. Non-interactive runs print `mini-agent diff --session <id>` as the fallback. Task diffs come from isolated before/after working-tree snapshots, so they include new untracked code or documentation files without mixing in changes that already existed before the task.
 
@@ -289,7 +289,7 @@ For a quick pre-demo gate:
 npm run verify:regression
 ```
 
-Current normal-environment gate: 39 Vitest files and 288 tests, along with TypeScript type checking and unused-symbol checks.
+Current normal-environment gate: 60 Vitest files and 530 tests, along with TypeScript type checking and unused-symbol checks.
 
 Interactive slash commands:
 
@@ -526,7 +526,7 @@ Included:
 - real OpenAI-compatible LLM client
 - task router for direct answers vs repository edits
 - agent loop
-- opt-in parent/child multi-agent investigation with a single-writer boundary and bounded parallel read-only children
+- semantic parent/child collaboration with parallel investigation, isolated patch proposals, dependent review, and a parent-only merge boundary
 - phase-aware Context Engine v2 with Working Set, token budgeting, structured session compaction, and context traces
 - tool registry
 - path-safe file tools

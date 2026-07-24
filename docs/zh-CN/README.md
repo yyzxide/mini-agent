@@ -22,7 +22,7 @@
 - `DIRECT_RESPONSE`：单步回答契约，不开放工具和仓库访问，输出 `[answer]`。
 - `WEB_RESEARCH`：只开放 `web_search` / `fetch_url`；实时事实要求两个独立域名的可读正文，最终引用必须来自本轮工具证据，输出 `[answer]`。
 - `REPOSITORY_INVESTIGATION`：代码审查与仓库分析共用的只读调查契约。两者只在输出要求上不同，分别输出 `[review]` 或 `[summary]`。
-- `REPOSITORY_TASK`：开放仓库读取、补丁、受控命令、验证、RAG/MCP 和可选只读子 Agent。
+- `REPOSITORY_TASK`：开放仓库读取、补丁、受控命令、验证、RAG/MCP，以及默认可用的多 Agent 调查、隔离补丁提案和依赖式审查；只有主 Agent 能合入提案。
 - `KNOWLEDGE_QUERY`：只使用 `knowledge_search`，最终回答必须保留文件与行号引用。
 - `PLAN`：叠加在任务契约上的只读操作模式，运行时再次硬拦补丁和命令。
 
