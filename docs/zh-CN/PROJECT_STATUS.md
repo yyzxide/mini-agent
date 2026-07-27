@@ -1,217 +1,198 @@
-# 项目现状评估
+# 项目现状
 
-本文档用于回答三个很实际的问题：
+本文描述 `mini-coding-agent` 当前能够被代码和测试证明的能力、适合的项目定位，以及仍然存在的工程边界。
 
-1. 这个项目现在到底算不算合格。
-2. 如果写进简历，强度够不够。
-3. 和 `Claude Code` / `Codex` 这类成熟产品相比，我们差在哪里。
+它不再使用百分制自评。主观高分无法证明可靠性，反而会掩盖真实的设计取舍。面试或项目介绍应引用具体能力、测试、演示和限制。
 
-## 一句话结论
+## 一句话定位
 
-截至本轮修复，`mini-coding-agent` 已经是一个**可以写进简历、可以演示、可以继续打磨的合格偏上项目**。
+`mini-coding-agent` 是一个本地运行、可审计、契约驱动的 AI Coding Agent CLI。它重点解决自然语言任务理解、最小权限工具执行、上下文治理、证据完成性、仓库变更和隔离式多 Agent 协作。
 
-但它还不是成熟产品级 Agent，更接近：
+当前成熟度可以描述为：
 
-- **简历强度**：合格偏上
-- **工程完成度**：MVP+
-- **产品成熟度**：离 `Claude Code` / `Codex` 还有明显差距
+- 作品级、高完成度工程原型；
+- 适合简历、架构讲解和现场演示；
+- 核心闭环完整，但不是生产级商业 Coding Agent。
 
-## 100 分制评分
+## 当前验证基线
 
-### 结论分数：94 / 100
+截至 2026-07-27，本地确定性验证基线为：
 
-| 维度 | 分值 | 当前评分 | 说明 |
-| --- | --- | --- | --- |
-| CLI 可用性 | 15 | 15 | 除常规 run/review/session 外，现已具备 Skill 管理、长期记忆控制和 `/plan`→`/execute` 交互闭环。 |
-| 工具系统 | 15 | 15 | 本地工具与 MCP stdio/Streamable HTTP 远端工具统一注册，具备工具发现、名称隔离、权限映射、调用转发、审计和生命周期关闭。 |
-| Session、日志与记忆 | 15 | 15 | 长期记忆覆盖所有模式，支持真实 embedding provider、TTL、置信度、同主题替代、失败过滤、密钥脱敏，以及可追溯的分层压缩。 |
-| Agent Loop 设计 | 15 | 13 | 除原有决策循环和质量闸门外，新增运行时硬约束的只读 Plan 模式；通用决策策略仍偏启发式。 |
-| 问答与上下文体验 | 15 | 12 | 已用统一 AgentLoop 覆盖 direct/web/review/analysis/repository task 契约；产品能力由 Registry 统一供给，并有组合式意图识别和输出事实校验，但开放域追问理解仍有限。 |
-| 代码结构 | 10 | 9 | 任务执行已统一为 AgentLoop + TaskContract，终端与机器事件流共用版本化 Runtime Event；`index.ts` 仍可继续拆交互命令注册。 |
-| 测试与可回归性 | 10 | 10 | 当前正常环境回归基线为 51 个测试文件、423 个测试用例，覆盖统一 TaskContract、产品能力纠偏、完整文件与超长单行读取、能力隔离、产物追问解析、任务级 Diff Viewer、终端遥测、存储并发恢复、MCP 双 transport、Web 证据闸门、Memory、RAG、embedding cache 和 Eval。 |
-| 产品化程度 | 5 | 4 | CLI 已具备运行时间线、实时命令输出、Token/缓存/压缩遥测、任务级 Diff Viewer 和机器事件流；但仍缺少持续式全屏 TUI、配置 profile 和完整插件机制。 |
+- 62 个 Vitest 测试文件；
+- 549 个自动化测试；
+- TypeScript 构建通过；
+- `noUnusedLocals` / `noUnusedParameters` 检查通过；
+- `git diff --check` 通过；
+- GitHub Actions 在 `main` 的 push 和 pull request 上执行安装、构建与测试。
 
-## 为什么说它已经“合格”
+测试数量只是当前快照，不是质量本身。更重要的是覆盖范围包含权限边界、失败路径和端到端 AgentLoop，而不只是工具函数。
 
-因为它已经不只是一个“调用一下大模型 API 的壳子”，而是具备了 Agent 项目的几个关键骨架：
+## 已完成的核心闭环
 
-- 有**任务路由**，不是所有输入都硬塞进代码编辑循环。
-- 有**工具系统**，并且是结构化参数校验，不是随手拼命令。
-- 有**真实 MCP tools runtime**，支持 stdio/Streamable HTTP 工具发现、权限映射、调用转发和生命周期关闭。
-- 有**权限边界**，补丁和命令执行不是裸奔。
-- 有**短期会话记忆和本地长期记忆检索**，不是每次都完全失忆。
-- 有**独立文档 RAG**，支持增量分块索引、混合检索、元数据过滤、行号引用、证据不足拒答和离线评测。
-- 有**本地审计记录**，出了问题能回放。
-- 有**代码审查模式**，说明项目开始从“只会改代码”往“会分析代码”走。
-- 有**联网资料模式**，说明它不是只能在 repo 里打转。
-- 有**声明式 Skill 系统**，能按任务选择本地工作流，但不允许 Skill 绕过现有权限。
-- 有**真正只读的 Plan 模式**，不只是输出一个 PLAN 进度消息，而是在工具暴露和运行时执行两层阻断写操作。
+### 1. 单一 AgentLoop
 
-如果面试官看到这些点，并且你能把设计讲明白，这个项目是站得住的。
+Direct Answer、Web Research、Code Review、Repository Analysis 和 Repository Change 最终都进入同一个 `AgentLoop`。任务差异由 `AgentTaskContract` 表达：
 
-本轮修复后，项目可信度提升主要来自工程底座，而不是“又堆了几个功能”：
+- 能使用哪些工具；
+- 是否允许读仓库、写仓库、执行命令、访问 Web 或委派；
+- 需要哪些证据；
+- 输出形态和回答深度；
+- 最大步骤与完成条件。
 
-- 产品能力集中到 `CapabilityRegistry`，提示词、本地回答与运行时纠偏共享同一事实源；能力咨询按语义信号组合识别，显式联网动作仍会进入 Web 契约。
-- `CapabilityTruthGuard` 会拦截模型对已注册联网/仓库写入能力的错误全局否认，写入可审计纠偏事件，同时不掩盖真实的单次权限或工具失败。
-- 大文件读取不再以“调用过一次 `read_file`”冒充完整证据：运行时合并分页区间、校验内容哈希、在 Checkpoint 中保存紧凑覆盖状态，并阻止未覆盖到 EOF 的完整审查提前结束。
-- Session Memory 压缩从字符比例与最近尾部升级为 `structured-salience-v2`：固定约束、最近对话和执行证据分层选择，同时受字符/Token 双预算控制，并保留来源与选择原因。
-- `PatchManager` 执行 `git apply --check/apply` 时固定 `core.autocrlf=false`，避免不同机器的 Git 换行配置影响 patch 结果。
-- `read_file` 和 `search_code` 会拒绝读取或搜索 `.git`、`.mini-agent` 等内部元数据路径。
-- `search_code` 统一返回 POSIX 风格路径，并跳过异常的 ripgrep JSON 行，避免一个坏行拖垮整个搜索结果。
-- `CommandRunner` 和 `AgentLoop` 相关测试去掉了 `printf`、`sh`、`false`、`sleep` 等 Unix-only 假设，Windows / Linux 下更稳定。
-- 当前通过 `tsc --noEmit`、`tsc --noUnusedLocals --noUnusedParameters`；正常环境 Vitest 基线为 51 个测试文件、423 个测试用例。
+旧模式名只作为兼容标签保存在 Session 和变更记录中，不再对应独立执行器。
 
-## 为什么还不能算“优秀 Agent 产品”
+### 2. 混合任务理解
 
-和 `Claude Code` / `Codex` 相比，当前差距主要不在“有没有命令”，而在下面这些层面：
+`TaskUnderstanding` 是语义控制面的统一记录。系统先用确定性逻辑处理高置信度简单请求和短追问；遇到条件、复杂否定或间接动作时，可请求模型返回受 Schema 约束的语义候选。
 
-### 1. 决策能力还偏启发式
+合并策略遵循以下边界：
 
-现在的很多模式切换仍依赖关键词、短追问补全、局部规则。
+- 显式只读约束不能被模型升级为写入；
+- 显式 Web 请求不能被降级为模型记忆回答；
+- 模型声称 `CHANGE_REPOSITORY` 时，还必须一致地给出修改意图；
+- 非法 JSON、低置信度或不可用的语义完成自动回退确定性结果；
+- Task Contract 只消费最终语义记录，不再重新猜测原句。
 
-当前已补充热门榜单、`trending`、近期赛果和“谁赢了”等时效意图，并支持把“切换吧 / 联网查吧 / 你用搜一下啊”这类确认语直接切入 `WEB_ANSWER`，同时复用上一轮真实问题；但更开放的混合意图仍需要继续扩大评测集。
+这不是完整的自然语言理解模型，但比为具体问句编写特殊分支更可泛化、也更可审计。
 
-这让它已经可用，但还不够稳：
+### 3. 可验证的仓库执行
 
-- 容易把模糊问题分错路由。
-- 对跨轮追问的真实意图理解还不够强。
-- 对“既要联网又要结合代码”的混合任务处理不够自然。
+仓库任务支持：
 
-### 2. 上下文管理还不够精细
+- 安全列目录、搜索和分页读文件；
+- 完整文件覆盖率追踪；
+- unified diff 检查与应用；
+- 结构化命令执行和实时输出；
+- 验证强度分级；
+- 最新补丁之后的验证时序检查；
+- 任务级 before/after diff；
+- 新文件与文档变更记录；
+- 中断 checkpoint 与恢复。
 
-我们已经有：
+成功 `FINAL` 不是模型单方面决定。运行时会检查是否真的产生了要求的修改、证据是否覆盖目标、测试是否相关且发生在最新补丁之后。
 
-- session transcript
-- 字符/Token 双预算的 `structured-salience-v2` memory compaction
-- `.mini-agent/memory/index.jsonl` 长期记忆索引
-- 关键词 + 本地向量式混合检索
-- query builder / retriever / reranker / evidence selector 分层
-- 按任务阶段和优先级选择的 readme / tree / diff / recent results 注入
-- 用户硬约束、最近对话、工具/命令证据的分层选择
-- 来源 id、裁剪/丢弃统计和选择原因 trace
+### 4. 隔离式多 Agent 协作
 
-但还没有做到更成熟的上下文治理，例如：
+多 Agent 在仓库任务中默认可用，但不强制每轮使用。自然语言可以表达自动选择、明确委派或明确禁用。
 
-- 使用供应商真实 tokenizer 代替启发式 Token 估算
-- 建立 Turn / Task / Session 多级摘要和过期策略
-- 对可选 LLM 语义摘要做来源约束、事实一致性检查和确定性回退
-- 建立约束召回率、事实保留率和后续任务正确率的压缩 Eval
-- 使用 SQLite/LanceDB/Qdrant 替换 JSONL 存储并提供 embedding 批量迁移
-- 对语义相近但标题不同的长期记忆增加更强冲突检测
+- 调查型子 Agent 使用只读工作区。
+- Writer 获得一次性 Git worktree，在隔离环境中修改文件、运行受限验证、继续修复并生成补丁。
+- Reviewer 在自己的工作区物化依赖补丁，审查修改后的真实文件。
+- 主 Agent 独占父工作区合入权。
+- 子任务携带父级基线指纹；父工作区变化后会重新校验补丁。
+- 冲突返回 `DELEGATED_PATCH_CONFLICT`，不会覆盖并发修改。
+- worktree 在成功、失败和异常路径都会清理。
 
-### 3. 联网能力还不够强
+Writer 的命令允许列表是应用层控制，不等同于容器或操作系统级强沙箱。
 
-当前联网工具本质上还是：
+### 5. Context、Conversation 与 Memory
 
-- `web_search`
-- `fetch_url`
-- 来源排序
-- 失败兜底
-- 实时问题双独立来源门槛
-- 回答引用 URL 白名单与一次自动重写
+系统明确区分：
 
-这已经比“裸搜一下”强很多了，但仍然没有：
+- Conversation：用户和助手可见对话；
+- Context：当前任务从多种来源选择的模型输入；
+- Session Memory：当前 Session 中经过结构化压缩的记录；
+- Long-term Memory：受写入/读取策略控制的偏好、约定、决策和已验证结果；
+- Prompt Cache：模型服务商报告的输入 Token 复用；
+- Embedding Cache：本地检索向量缓存。
 
-- 专门的实时体育 / 金融 / 新闻 API
-- 更稳定的官方源识别
-- 多来源冲突校验
-- 逐条 claim-source 对齐
+Context 使用字符与 Token 双预算，并记录选中、裁剪和排除原因。短追问会优先解析最近 exchange、artifact 和本地事实，避免把“文件在哪里”回答成产品能力介绍。
 
-### 4. CLI 执行链已统一为 TaskContract + AgentLoop
+### 6. Web 证据闭环
 
-`src/cli/index.ts` 已从约 4270 行降到约 2450 行，Tool/MCP 命令、终端事件 Renderer 和 Diff Viewer 已拆出；入口仍主要承担：
+Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效候选比较、任务相关证据阈值和引用白名单。
 
-- 命令注册
-- 交互模式
-- task route 决策衔接
-- session summary / history / logs / changes 输出
+已处理的典型失败包括：
 
-旧的 `DirectAnswerTask.ts`、`WebAnswerTask.ts`、`CodeReviewTask.ts` 和 `RepositoryAnalysisTask.ts` 已删除。现在由 `TaskContractBuilder` 把路由提示编译成 `AgentTaskContract`，所有 CLI 任务只调用 `AgentLoopTask.ts`：
+- 搜索传输失败后反复改写同义查询；
+- 猜测可能存在的官方 URL；
+- 搜索成功但抓取证据不足；
+- 搜索排名被误当成时间排序；
+- Guardrail 只拒绝、不告诉 Agent 下一步；
+- 接近步数上限时继续调用工具而没有预留综合回答。
 
-- Direct 使用单步、无工具契约。
-- Web 使用仅开放公网工具并带来源门槛的迭代契约。
-- Review 与 RepositoryAnalysis 共用只读 `REPOSITORY_INVESTIGATION` 契约。
-- RepositoryTask 才开放补丁、命令、MCP 和委派。
+底层搜索服务的召回质量仍然会影响结果。Agent 可以改善查询、证据选择和诚实降级，但无法从未召回的页面中恢复事实。
 
-Session 创建、事件初始化、LLM 客户端和 Token 用量仍由 `CliTaskRuntime.ts` 提供。新记录保留旧模式标签以兼容历史数据，同时增加统一执行引擎、任务类型和输出类型元数据。
+### 7. 可观察性与本地审计
 
-## 目前最值得保留的亮点
+终端时间线和版本化 `AgentRuntimeEvent` 覆盖：
 
-如果写简历或面试讲项目，最值得讲的不是“我会调 API”，而是这些：
+- Conversation 和 Context；
+- 显式计划和结构化 Decision；
+- LLM Token、reasoning Token 和 Prompt Cache 指标；
+- 工具输入、结果和耗时；
+- Patch、命令实时输出与验证；
+- 子 Agent worktree、文件、命令和协议恢复；
+- Guardrail 原因；
+- Changes 卡片与 Diff Viewer；
+- Session、Checkpoint、runtime log 和 change log。
 
-1. **单 AgentLoop + TaskContract 能力隔离**
-2. **结构化 ToolRegistry + zod 校验**
-3. **本地 session/event/log/change-log 审计**
-4. **补丁检查与命令执行保护**
-5. **Direct/Web/Review/Analysis 的统一执行生命周期**
-6. **短追问补全和 session 记忆复用**
-7. **按任务契约执行的本地证据和完成性门禁**
-8. **跨平台回归测试和工具安全边界**
+系统不显示隐藏思维链。可审计性来自计划、行动理由、结构化决策、工具证据和本地规则，而不是泄露私有推理文本。
 
-## 当前明确短板
+### 8. 扩展能力
 
-下面这些是现在最真实、最需要承认的短板：
+当前还实现了：
 
-1. `TaskRouter` 仍是规则驱动，泛化能力一般。
-2. `WEB_RESEARCH` 契约和公网工具仍会受到数据源质量限制。
-3. 长期记忆已有真实 embedding、TTL、置信度和同主题替代，但存储仍是 repo-local JSONL，不会自动跨机器同步。
-4. Agent Harness 已有 suite 指标与失败分类，但真实任务 scenario 数量还不够多。
-5. MCP 已支持 tools runtime，但尚未覆盖 resources/prompts、server-initiated request、OAuth 和旧 SSE 回退。
-6. CLI 命令注册与部分交互状态仍集中在入口文件，后续扩展更多 TUI 面板前需要继续拆分交互控制层。
+- 声明式 `SKILL.md` 发现和受控上下文注入；
+- 真正只读的 Plan 模式；
+- MCP stdio / Streamable HTTP tools runtime；
+- repository-local Markdown/TXT RAG；
+- 本地/远程 Embedding 与缓存；
+- AgentBench 脚本化和真实模型评测入口；
+- Capability Registry 与产品能力事实校验；
+- 环境诊断、日志和 Session 调试命令。
 
-## 后续优化优先级
+这些能力共享现有权限系统，不能绕过 Task Contract。
 
-### P0：必须做
+## 当前真实短板
 
-1. 把 `src/cli/index.ts` 中的交互命令注册和状态展示继续拆为独立模块
-2. 给 task routing、follow-up rewrite、web answer 增加更多回归测试
-3. 为联网回答增加 claim-source 对齐和多来源冲突检测
-4. 为不同 output contract 增加更丰富的结构化结果组件
-5. 扩展 Agent Harness 的真实任务 scenario 数据集
+### 模型与评测
 
-### P1：强烈建议做
+- 真实模型任务成功率尚未形成足够大的公开 benchmark。
+- 自动化测试主要证明运行时确定性，不代表所有模型都能稳定规划。
+- 混合语义层减少规则误判，但复杂表达仍依赖模型质量。
+- 缺少按模型、任务类别和重复次数长期维护的成功率/成本趋势。
 
-1. 评估 SQLite/LanceDB/Qdrant 等存储并实现 embedding 迁移
-2. 在现有分层 compaction 之上增加 Turn / Task / Session 多级摘要、过期策略和压缩 Eval
-3. 给现有“计划 -> 执行”闭环增加执行后复盘和计划偏差分析
-4. 为 web answer 增加来源引用摘要
-5. 扩展 MCP resources/prompts、server-initiated request 与认证
+### 安全与隔离
 
-### P2：有余力再做
+- 命令、工具和子 Agent worktree 是应用层隔离，不是强安全沙箱。
+- 运行仓库自带的测试脚本仍需信任该仓库。
+- MCP Server 属于外部进程或服务，其权限边界取决于配置和运行环境。
 
-1. 基于 `AgentRuntimeEvent` 的持续式全屏 TUI 任务面板
-2. 编辑器集成
-3. 更细的工具权限配置
-4. 并行工具调用调度
-5. 更完整的插件机制
+### Web 与外部系统
 
-## 简历建议
+- 搜索质量受提供商影响。
+- 没有专业体育、金融、新闻等垂直实时 API。
+- 尚未实现逐条 claim-source 的完整自动对齐。
+- MCP 聚焦 tools runtime，未覆盖协议的所有资源、Prompt、认证和服务端主动请求场景。
 
-现在这个项目已经可以放进简历，但更适合这样定位：
+### 产品化
 
-> 本地 AI Coding Agent CLI，聚焦仓库任务路由、工具调用、上下文记忆、代码审查、补丁应用与执行审计。
+- CLI 是主要产品界面，没有 IDE 集成、Web 控制台或持续式全屏 TUI。
+- 本地 JSONL 和文件锁适合单用户 CLI，不适合多租户服务。
+- 配置 profile、版本发布、安装分发和跨平台现场验证仍可继续打磨。
 
-而不建议包装成：
+## 面试项目竞争力
 
-> 对标 Claude Code / Codex 的完整工业级智能编程平台。
+相对普通 LLM API Demo，本项目的差异不在功能数量，而在可以解释并演示以下工程问题：
 
-前者可信，后者容易被问穿。
+1. 模型为什么不能直接决定权限和成功状态；
+2. 不同任务如何在同一循环中获得不同能力；
+3. 上下文如何选择、压缩和追踪来源；
+4. 子 Agent 如何隔离修改、验证、Review 和安全合入；
+5. Web 搜索失败时如何避免猜测与死循环；
+6. 如何用结构化事件、Session 和测试重现问题。
 
-## 一句话判断
+适合作为 AI 应用、Agent/Workflow、DevTools、平台工程或偏后端岗位的技术亮点项目。若用于更高级的 Agent 基础设施岗位，还需要生产部署、真实任务指标、强沙箱和多租户经验。
 
-如果目标是：
+## 现在应该停止做什么
 
-- **写简历**
-- **做演示**
-- **讲工程能力**
-- **体现 AI Agent 理解**
+为了面试展示，不应继续无限扩张：
 
-那它已经够用了。
+- 不为单个问句增加硬编码回复；
+- 不为了测试数量堆叠重复用例；
+- 不在没有真实需求时增加更多 Agent 角色；
+- 不把 Web UI、IDE 插件或容器平台当作当前必做项；
+- 不用“生产级”“完全对标”“任意任务稳定完成”描述项目。
 
-如果目标是：
-
-- **真正替代 Claude Code / Codex**
-- **高稳定度地处理复杂开放任务**
-- **强联网事实问答**
-
-那现在还远远没到头。
+当前最高收益工作是保持文档真实、准备三组稳定演示，并用少量代表性 benchmark 证明关键边界。

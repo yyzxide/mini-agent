@@ -26,7 +26,7 @@ CLI
     -> LlmClient
     -> AgentDecision
     -> Capability / Permission / Completion Guardrails
-    -> ToolRegistry / Patch / Command / Read-only delegation
+    -> ToolRegistry / Patch / Command / isolated delegation
  -> SessionStore / EventStore / Checkpoint
  -> answer / review / summary / diff
 ```
@@ -42,7 +42,8 @@ CLI 的任务分派只有一个目标：`runAgentLoopTask`。旧的 `DirectAnswe
 ```text
 Capability Registry（产品事实）
  -> Product Meta Classifier（组合识别主题、语气、疑问与历史解释意图）
- -> TaskRouter / 本地确定性回答
+ -> 本地事实候选
+ -> AgentLoop Final 生命周期
 
 LLM 最终回答
  -> Capability Truth Guard
@@ -165,7 +166,7 @@ REPOSITORY_ANALYSIS  -> 模块、数据流、证据文件、架构判断、演�
 
 ## 5. 运行时事件与终端显示
 
-AgentLoop 发布版本化的 `AgentRuntimeEvent`，终端 Renderer、`--event-stream` 和 Session Replay 可以消费同一协议。当前产品只实现 CLI 展示，没有额外 Web 控制台。事件覆盖：
+AgentLoop 发布版本化的 `AgentRuntimeEvent`，终端 Renderer、`--event-stream` 以及未来的 Session Replay 可以消费同一协议。当前产品只实现 CLI 展示，没有 Session Replay 或额外 Web 控制台。事件覆盖：
 
 - 实际携带的 Conversation 消息数、估算 Token、选择策略、历史截断状态，以及 Prior-response Audit 命中的旧 assistant 消息数。
 - Context 构建、Section 选择/跳过/截断和 Session Memory 压缩。
@@ -173,7 +174,7 @@ AgentLoop 发布版本化的 `AgentRuntimeEvent`，终端 Renderer、`--event-st
 - Tool、Patch、Command 的开始与结果，以及命令 stdout/stderr 实时输出。
 - Embedding Cache 的 memory hit、disk hit、miss、write 和 single-flight 合并。
 - Guardrail 拒绝、用户询问、Diff 和最终结果。
-- 子 Agent 的角色、访问协议、依赖关系、逐步模型决策摘要、工具调用、协议恢复、精确失败原因、完成状态和提案涉及的文件。
+- 子 Agent 的角色、访问协议、依赖关系、worktree 与基线、逐步模型决策摘要、工具/Patch/受限命令、协议恢复、验证、精确失败原因、完成状态和提案涉及的文件。
 
 默认终端把 `[conversation]`、`[context]`、`[memory:session]` 和服务商的 `prompt-cache-*` 分开显示，避免把对话历史、动态 Context 预算和 Prompt/KV Cache 混为一谈。`--verbose` 展开参数与遥测，`--trace` 显示经过脱敏的结构化 Decision、Conversation 角色序列和 Context 分配。服务商没有返回的缓存字段保持 `unreported`，不会把“未知”错误统计为 Miss。
 

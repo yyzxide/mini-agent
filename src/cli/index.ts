@@ -186,7 +186,7 @@ export function createProgram(): Command {
     .option("--trace", "Show complete redacted runtime decisions and context allocation traces")
     .option("--iterative", "Use the iterative decision protocol for direct-answer tasks")
     .option("--agent-loop", "Deprecated alias for --iterative")
-    .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
+    .option("--agents <number>", "Override controlled sub-agent concurrency (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (task.length === 0) {
@@ -211,7 +211,7 @@ export function createProgram(): Command {
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines")
     .option("--verbose", "Show detailed planning telemetry")
     .option("--trace", "Show complete redacted planning traces")
-    .option("--agents <number>", "Enable controlled read-only sub-agents (2-3; 1 disables)", parseAgentCount)
+    .option("--agents <number>", "Override controlled sub-agent concurrency (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
       if (!task) throw new Error("Plan task cannot be empty.");

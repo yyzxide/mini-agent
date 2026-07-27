@@ -1,248 +1,223 @@
-# 本地演示脚本
+# 面试演示脚本
 
-这份脚本用于演示纯 CLI 版 `mini-coding-agent`。目标是证明它能在本地仓库中完成“理解任务、调用工具、修改代码、执行命令、输出 diff、保存 session”的闭环。
+这份脚本只保留三组能够体现项目差异的演示：
 
-建议额外演示三条能力：`skill list` 查看声明式工作流、`/remember` 后跨 Session 召回，以及 `/plan <task>` 保持工作区不变后用 `/execute` 显式执行。
+1. 同一句自然语言如何编译成不同权限；
+2. Writer、Reviewer 和主 Agent 如何在隔离工作区协作；
+3. 长对话与上下文压缩后，系统如何保持 artifact 指代。
 
-## 1. 准备项目
+工具列表、RAG、MCP、Memory 等能力可以在追问时展示，不要在开场逐条执行。
 
-```bash
-cd /home/sid/miniagent/mini-coding-agent
-npm install
-npm run build
-npm test
-npm link
-mini-agent --help
-```
+## 演示目标
 
-如果不使用全局链接：
+面试官应在十分钟内看到四件事：
 
-```bash
-node dist/cli/index.js --help
-```
+- 这不是一个直接调用模型的聊天壳；
+- 模型负责提出决策，本地运行时负责权限、工具和完成条件；
+- 子 Agent 可以真正修改和验证，但不能直接污染父工作区；
+- 终端能够解释发生了什么，同时不暴露隐藏思维链。
 
-## 2. 配置模型
+## 1. 演示前准备
+
+使用一个临时克隆，避免演示任务修改主仓库：
 
 ```bash
-cp mini-agent.config.example.json mini-agent.config.json
+cd /path/to/mini-coding-agent
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+pnpm link --global
+
+DEMO_ROOT="$(mktemp -d)"
+git clone . "$DEMO_ROOT/mini-coding-agent-demo"
+cp mini-agent.config.json "$DEMO_ROOT/mini-coding-agent-demo/mini-agent.config.json"
+cd "$DEMO_ROOT/mini-coding-agent-demo"
+pnpm install --frozen-lockfile
+mini-agent doctor
 ```
 
-编辑：
+若 `pnpm` 不在 `PATH`，将命令中的 `pnpm` 替换为 `corepack pnpm`。
 
-```json
-{
-  "version": 1,
-  "llm": {
-    "mode": "real",
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "your-api-key",
-    "model": "your-model",
-    "temperature": 0.2,
-    "maxTokens": 4096,
-    "timeoutMs": 60000
-  }
-}
-```
+如果使用环境变量配置模型，可以跳过复制配置文件。
 
-验证配置脱敏输出：
+演示前确认：
+
+- `doctor` 能识别 Node、Git、ripgrep 和模型配置；
+- Git 工作区干净；
+- 模型 Endpoint 可用；
+- 终端宽度足以显示时间线；
+- 不在真实业务仓库演示写入任务。
+
+## 2. 演示一：语义理解与最小权限
+
+先运行只读分析：
 
 ```bash
-mini-agent config show
+mini-agent run \
+  "只分析 src/agent/TaskUnderstandingResolver.ts 的职责，不要修改任何文件" \
+  --verbose
 ```
 
-讲解点：
+需要讲解：
 
-- `mini-agent.config.json` 被 gitignore 忽略。
-- `config show` 默认隐藏 apiKey。
-- 也可以用环境变量覆盖配置。
+- 请求进入统一 `AgentLoop`，不是单独的“代码审查程序”。
+- `TaskUnderstanding` 识别 Repository Analysis 和显式只读约束。
+- Task Contract 只开放仓库读取，不开放 Patch 和命令。
+- 模型即使错误提出写入，也会被本地契约阻断。
 
-## 3. 工具系统演示
+然后展示否定套否定：
 
 ```bash
-mini-agent tool list
-mini-agent tool run list_files '{"path":"src","maxDepth":2}'
-mini-agent tool run read_file '{"path":"README.md","maxLines":40}'
-mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":10}'
-mini-agent tool run fetch_url '{"url":"https://example.com"}'
-mini-agent tool run git_status '{}'
-mini-agent tool run git_diff '{}'
+mini-agent run \
+  "不是让你只分析：检查 src/agent/TaskUnderstandingResolver.ts，发现问题就直接修复并验证" \
+  --verbose
 ```
 
-讲解点：
+需要讲解：
 
-- 所有工具都有 zod schema。
-- 文件路径必须限制在 repoPath 内。
-- `search_code` 调用的是 ripgrep。
-- `fetch_url` 用于读取公网文档，带超时、大小和内网目标限制。
-- 工具结果是结构化 JSON，便于 AgentLoop 和测试使用。
+- 这类复杂否定会进入 Schema 约束的模型语义消歧。
+- 语义候选不能单独授予写权限；`operation` 和 `explicitMutation` 必须一致。
+- 最终 Task Contract 是权限事实源，后续模块不会再用原句关键词重新猜权限。
 
-## 4. 命令系统演示
+演示时不要求第二条一定发现真实 Bug。若没有问题，正确行为是基于证据说明未修改，而不是为了完成任务制造 Patch。
+
+## 3. 演示二：Writer → Reviewer → Parent Merge
+
+在临时克隆中执行：
 
 ```bash
-mini-agent command run "echo hello"
-mini-agent command run "npm test"
+mini-agent run \
+  "使用两个 subagent：writer 新增 src/utils/clamp.ts 和 tests/utils/clamp.test.ts，实现 clamp(value, min, max)，非有限数或 min 大于 max 时抛错；reviewer 审查实现和测试；通过后由主 agent 合入并运行相关测试。" \
+  --trace
 ```
 
-讲解点：
+观察时间线中的：
 
-- 命令结果包含 stdout、stderr、exitCode、durationMs。
-- 命令有超时和输出截断。
-- 危险命令会被 PermissionManager 拦截。
+- `[understanding]` 与 Task Contract；
+- `DELEGATE` 和任务依赖；
+- Writer 的 disposable worktree 与基线指纹；
+- 子 Agent 在隔离工作区应用 Patch；
+- 允许列表中的测试/类型检查命令；
+- Reviewer 读取物化后的 Writer 修改；
+- 主 Agent 的 `APPLY_DELEGATED_PATCH`；
+- 父级验证；
+- `Changes` 卡片和最终 Diff。
 
-可以演示危险命令拦截：
+讲解顺序：
+
+1. 子 Agent 不是预先写死的脚本角色，而是由自然语言任务意图触发。
+2. Writer 修改临时 worktree，不直接触碰父工作区。
+3. Reviewer 依赖 Writer，因此审查的是修改后的真实文件。
+4. 父级在合入前比较基线指纹并重新检查 Patch。
+5. 若父工作区并发变化造成冲突，运行时返回 `DELEGATED_PATCH_CONFLICT`，要求重新委派。
+6. 主 Agent 合入后仍要完成父级验证，不能把子级成功直接当作整体成功。
+
+演示后查看：
 
 ```bash
-mini-agent command run "sudo reboot"
-```
-
-## 5. Patch 演示
-
-准备一个临时 patch 文件，例如修改 README 某一行，然后执行：
-
-```bash
-mini-agent patch preview < /tmp/demo.patch
-mini-agent patch apply < /tmp/demo.patch
+git status --short
 mini-agent diff
-```
-
-讲解点：
-
-- `patch preview` 不落盘。
-- `patch apply` 会先跑 `git apply --check`。
-- 应用后可以直接看 `git diff`。
-
-## 6. run 任务演示
-
-先演示显式代码片段请求，不修改仓库：
-
-```bash
-mini-agent run "给我一个两数之和的 C++ 代码片段，不要改文件"
-```
-
-讲解点：
-
-- `TaskRouter` 只会把明确的“代码片段”请求识别为直接回答。
-- 这个模式不应用 patch，不创建文件。
-- 所有问答仍然会写入 session/event。
-
-再演示默认代码落文件：
-
-```bash
-mini-agent run "写一个两数之和的 C++ 代码"
-```
-
-讲解点：
-
-- 默认代码生成请求会走 `AGENT_LOOP`。
-- 模型会返回 `APPLY_PATCH`，把结果真正写进仓库文件。
-- 如果用户没有给目标文件名，Agent 会选择合理的新文件名和扩展名。
-- 现在 ContextBuilder 还会给模型注入“新文件放置建议”，帮助它优先把文件落到 `src/`、`public/` 等更合理的位置。
-
-再演示“先要片段，后续再要求落盘”的多轮承接：
-
-```bash
-mini-agent
-> 给我一个 Python 代码片段，写一个两数之和
-> 写进去
-```
-
-讲解点：
-
-- 第一轮会走 `DIRECT_ANSWER`，只在对话中返回代码片段。
-- 第二轮虽然用户只说了一句很短的话，但 CLI 会复用当前 session。
-- 本地 follow-up 逻辑会提取上一轮最近的代码块，把它改写成明确的“创建文件并写入代码”任务，再交给 `AGENT_LOOP`。
-- 这样能避免用户重复贴代码，也能证明这个项目不是单轮问答壳子。
-
-再演示“代码任务连续追问”和“写入确认”：
-
-```bash
-mini-agent
-> 帮我写个 最长有效括号
-> 数据流的中位数呢
-> 你写入了嘛？
-```
-
-讲解点：
-
-- “数据流的中位数呢”会继承上一轮 `AGENT_LOOP`，继续创建或修改文件。
-- “你写入了嘛？”不会让模型猜，而是读取 session 中的 `FILE_CHANGE` 记录。
-- 如果上一轮没有真正落盘，CLI 会明确说明没有查到本次写入记录。
-
-再演示仓库任务：
-
-在当前仓库运行：
-
-```bash
-mini-agent run "阅读这个仓库，说明 CLI 入口、工具系统和 session 记录分别在哪里实现"
-```
-
-更接近真实开发的任务：
-
-```bash
-mini-agent run "给 README 增加一段说明，解释 mini-agent.config.json 为什么不应该提交到 git"
-```
-
-观察输出中的：
-
-- plan
-- tool call
-- patch
-- command
-- result
-- summary
-- diff
-
-## 7. Session 演示
-
-列出 session：
-
-```bash
+mini-agent changes --limit 3
 mini-agent sessions
 ```
 
-查看某次 session：
+## 4. 演示三：Artifact 追问与上下文
+
+启动交互模式：
 
 ```bash
-mini-agent session show <sessionId>
-mini-agent session events <sessionId>
+mini-agent
 ```
 
-也可以直接看文件：
+依次输入：
 
-```bash
-find .mini-agent -maxdepth 2 -type f
+```text
+> 创建一个独立的 HTML 贪吃蛇游戏，保存在 examples 目录
+> 文件在哪里
+> 只解释刚才文件的位置，不要继续修改
 ```
 
-讲解点：
+正确观察点：
 
-- `.mini-agent/sessions` 保存会话状态。
-- `.mini-agent/events` 保存时间线事件。
-- JSONL 便于追加和人工排查。
+- 第一轮应创建真实文件并记录 `FILE_CHANGE`/Artifact。
+- “文件在哪里”应解析为最近产物追问。
+- 回答应优先给出仓库相对路径，而不是介绍 Mini Agent 自己在哪里运行。
+- 第三轮应保持只读，不再修改文件。
 
-## 8. 面试讲解顺序
+随后可以继续几轮无关对话并执行：
 
-推荐按这个顺序讲：
+```text
+> /compact
+> 刚才那个游戏文件叫什么
+```
 
-1. 为什么做：想复刻一个简化版 Codex CLI/Claude Code。
-2. 怎么跑：`mini-agent run "任务"`。
-3. TaskRouter：简单问答直接回答，仓库任务才进 AgentLoop。
-4. AgentLoop：模型只给决策，执行由本地受控代码完成。
-5. ToolRegistry：统一 schema、权限、错误包装。
-6. 安全边界：路径、patch check、命令拦截、超时。
-7. Session：每一步可追溯。
-8. 取舍：删掉后端和前端，专注 CLI Agent 本体。
+讲解：
 
-## 9. 常见问题
+- Conversation、Context、Session Memory 和 Prompt Cache 是不同层。
+- `/compact` 只压缩任务上下文记录，不代表服务商 Prompt Cache。
+- Artifact 与最近 exchange 的选择策略用于保持指代，不靠固定句子回复。
 
-### mini-agent: command not found
+## 5. 可选演示：终端可观察性
 
-说明还没有执行 `npm link`，或者当前 shell PATH 没有 Node 全局 bin。
-
-解决：
+同一个只读任务分别运行：
 
 ```bash
-cd /home/sid/miniagent/mini-coding-agent
-npm link
+mini-agent run "解释当前 ContextBuilder 的输入来源"
+mini-agent run "解释当前 ContextBuilder 的输入来源" --verbose
+mini-agent run "解释当前 ContextBuilder 的输入来源" --trace
+```
+
+展示层级：
+
+- 默认：阶段、结果、基础 Token 和 Changes。
+- `--verbose`：工具参数、Context 压缩、缓存和时延。
+- `--trace`：脱敏后的完整结构化 Decision 与 Context Section 分配。
+
+需要明确：
+
+- `reasoning_tokens` 是服务商用量字段；
+- 原始隐藏思维链不会显示；
+- 可审计原因来自显式计划、Decision、Tool evidence 和 Guardrail。
+
+## 6. Web 能力为何不作为主演示
+
+可以使用：
+
+```bash
+mini-agent run "联网确认 TypeScript 当前稳定版本，并引用来源" --verbose
+```
+
+但 Web 结果受搜索服务、网络和页面可访问性影响，不适合作为唯一现场演示。它更适合说明：
+
+- 查询范围不能被擅自加强；
+- 搜索结果不是最终证据；
+- URL 必须来自本轮搜索或抓取；
+- 时效最高级需要比较候选；
+- 搜索失败时应诚实报告证据不足，而不是猜 URL。
+
+如果现场网络不稳定，直接展示已有 Session Event 或自动化测试，不要反复重试。
+
+## 7. 十分钟讲解节奏
+
+推荐顺序：
+
+1. 1 分钟：问题与定位——为什么聊天模型不能直接成为 Coding Agent。
+2. 2 分钟：单 AgentLoop、TaskUnderstanding 和 Task Contract。
+3. 3 分钟：Writer/Reviewer worktree 演示。
+4. 2 分钟：Artifact 追问、Context 与终端时间线。
+5. 1 分钟：测试和 AgentBench。
+6. 1 分钟：真实边界——模型质量、搜索提供商和应用层沙箱。
+
+不要从 API 参数、功能数量或“对标 Claude Code”开始讲。
+
+## 8. 常见现场问题
+
+### `mini-agent: command not found`
+
+```bash
+pnpm build
+pnpm link --global
 mini-agent --help
 ```
 
@@ -252,40 +227,39 @@ mini-agent --help
 node dist/cli/index.js --help
 ```
 
-### mini-agent 没有输出
-
-旧版本在 `npm link` 场景下可能因为 symlink 入口判断失败直接退出。当前版本已修复，重新 build 即可：
-
-```bash
-npm run build
-mini-agent --help
-```
-
 ### 模型调用失败
 
-检查：
-
 ```bash
+mini-agent doctor
 mini-agent config show
 ```
 
+检查 Endpoint 是否为 OpenAI-compatible Chat Completions 接口、模型名是否正确、API Key 是否已配置。`config show` 会脱敏输出密钥。
+
+### 子 Agent 没有启动
+
 确认：
 
-- `baseUrl` 正确。
-- `apiKey` 有值。
-- `model` 有值。
-- 当前网络能访问模型服务。
+- 当前是仓库任务，而不是 Direct Answer；
+- 配置中的 `multiAgent.mode` 不是 `off`；
+- 用户表达了明确委派，或任务确实适合自动拆分；
+- 可用并发数大于 1。
 
-### search_code 失败
+`--agents 2` 可以覆盖并发数，但不应把它讲成唯一的功能开关。
 
-确认安装了 ripgrep：
+### Writer 或 Reviewer 失败
 
-```bash
-rg --version
-```
+这是可展示的失败路径。查看终端中的：
 
-Ubuntu 安装：
+- protocol recovery；
+- child command exit code；
+- verification；
+- task exhaustion；
+- dependency cancellation；
+- worktree cleanup。
 
-```bash
-sudo apt install ripgrep
-```
+不要让主 Agent 在必需子任务失败后偷偷代写；当前运行时会把这种情况作为失败闭包处理。
+
+### 如何恢复干净演示环境
+
+直接离开并删除临时克隆即可。不要在主项目中使用 `git reset --hard` 清理演示。

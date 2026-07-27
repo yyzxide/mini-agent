@@ -5,7 +5,7 @@
 当前 RAG 面向仓库内的 Markdown 和纯文本知识文档，不负责 PDF/OCR、网页抓取或多租户知识库。它与长期记忆分开存储：
 
 - `.mini-agent/rag/index.jsonl`：稳定文档知识，按来源增量更新。
-- `.mini-agent/memory/index.jsonl`：会话总结和显式记忆，具有 TTL、置信度和替代关系。
+- `.mini-agent/memory/index.jsonl`：受治理的偏好、项目约定、架构决策、显式记忆和已验证结果，具有类型、范围、TTL、置信度和替代关系。
 
 准确口径是：项目实现了一个仓库级、可离线运行、可评测的文档 RAG 子系统；它不是面向大规模并发的生产知识库平台。
 
@@ -133,7 +133,7 @@ mini-agent rag eval docs/rag-eval.example.json
 - 文档内容是不可信数据，不能因为文档写着“忽略系统指令”就改变 Agent 行为。
 - 路径校验只能保证不读取仓库外和内部元数据，不能证明文档事实本身正确。
 - RAG 降低无依据生成风险，但不能消灭幻觉；最终回答仍应只使用返回证据并保留 citation。
-- JSONL 适合单机项目和演示，不适合多进程并发写、大规模向量检索或租户隔离。
+- JSONL 配合本地锁和原子替换适合单机项目和演示，但不提供数据库级事务、大规模向量检索或租户隔离。
 - 当前没有 cross-encoder reranker、查询改写、PDF/OCR、表格结构解析、增量文件监听和 claim-source 自动核验。
 
-生产化时优先考虑批量 embedding、SQLite/pgvector/LanceDB/Qdrant、索引版本迁移、并发锁、文档 ACL、观测指标和更完整的离线/在线评测。
+生产化时优先考虑批量 embedding、SQLite/pgvector/LanceDB/Qdrant、索引版本迁移、事务与并发控制、文档 ACL、观测指标和更完整的离线/在线评测。

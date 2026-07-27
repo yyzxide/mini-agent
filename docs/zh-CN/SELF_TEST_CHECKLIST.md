@@ -1,99 +1,67 @@
 # 自测清单
 
-提交前按这份清单检查纯 CLI 版本。
+这份清单用于发布前、重要重构后和面试演示前的分层验证。默认自动化测试保持确定性；真实模型和 Web 检查单独执行。
 
-## 1. 环境
-
-```bash
-node --version
-npm --version
-git --version
-rg --version
-```
-
-要求：
-
-- Node.js 20+
-- git 可用
-- ripgrep 可用
-
-## 2. 安装和构建
+## 1. 提交前自动化
 
 ```bash
-cd <mini-agent-repo>
-npm install
-npm run build
-npm run typecheck
-npm run lint:unused
-npm run test:regression
-npm test
-npm run verify
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm lint:unused
+pnpm test
+pnpm bench -- --baseline benchmarks/baselines/core-v1.json
+git diff --check
 ```
 
-期望：
+若无法直接执行 `pnpm`，使用 `corepack pnpm`；CI 中由 `pnpm/action-setup` 提供命令。
 
-- TypeScript 编译通过。
-- 未使用符号检查通过。
-- 对话级回归测试通过。
-- Vitest 正常环境基线是 51 个测试文件、423 个测试用例。
-- `verify` 只验证 CLI 项目。
+通过条件：
 
-## 3. 全局命令
+- 所有命令退出码为 0；
+- 没有临时 child worktree 残留；
+- 没有意外修改 `.mini-agent`、配置密钥或用户暂存区；
+- 新增能力同时具有权限失败路径和回归测试。
+
+检查 worktree：
 
 ```bash
-npm link
-mini-agent --help
-mini-agent tool list
-mini-agent doctor
-mini-agent skill list
-mini-agent memory stats
-mini-agent plan "分析一个修改任务但不要改文件"
+git worktree list --porcelain
 ```
 
-期望：
-
-- `mini-agent --help` 输出命令列表。
-- `tool list` 输出工具 JSON。
-- `doctor` 输出 Node、git、rg、配置和本地记录状态。
-- `skill list` 能发现有效 Skill，`memory stats` 能展示本地记忆数量。
-- `plan` 只输出计划，工作区文件保持不变。
-
-如果 `mini-agent: command not found`，说明没有 link 或 PATH 没包含 Node 全局 bin。
-
-## 4. 配置文件
+## 2. CLI 烟雾测试
 
 ```bash
-cp mini-agent.config.example.json mini-agent.config.json
-mini-agent config show
+pnpm build
+node dist/cli/index.js --help
+node dist/cli/index.js run --help
+node dist/cli/index.js doctor
+node dist/cli/index.js tool list
+node dist/cli/index.js tool manifest
+node dist/cli/index.js sessions
 ```
 
-检查：
+确认：
 
-- `mini-agent.config.json` 不进入 git。
-- `config show` 默认隐藏 apiKey。
-- `config show --raw` 只在本地排查时使用。
+- Help 中命令与 README 一致；
+- `doctor` 识别 Node、Git、ripgrep、包管理器和脱敏配置；
+- Tool Manifest 包含权限与 open-world/read-only 等元数据；
+- 无模型配置时给出明确诊断，而不是未捕获异常。
 
-## 5. 工具系统
+## 3. 工具和路径安全
+
+正常读取：
 
 ```bash
 mini-agent tool run list_files '{"path":"src","maxDepth":2}'
-mini-agent tool run read_file '{"path":"README.md","maxLines":20}'
-mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":5}'
-mini-agent tool run web_search '{"query":"TypeScript latest release","maxResults":3}'
-mini-agent tool run fetch_url '{"url":"https://example.com"}'
+mini-agent tool run read_file '{"path":"README.md","maxLines":40}'
+mini-agent tool run search_code '{"query":"AgentLoop","path":"src","maxResults":10}'
 mini-agent tool run git_status '{}'
 mini-agent tool run git_diff '{}'
 ```
 
-期望：
-
-- 输出结构化 JSON。
-- `read_file` 有行号和内容。
-- `search_code` 能返回路径、行号和文本。
-- `fetch_url` 能返回公网文本内容。
-- git 工具在 git 仓库里正常。
-
-## 6. 路径安全
+拒绝路径：
 
 ```bash
 mini-agent tool run read_file '{"path":"../README.md"}'
@@ -101,38 +69,29 @@ mini-agent tool run read_file '{"path":".git/config"}'
 mini-agent tool run search_code '{"query":"HEAD","path":".git"}'
 ```
 
-期望：
+确认：
 
-- 返回结构化错误。
-- 错误 message 能说明路径越过仓库边界。
-- `.git`、`.mini-agent` 等内部元数据路径返回 `INTERNAL_PATH`，不能把内部记录暴露给模型。
+- 仓库外路径与内部元数据路径被拒绝；
+- 错误为结构化结果；
+- Windows/POSIX 路径输出保持稳定；
+- 搜索中的异常行不会拖垮整个结果。
 
-## 7. 命令执行
+## 4. Patch 和命令安全
 
 ```bash
 mini-agent command run "echo hello"
-mini-agent command run "npm test"
-```
-
-期望：
-
-- 返回 stdout、stderr、exitCode、durationMs。
-- 成功命令 `success: true`。
-
-危险命令拦截：
-
-```bash
+mini-agent command run "pnpm test"
 mini-agent command run "sudo reboot"
 ```
 
-期望：
+确认：
 
-- 被 PermissionManager 拦截。
-- 不实际执行。
+- 普通结构化命令返回 stdout、stderr、exitCode 和 duration；
+- 高风险命令需要明确批准或被拒绝；
+- Shell 语法不会在默认结构化执行中隐式生效；
+- 输出和超时有边界。
 
-## 8. Patch
-
-准备一个只修改普通文件的 unified diff：
+Patch 使用临时演示仓库验证：
 
 ```bash
 mini-agent patch preview < /tmp/demo.patch
@@ -140,199 +99,212 @@ mini-agent patch apply < /tmp/demo.patch
 mini-agent diff
 ```
 
-期望：
+确认：
 
-- preview 不落盘。
-- apply 前会 check。
-- apply 后 `mini-agent diff` 能看到变更。
+- 非法 Patch 在 preview/check 阶段失败；
+- Apply 不改变真实 Git 暂存区；
+- Diff 包含新文件；
+- 任务开始前已有脏改动不会混入本轮任务 Diff。
 
-## 9. Agent 真实任务
+## 5. 任务理解和权限
 
-配置好真实模型后：
-
-直接回答任务：
-
-```bash
-mini-agent run "给我一个两数之和的 C++ 代码片段，不要改文件"
-mini-agent run "非登记收款人是什么意思"
-```
-
-期望：
-
-- 输出 `[answer]`。
-- 不创建源码文件。
-- 不出现 `[patch]`。
-
-代码落文件任务：
+### 只读约束
 
 ```bash
-mini-agent run "写一个两数之和的 C++ 代码"
+mini-agent run "只分析 src/agent/AgentLoop.ts，不要修改文件" --verbose
 ```
 
-期望补充检查：
+预期：
 
-- 会进入 `AGENT_LOOP` 而不是纯 `[answer]`。
-- 仓库里会生成新文件，例如 `two_sum.cpp`。
-- 输出里应该出现 `[patch]` 和最终总结。
+- Repository Investigation；
+- 允许仓库读取；
+- 禁止 Patch 和命令；
+- 工作区不变。
 
-短追问承接任务：
-
-```text
-mini-agent
-> 给我一个 Python 代码片段，写一个两数之和
-> 写进去
-```
-
-期望补充检查：
-
-- 第二轮不能再问“你想写什么内容到哪个文件”。
-- 应该直接进入文件落盘流程。
-- 仓库里会生成新文件。
-- 输出中应出现 `[patch]`。
-
-连续算法追问：
-
-```text
-mini-agent
-> 帮我写个 最长有效括号
-> 数据流的中位数呢
-```
-
-期望补充检查：
-
-- 第二轮不能只输出代码块。
-- 第二轮仍然应该进入 `AGENT_LOOP`。
-- 仓库中应该新增或修改一个中位数相关文件，例如 `median_finder.ts`。
-- 输出中应出现 `[patch]` 和最终总结。
-
-写入确认：
-
-```text
-mini-agent
-> 给我一个 TypeScript 代码片段，写一个数据流中位数
-> 你写入了嘛？
-```
-
-期望补充检查：
-
-- 如果上一轮只是 `[answer]`，这里必须回答没有查到文件写入记录。
-- 不能把更早之前的其它文件变更误说成刚才已经写入。
-- 如果上一轮确实走了 `[patch]`，这里应该列出 session 中记录的变更文件。
-
-联网回答任务：
+### 否定套否定
 
 ```bash
-mini-agent run "联网搜索一下 TypeScript 最新版本信息"
-mini-agent run "洛克王国最新版本是什么，最新的宠物有哪些"
-mini-agent run "edg在哪一年中夺冠了"
+mini-agent run "不是让你只分析，发现问题就直接修复并验证" --verbose
 ```
 
-期望：
+预期：
 
-- 输出 `[tool] web_search`。
-- 如搜索结果可抓取，输出 `[tool] fetch_url`。
-- 最终输出 `[answer]`，而不是仓库任务的 `[summary]`。
-- 不创建源码文件。
-- 对 EDG 这类多项目俱乐部，未指定游戏时不要只默认《英雄联盟》，应按项目列出主要冠军或提示用户补充范围。
+- 触发复杂语义补全；
+- 结构化语义结果进入事件；
+- 写权限只在最终语义一致时授予；
+- 不依赖固定完整问句。
 
-交互模式下的联网追问：
-
-```text
-mini-agent
-> 世界杯最新比分
-> 日本队最近几场的成绩
-```
-
-期望：
-
-- 第二问仍然输出 `[answer]`。
-- 第二问的回答范围应继承“世界杯”，不要混入友谊赛、世预赛或其它赛事，除非用户明确要求所有比赛。
-
-仓库任务：
+### 条件修改
 
 ```bash
-mini-agent run "阅读这个仓库，说明 src/tools 和 src/agent 的职责"
+mini-agent run "如果测试能复现这个问题就修复，否则只报告证据" --trace
 ```
 
-期望：
+预期：
 
-- Agent 能调用工具读取仓库。
-- 最终输出 summary。
-- `.mini-agent/sessions` 和 `.mini-agent/events` 有新记录。
+- 条件和操作边界进入 TaskUnderstanding；
+- 没有复现时不为了满足“修改任务”制造 Patch；
+- 最终结果说明采取了哪个分支。
 
-## 10. Session
+## 6. 大文件与完整覆盖
+
+对超过默认单页 Token 预算的文件运行：
+
+```bash
+mini-agent review path/to/large-file.ts
+```
+
+确认：
+
+- `read_file` 通过 nextStartLine/nextStartColumn 继续；
+- sourceVersion 在分页中一致；
+- 覆盖区间合并；
+- 未覆盖到 EOF 时 `FINAL` 被拒绝；
+- 终端显示读取进度而不倾倒全部文件内容。
+
+同时验证超长单行、空文件和不存在文件。
+
+## 7. 多 Agent
+
+在临时克隆中运行：
+
+```bash
+mini-agent run \
+  "使用两个 subagent：一个实现小功能，一个 review；通过后由主 agent 合入并测试" \
+  --trace
+```
+
+确认：
+
+- Writer 使用临时 worktree；
+- Writer 可以应用多次 Patch；
+- 只允许受限验证命令；
+- Reviewer 等待 Writer 并读取物化修改；
+- 主 Agent 独占合入；
+- 父级验证发生在合入之后；
+- 结束后没有 worktree 残留。
+
+失败路径：
+
+- Writer 返回非法 Decision；
+- Writer 最新验证失败；
+- Reviewer 耗尽步骤；
+- 依赖失败取消后续任务；
+- 子级运行期间修改父级同一位置；
+- 父级变化但 Patch 仍可干净应用；
+- 必需 Writer 失败后主 Agent 不代写。
+
+## 8. Conversation、Context 与 Artifact
+
+交互式执行：
+
+```text
+> 创建一个独立的 HTML 游戏文件
+> 文件在哪里
+> 只解释位置，不要修改
+> /compact
+> 刚才那个文件叫什么
+```
+
+确认：
+
+- “文件在哪里”指向最近 Artifact；
+- 回答仓库路径，不介绍 Agent 产品身份；
+- `/compact` 后关键 Artifact 和约束仍可召回；
+- Conversation 消息数、Context 预算和 Prompt Cache 分开显示；
+- 新 Session 不召回无关旧 Session 事实。
+
+再构造两个不同 Artifact，确认“第一个”“第二个”“最近那个”的指代不会混淆。
+
+## 9. Web 研究（可选、非 CI）
+
+```bash
+mini-agent run "联网确认 TypeScript 当前稳定版本，并引用来源" --verbose
+```
+
+确认：
+
+- 第一条查询保留用户范围；
+- 搜索后抓取重要来源；
+- 最终引用只来自本轮 URL；
+- 时效结论比较日期/版本候选；
+- 搜索失败后不猜测 URL；
+- 证据不足可以成功输出限制说明；
+- 不因 Guardrail 重复拒绝直到最大步数。
+
+使用 Mock/Scripted Client 分别注入：
+
+- 搜索 Transport 失败；
+- 搜索成功但抓取失败；
+- 旧版本排名靠前；
+- 官方来源与二手来源冲突；
+- 接近综合回答预留步数。
+
+## 10. Plan、Memory、RAG、Skill 和 MCP
+
+Plan：
+
+```bash
+mini-agent plan "为项目增加一个新工具"
+```
+
+确认 Plan 过程中没有 Patch、命令或非只读工具；`/execute` 只执行当前 Session 最近一份成功计划。
+
+Memory/RAG：
+
+```bash
+mini-agent memory stats
+mini-agent rag stats
+mini-agent rag ingest README.md docs/zh-CN --tag project
+mini-agent rag search "Task Contract 如何限制权限" --top-k 3
+```
+
+确认自动 Memory 写入只接受允许的语义类型和有证据结果；RAG 引用包含来源与行号，证据不足时拒答。
+
+Skill/MCP：
+
+```bash
+mini-agent skill list
+mini-agent mcp status
+mini-agent mcp tools
+```
+
+确认 Skill 和 MCP 不能绕过当前 Task Contract；远端工具名称隔离，权限映射正确，Server 生命周期关闭。
+
+## 11. Session 与恢复
 
 ```bash
 mini-agent sessions
 mini-agent session show <sessionId>
 mini-agent session events <sessionId>
+mini-agent session summary <sessionId>
 mini-agent logs
 mini-agent changes
 ```
 
-期望：
+确认：
 
-- 能列出历史 session。
-- 能查看消息、工具、命令、patch 和最终 diff。
-- 能查看运行日志和任务变更日志。
+- 完成任务不会把 Working Set 泄漏给下一轮；
+- 中断中的 in-flight action 恢复后先检查仓库状态；
+- 已完成/失败 Checkpoint 不会被再次恢复；
+- Event、Runtime Log 和 Change Log 职责不同；
+- 敏感配置被脱敏。
 
-## 10.1 交互式命令
+## 12. 面试前最小检查
 
-```text
-mini-agent
-> /help
-> /session
-> /history 10
-> /events 10
-> /logs 10
-> /changes 10
-> /compact
-> /new
-> /sessions
-> /exit
-```
-
-期望：
-
-- `/help` 显示完整 slash 命令。
-- `/history` 和 `/events` 能查看当前 session 的记录。
-- `/compact` 会写入压缩记忆记录。
-- `/logs` 和 `/changes` 能查看最近运行记录。
-
-## 11. Git 状态
-
-提交前：
+时间有限时只执行：
 
 ```bash
+pnpm verify
+pnpm lint:unused
+mini-agent doctor
 git status --short
-git diff --check
 ```
 
-期望：
+然后在临时克隆中跑三组演示：
 
-- 没有意外文件。
-- 没有空白错误。
-- `mini-agent.config.json` 不出现在待提交列表。
+1. 只读与修改权限差异；
+2. Writer → Reviewer → Parent Merge；
+3. Artifact 追问与 `/compact`。
 
-## 12. 演示验收
-
-最小演示链路：
-
-```bash
-mini-agent --help
-mini-agent tool list
-mini-agent tool run read_file '{"path":"README.md"}'
-mini-agent command run "echo hello"
-mini-agent run "总结这个项目的核心模块"
-mini-agent sessions
-mini-agent logs
-mini-agent changes
-mini-agent diff
-```
-
-这条链路能跑通，就说明纯 CLI MVP 是健康的。
-期望补充检查：
-
-- 会进入 `AGENT_LOOP` 而不是纯 `[answer]`。
-- 仓库里会生成新文件，例如 `two_sum.cpp`。
-- 输出里应该出现 `[patch]` 和最终总结。
+Web、MCP 和真实 Embedding 不作为唯一主演示，避免外部环境决定现场结果。

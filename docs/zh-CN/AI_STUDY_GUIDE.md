@@ -72,7 +72,8 @@
 - `Tool`
 - `ToolRegistry`
 - Zod input schema
-- `CodeReview` 的结构化 findings 与二次复核
+- `TaskUnderstandingResolver` 的严格语义 Schema
+- `AgentDecision`、Tool input 与 SubAgent protocol 的分层校验
 
 ### 典型追问
 
@@ -99,18 +100,24 @@
 
 ### 项目对应
 
+- `TaskUnderstanding`
+- `TaskUnderstandingResolver`
+- `AgentTaskContract`
 - `TaskRouter`
 - `AgentLoop`
 - `AgentState`
 - `TaskGuardrails`
 - `AgentOperatingMode`
 - `Plan` 模式
+- `IsolatedSubAgentCoordinator`
+- `SubAgentWorktree`
 
 ### 项目循环
 
 ```text
 用户任务
--> 路由执行模式
+-> 解析追问和统一任务语义
+-> 编译 Task Contract
 -> 构建上下文
 -> LLM 返回结构化 decision
 -> 本地校验和执行
@@ -118,6 +125,8 @@
 -> 回到下一轮
 -> FINAL 或触发终止条件
 ```
+
+Direct、Web、Review、Repository Analysis 与 Change 不是五套循环。它们共用 AgentLoop，通过 Task Contract 获得不同能力和完成条件。多 Agent 也不是循环外脚本：父 Agent 通过 `DELEGATE` 创建依赖任务，Writer 在临时 worktree 迭代，Reviewer 读取物化补丁，父级保留合入权。
 
 ### 典型追问
 
@@ -234,7 +243,7 @@ RAG 不是“接一个向量数据库”。完整链路是：
 - JSONL 存储不适合大规模并发和高数据量。
 - 切换 embedding 模型后能检测 provider 不匹配并要求重建，但仍缺少批量迁移工具。
 - 没有 cross-encoder reranker、查询改写、PDF/OCR 和结构化表格解析。
-- JSONL 单机索引没有多进程写锁、文档 ACL 和多租户隔离。
+- JSONL 单机索引不提供数据库级事务、文档 ACL 和多租户隔离。
 - 同主题冲突主要基于标题，不是强语义冲突检测。
 - Web 回答还没有做到逐 claim 与 source 的自动对齐。
 
@@ -268,7 +277,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - `ScriptedLlmClient`：返回预设 decision，保证离线回归可重复。
 - `AgentHarness`：创建临时 git 仓库、运行 AgentLoop、检查 diff 和文件。
 - `runSuite`：汇总成功率、平均步骤、工具选择准确率和失败分类。
-- Vitest：固定路由、Web、Review、Patch、Command、Memory 和 MCP 回归。
+- Vitest：固定语义/契约、Web、Review、Patch、Command、Context、子 Agent、Memory 和 MCP 回归。
 
 ### 如何设计一条 scenario
 
@@ -398,7 +407,7 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 - LLM 消息、token、context window。
 - Structured Output、Tool Calling、Zod。
-- TaskRouter、AgentLoop、ToolRegistry。
+- TaskUnderstanding、Task Contract、AgentLoop、ToolRegistry。
 - 每天脱离文档画一次执行链路。
 
 验收：能做 5 分钟项目架构讲解，并回答一次工具调用如何执行。

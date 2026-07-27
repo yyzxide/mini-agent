@@ -1,207 +1,189 @@
 # 面试问答
 
+以下回答基于当前实现。回答时应结合代码、测试或演示，不要把 Roadmap 描述成已经完成。
+
 ## Q1：这个项目解决什么问题？
 
-它解决的是“让 AI 在本地仓库中可控地完成代码任务”。普通 ChatGPT 只能给建议，`mini-coding-agent` 能在仓库里搜索代码、读文件、应用 patch、执行命令、根据错误继续修复，并把全过程记录下来。
+聊天模型可以生成代码，但不能直接被信任去决定权限、执行副作用或宣布任务成功。项目把模型放进一个本地可控循环：自然语言先编译成任务契约，模型提出结构化动作，本地运行时执行工具、Patch 和命令，并用证据检查完成性。
 
-## Q2：为什么做成 CLI？
+## Q2：为什么不是普通 API 聊天壳？
 
-Coding Agent 最核心的场景发生在开发者本地仓库。CLI 最短、最直接，不需要后端服务和页面就能跑通核心闭环。先把 CLI 做扎实，比先做一个漂亮页面更有价值。
+关键逻辑不在 Prompt 里：
 
-## Q3：为什么删掉后端和前端？
+- TaskUnderstanding 和 Task Contract；
+- Tool Registry、Schema 和权限；
+- 路径、Patch、命令和网络边界；
+- Context 选择与压缩；
+- Guardrail 与完成条件；
+- Session、Checkpoint、事件和任务 Diff；
+- Writer/Reviewer worktree 与父级合入。
 
-因为它们不是当前项目的核心。后端和前端会把叙事带向普通业务系统，而这个项目真正要展示的是 AgentLoop、工具系统、权限、安全边界、session 和真实模型调用。业务后台可以作为另一个独立项目做。
+换一个模型，以上本地控制仍然存在。
 
-## Q4：AgentLoop 怎么工作？
+## Q3：为什么做成 CLI？
 
-`mini-agent run` 会先经过 `TaskRouter`。如果是普通问答或用户明确说“只要代码片段、不改文件”，就直接回答，不进入修改仓库流程。如果是写代码、实现 demo、修复仓库、补测试这类会真正影响文件的任务，就进入 AgentLoop。AgentLoop 每轮会构建上下文，调用 LLM，得到结构化 `AgentDecision`。如果是 `tool_call` 就执行工具，如果是 `apply_patch` 就检查并应用 patch，如果是 `run_command` 就执行命令，如果失败则把日志放回上下文继续修复，直到 `final` 或达到最大步数。
+Coding Agent 需要直接面对仓库、Git、命令和终端。CLI 能复用开发者已有工具，减少额外服务边界，也让项目聚焦 Agent 执行内核。当前没有 Web 页面是产品范围选择，不是不能实现。
 
-## Q5：模型会不会直接操作文件？
+## Q4：一次请求怎么运行？
 
-不会。模型只返回结构化决策。文件读取、搜索、patch 应用和命令执行都由本地 TypeScript 工程代码负责。
+```text
+Follow-up resolution
+  -> TaskUnderstanding
+  -> optional semantic refinement
+  -> compatibility route
+  -> AgentTaskContract
+  -> AgentLoop
+  -> Context / LLM / Decision / Guardrail / Action
+  -> evidence / events / checkpoint / final
+```
 
-另外，用户问“你写入了吗？”时也不会让模型凭上下文猜。CLI 会读取当前 session 里的 `FILE_CHANGE` 记录，判断上一轮请求之后是否真的发生文件变更；如果没有记录，就明确说明没有查到本次落盘。这是为了避免模型把“回答了代码”误说成“已经写入文件”。
+Direct、Web、Review、Analysis 和 Change 都进入同一个 AgentLoop。它们只是在能力、证据、输出和步数契约上不同。
 
-## Q6：工具系统怎么设计？
+## Q5：为什么还保留 TaskRouter？
 
-每个工具都有统一接口：`name`、`description`、`inputSchema`、`permissionLevel`、`metadata`、`execute`。`ToolRegistry` 负责注册、查找、输入校验、执行和错误包装。
+`TaskRouter` 现在主要把最终 `TaskUnderstanding` 映射成兼容标签，供 Session、CLI 输出和旧数据使用。它不再拥有独立运行时，也不应该成为权限事实源。真正的能力由 Task Contract 决定。
 
-`metadata` 里会标注工具来源、分类和能力边界，例如是否只读、是否可能修改本地状态、是否幂等、是否访问外部世界。这些信息会进入 LLM tool spec，也可以通过 `mini-agent tool manifest` 查看。
+## Q6：TaskUnderstanding 为什么还需要模型？
 
-这样做的原因是：Tool Calling 不是简单把函数暴露给模型，而是要让模型和本地执行层都理解工具风险。
+确定性逻辑适合显式路径、明确写入、产品状态和短追问，但“不是只分析”“如果确认有问题才改”“按刚才方案处理”包含组合语义。系统只对这类复杂表达调用模型，并要求严格 JSON Schema、置信度和本地安全合并。
 
-## Q7：为什么用 zod？
+这样既避免每轮额外调用，也避免继续为完整句子写白名单。
 
-LLM 输出不可信，必须校验工具参数。zod 可以把运行时校验和 TypeScript 类型联系起来，工具输入错误时能返回结构化错误，而不是让主流程崩掉。
+## Q7：模型语义判断错误会不会获得写权限？
 
-## Q8：如何保证路径安全？
+不会只凭 `operation=CHANGE_REPOSITORY` 获得权限。合并层要求修改意图字段一致，保留显式只读/Web/本地状态约束；非法或低置信度结果回退。最终 Task Contract 只消费合并后的记录。
 
-所有路径都会通过 `resolveRepoPath(repoPath, targetPath)` 解析成绝对路径，再判断结果是否仍在仓库目录内。这样 `../` 和绝对路径逃逸都会被拒绝。`read_file` 和 `search_code` 还会拒绝 `.git`、`.mini-agent` 这类内部元数据路径，避免把仓库配置、session、日志和记忆记录暴露给模型。
+## Q8：模型会不会直接操作文件？
 
-## Q9：联网能力怎么控制？
+不会。模型输出 `TOOL_CALL`、`APPLY_PATCH`、`RUN_COMMAND`、`DELEGATE` 或 `FINAL` 等结构化 Decision。本地代码负责解析、权限检查、执行和记录。Patch 会先验证，命令默认禁用 Shell，路径限制在仓库范围。
 
-联网不是让模型随便访问网络，而是通过 `web_search` 和 `fetch_url` 两个受控工具完成。`web_search` 返回公开网页标题、URL 和摘要；`fetch_url` 读取公网 HTTP(S) 文档。工具会限制超时、下载大小和输出长度，拒绝 localhost、`.local` 和明显的内网 IP，并且只返回文本类内容。实时比分、动态页面或反爬页面仍可能拿不到完整数据，Agent 必须说明无法核验，不能编造。
+## Q9：如何防止模型“没做完却说完成”？
 
-同时，我专门处理了“模型否认工具事实”的问题。如果用户问“你不能联网吗？”，CLI 会本地回答“有受控联网能力”，不把它交给模型乱猜。如果某次 `WEB_ANSWER` 已经执行了 `web_search` / `fetch_url`，但模型最后仍说自己不能联网或需要手动开联网按钮，CLI 会拦截这类回答并要求重写。
+`FINAL success=true` 要通过本地后置条件：
 
-## Q10：patch 为什么不用直接写文件？
+- 写入任务必须有本轮 Patch；
+- 要求完整读取时必须覆盖到 EOF；
+- 源码变更需要相关且足够强的最新验证；
+- Web 回答需要本轮来源和引用；
+- 必需子任务必须成功；
+- 最近一次失败验证不能被旧的成功结果覆盖。
 
-patch 更适合审计和回滚。应用前可以预览，可以 `git apply --check`，失败时能得到明确错误，成功后可以直接用 `git diff` 展示最终变更。实现里还会固定 `core.autocrlf=false`，避免不同开发机的 Git 换行配置影响同一个 patch 的结果。
+## Q10：大文件为什么不一次全部塞给模型？
 
-## Q10.1：如果用户只说“写个 2048 游戏”，Agent 怎么知道文件落在哪里？
+“能读完整文件”不等于“一次传完整文件”。`read_file` 使用 Token 受控分页，运行时记录来源版本和已覆盖行区间。完整审查任务只有覆盖 1 到 EOF 才能完成。这样既不受固定 800 行限制，也不会让一个大文件挤掉所有上下文。
 
-当前版本不会完全交给模型瞎猜。`ContextBuilder` 会注入一段 `New file placement guidance`，由本地 `FilePlacementAdvisor` 根据仓库里的 `src/`、`public/`、`tests/`、Maven/Node/Go 构建文件和主要语言分布，给出若干建议目标路径。模型再基于这些建议生成 patch。
+## Q11：上下文压缩怎么做？
 
-## Q11：命令执行有什么保护？
+Session Memory 使用 structured salience：固定约束、最近对话、执行证据等分层，在字符和 Token 双预算下选择。系统记录每个来源的选中、裁剪和排除原因。压缩是确定性选择，不让无证据的模型摘要替换原始事实。
 
-命令有超时、输出截断和危险命令拦截。比如 `rm -rf /`、`sudo`、`mkfs`、`shutdown`、`reboot`、`chmod 777 /` 会被默认拦截。
+## Q12：Prompt Cache 是 Agent 自己控制的吗？
 
-## Q12：为什么 session 用 JSONL？
+不是。Prompt/KV Cache 通常由模型服务商管理，Agent 只能尽量保持稳定前缀并记录服务商返回的 cached-token 指标。项目自己控制的是 Session Context、Long-term Memory 和 Embedding Cache，这些不能混为一谈。
 
-JSONL 适合本地 Agent：追加简单、人工可读、崩溃后已有记录不丢、无需数据库，也方便未来被其他系统消费。
+## Q13：为什么不显示模型完整思考过程？
 
-## Q13：为什么还要 runtime log 和 change log？
+隐藏思维链不是稳定、可靠或适合暴露的审计接口。项目显示可验证的信息：显式计划、结构化 Decision、行动理由、工具输入/结果、Guardrail、错误和验证证据。服务商返回 reasoning token 时记录用量，但不打印私有推理文本。
 
-session/event 更偏 Agent 业务记录；runtime log 用来排查系统运行问题，比如工具失败、命令失败、配置错误；change log 用来复盘每次任务做了什么，包括任务文本、模式、成功失败、摘要、变更文件、diff stat 和测试结果。三者分开，排障和 review 都更清晰。
+## Q14：多 Agent 是怎么触发的？
 
-## Q14：上下文记忆怎么管理？
+仓库任务默认具备受控委派能力。`SubAgentIntent` 区分能力询问、明确要求、自动选择和明确禁用。用户说“用两个 subagent，一个实现一个 review”会把实际委派变成完成条件。`--agents` 只覆盖并发数，不是脚本式功能开关。
 
-当前分两层。第一层是短期 transcript memory：每个交互会话复用同一个 session，但执行决策和聊天消息分开记录，重建对话时过滤工具调用等内部轨迹。遇到“这个难度如何”这种模糊指代，只把最近一次完整任务作为候选上下文，并暂停长期记忆和 Skill 注入；显式说“之前那个”时才保留历史范围。第二层是本地长期记忆：`LongTermMemoryStore` 会把 `TASK_SUMMARY` 和 `/compact` 生成的 `MEMORY_COMPACTION` 索引到 `.mini-agent/memory/index.jsonl`。检索时经过 query build、retrieve、rerank 和 evidence selection，最后只注入少量相关证据。
+## Q15：Writer 子 Agent 为什么需要 worktree？
 
-现在长期记忆还覆盖 Direct、Web、Review 和仓库分析，并支持显式 remember/forget。失败任务默认不索引，常见密钥会脱敏，召回内容使用不可信证据标签包裹，不能作为指令执行。Plan 模式则是另一条安全边界：它不依赖模型自觉，而是在工具暴露和 decision 执行两层阻止写操作。
+只生成 Patch 无法在修改后的真实文件上测试，也无法让 Reviewer 可靠读取依赖结果。Writer worktree 提供：
 
-需要注意的是，这是一套 repo-local 的检索式长期记忆，不应称作项目的文档 RAG。它默认使用离线哈希向量，也可切换 OpenAI-compatible embedding，并具备 TTL、置信度和同主题替代；独立文档 RAG 则索引 Markdown/TXT，并通过 `knowledge_search` 提供带行号引用的知识证据。
+- 父级当前工作状态的隔离基线；
+- 真实文件修改；
+- 允许列表中的验证；
+- 失败后继续修复；
+- 相对私有基线的最终 Diff；
+- 结束后的统一清理。
 
-## Q15：和 Codex CLI / Claude Code 的思路有什么相似点？
+## Q16：多个 Agent 冲突怎么办？
 
-相似点是 CLI 优先、受控工具、session 恢复、slash command、上下文压缩和本地审计。区别是本项目是教学和作品级 MVP，核心在 TypeScript 实现的 AgentLoop、ToolRegistry、PermissionManager、PatchManager、CommandRunner 和 JSONL 记录体系，不追求直接复刻完整产品。
+子任务记录父级基线指纹。主 Agent 合入前重新计算父工作区状态；若发生变化，会重新验证 Patch。仍可干净应用则继续，冲突则返回 `DELEGATED_PATCH_CONFLICT` 并要求基于新基线重新委派，不自动覆盖。
 
-## Q15.1：项目有没有 MCP？
+## Q17：子 Agent 是安全沙箱吗？
 
-当前已经实现 MCP tools runtime，但没有覆盖完整 MCP 协议。
+不是强沙箱。它使用临时 worktree、工具限制和命令允许列表隔离副作用，但测试脚本仍运行仓库代码。生产环境需要额外的容器、系统调用限制、网络策略和资源配额。
 
-已经做了：
+## Q18：Web 搜索如何减少幻觉？
 
-- 支持 stdio 和 Streamable HTTP 的 initialize、tools/list、tools/call。
-- 远端工具会做名称隔离、权限映射、统一审计和生命周期关闭。
-- descriptor 包含 inputSchema、permissionLevel、source、category 和 annotations。
-- 有 MCP server config schema，能校验 command/url/args/enabled。
-- CLI 支持 `mini-agent mcp tools` 查看本地工具描述。
+- 第一条查询保持用户实体、范围和限定词；
+- URL 必须来自本轮搜索/抓取；
+- 搜索结果只作为候选，重要来源需要抓取；
+- 时效最高级比较版本/日期候选并优先权威来源；
+- Transport 失败后不反复同义重试或猜 URL；
+- 证据不足时允许诚实结束。
 
-还没做：
+Agent 能改善证据流程，不能弥补搜索服务完全没有召回的内容。
 
-- resources 和 prompts。
-- server-initiated sampling / elicitation。
-- OAuth 和更完整的认证 profile。
-- 旧版 HTTP+SSE 回退、通知订阅和完整协议兼容测试。
+## Q19：为什么要 Session、Runtime Log 和 Change Log 三套记录？
 
-面试时准确说“实现了 MCP tools runtime”，同时主动说明暂未覆盖 resources/prompts、server-initiated request、OAuth 和旧 SSE 回退。这样既能体现真实实现，也不会把协议支持范围吹大。
+- Session/Event：还原一次对话和 Agent 执行；
+- Runtime Log：记录跨任务运行状态和错误；
+- Change Log：面向仓库改动的紧凑审计；
+- Checkpoint：恢复中断中的有界工作状态。
 
-## Q16：现在是真模型还是 mock？
+它们的消费者和生命周期不同，强行合并会让恢复、调试和审计互相污染。
 
-产品运行路径是真实 OpenAI-compatible API。测试里仍然会 stub fetch 或用 scripted LLM，这是为了自动化测试稳定，不是产品功能。
+## Q20：长期记忆和 RAG 有什么区别？
 
-## Q17：配置 API key 为什么放文件里？
+Long-term Memory 保存受策略约束的用户偏好、项目约定、架构决策和已验证结果，用于未来任务上下文。RAG 索引 Markdown/TXT 文档，按来源和行号返回知识证据。两者可以共享 Embedding 技术，但语料、写入策略、引用要求和用途不同。
 
-本地开发时配置文件更直观。`mini-agent.config.json` 被 gitignore 忽略，`config show` 默认脱敏。也支持环境变量，适合 CI 或临时覆盖。
+## Q21：MCP 做到了什么？
 
-## Q18：这个项目难点在哪里？
+当前实现 stdio 和 Streamable HTTP 的 MCP tools runtime，包括初始化、`tools/list`、`tools/call`、名称隔离、权限映射、统一 Tool Registry 和生命周期关闭。
 
-难点不在调用一次 API，而在把模型输出变成可控执行：结构化决策、工具 schema、路径安全、patch check、命令安全、测试反馈、session 审计和错误恢复。
+没有声称完整覆盖 resources、prompts、OAuth、服务端主动请求和所有兼容场景。
 
-## Q19：如果测试失败，Agent 怎么继续？
+## Q22：如何测试 Agent，而不是只测试函数？
 
-`CommandRunner` 会返回结构化失败结果，包括 stdout、stderr、exitCode。AgentLoop 把这些信息放回上下文，模型下一轮可以继续搜索、读取文件或生成修复 patch。
+三层：
 
-## Q20：有什么不足？
+1. 单元测试：解析器、策略、工具和存储；
+2. AgentLoop 场景：多步 Decision、失败恢复、证据门禁、子任务和冲突；
+3. AgentBench：版本化数据集、成功率、工具选择、步数、Token、缓存、时延和失败分类。
 
-当前不是生产级沙箱；上下文压缩和大型仓库取证仍比较初级；长期记忆仍使用 repo-local JSONL；Eval 已有指标框架但真实任务数据集规模有限；MCP 只覆盖 tools runtime；复杂开放任务仍明显依赖模型本身的规划能力。
+真实模型模式需要多次重复，不能用一次幸运结果证明稳定。
 
-## Q21：后续怎么扩展？
+## Q23：项目当前最大的不足是什么？
 
-下一步不应该继续盲目堆功能，而是扩大真实 Eval scenario、做 claim-source 对齐、增强上下文压缩和 embedding 索引迁移。如果未来需要平台化，再单独增加任务队列、状态存储、租户隔离、限流、取消和观测系统，不把多人服务能力硬塞进当前单机 CLI。
+- 真实模型 benchmark 规模有限；
+- 搜索质量受底层提供商影响；
+- 子 Agent 是应用层隔离；
+- 本地文件存储不是多租户架构；
+- 缺少 IDE 集成与商业产品级交互；
+- MCP 和外部系统覆盖仍有限。
 
-## Q22：我原来主要做客户端，这个项目能帮我跳出去吗？
+这些属于产品和生产化差距，不应通过增加特殊问句规则来掩盖。
 
-可以，但前提是你要讲对。
+## Q24：和 Claude Code / Codex 有什么差距？
 
-这个项目最有价值的点，不是“我也会用大模型”，而是你借它展示了：
+成熟产品拥有更强模型、长期真实任务数据、IDE/终端生态、强隔离执行环境、账号与组织能力、跨平台质量和专门的基础设施团队。本项目的价值是完整实现并解释其中一组核心工程问题，而不是宣称能力等价。
 
-- 后端/平台工程思维
-- 工具系统抽象能力
-- 安全边界设计
-- session 和日志审计能力
-- 任务编排和错误恢复能力
+## Q25：如果改成多用户服务，怎么设计？
 
-如果你把它讲成“我做了个 AI 聊天工具”，帮助不会太大。  
-如果你把它讲成“我做了一个受控执行的本地 Agent 工程系统”，价值就会高很多。
+需要增加：
 
-## Q23：这个项目最适合投什么岗位？
+- API Gateway、认证和租户隔离；
+- 每任务容器/沙箱与临时工作区；
+- 队列、调度、并发和资源配额；
+- PostgreSQL 等事务存储；
+- 对象存储与集中日志；
+- Secret Manager；
+- 可观测性、计费和成本预算；
+- 分布式取消、幂等与恢复；
+- 网络 Egress 和 MCP 连接策略。
 
-最适合：
+当前 JSONL + 本地 Git 的设计是单用户 CLI 的主动取舍，不能直接平移到 100 个并发用户。
 
-- Java / Go / Node.js 后端开发
-- 平台工程 / 工程效率
-- AI 应用工程
-- Agent / Workflow / LLM 工程
+## Q26：这个项目最能证明什么能力？
 
-也可以作为加分项用于：
+它最能证明的不是 Prompt 技巧，而是：
 
-- 测试开发
-- DevTools
-- 中后台研发
-
-## Q24：面试官如果说“这不就是调 API 吗”，怎么回？
-
-可以直接说：
-
-> 如果只是调一次 API，这个项目根本不需要这么多模块。真正麻烦的是把模型输出变成可控执行系统，所以我才拆了 TaskRouter、AgentLoop、ToolRegistry、PatchManager、CommandRunner、SessionStore 和日志审计。这个项目的难点不在请求模型，而在工程闭环。
-
-这个回答通常很有效，因为它把讨论从“会不会用模型”拉回“会不会做系统”。
-
-## Q25：Agent Harness 是什么？为什么普通单元测试不够？
-
-Agent Harness 不是一种模型算法，而是 Agent 的运行和评测框架。它负责构造初始仓库、注入 scripted LLM、运行完整 AgentLoop、采集工具和步骤轨迹，再检查最终文件、diff、工具选择和任务状态。
-
-普通单元测试适合验证一个 parser 或 tool；Harness 验证的是多个模块组合以后，Agent 能否完成一条用户任务。项目当前会统计 task success、平均步骤、LLM 调用、工具选择准确率和失败类别。scripted LLM 保证离线回归可重复，真实模型抽样则用于观察 Prompt 和模型本身的波动，两者不能互相替代。
-
-## Q26：你怎么证明 Agent 优化后真的变好了？
-
-不能只凭一次 demo。应该固定一组代表性 scenario，记录修改前后的成功率、工具选择、步骤数、LLM 调用、延迟、token 成本和 unsupported claim，再对失败做分类。还要区分确定性的离线回归和真实模型抽样：前者适合防代码回归，后者适合衡量模型和 Prompt 的实际表现。
-
-当前项目已经有 Harness 和指标聚合，但场景数量仍有限，所以只能证明核心工程链路稳定，不能声称对所有开放任务都有高成功率。
-
-## Q27：当前长期记忆和文档 RAG 有什么区别？
-
-两者共享 embedding、关键词/向量召回等检索技术，但语料、生命周期和用途不同。长期记忆索引 `TASK_SUMMARY`、`MEMORY_COMPACTION` 和显式记忆，用于恢复历史任务上下文；文档 RAG 对 Markdown/TXT 做加载、分块和来源增量更新，用于回答知识库问题，并返回文件行号 citation。
-
-两套索引也完全分开：前者位于 `.mini-agent/memory/index.jsonl`，后者位于 `.mini-agent/rag/index.jsonl`。当前文档 RAG 具备分块、混合检索、过滤、引用、证据不足拒答和离线评测，但存储仍是本地 JSONL，因此准确说法是“仓库级轻量文档 RAG”，不是生产级知识库平台。
-
-## Q28：MCP 和 Function Calling 有什么区别？
-
-Function Calling 解决“模型如何选择宿主提供的函数”；MCP 解决“宿主应用如何发现、连接和调用外部 Server 提供的标准化能力”。MCP Client 会把远端工具转换成模型可见的 tool spec，但 MCP 还涉及 transport、capability negotiation、server lifecycle 和协议消息，两者不是同一个层级。
-
-## Q29：Agent 面临哪些特有安全风险？
-
-除了传统的路径穿越、命令注入和 SSRF，还包括：
-
-- 恶意用户直接要求绕过限制的 prompt injection。
-- README、网页或工具结果中夹带指令的 indirect prompt injection。
-- MCP Server 用误导性描述诱导模型调用的 tool poisoning。
-- 恶意历史内容被长期召回的 memory poisoning。
-
-防御不能只靠 Prompt，而要在本地执行层做最小权限、路径和网络约束、危险命令拦截、MCP 权限映射、记忆不可信标记和完整审计。当前项目是应用层防护，不等于生产级 OS sandbox。
-
-## Q30：如果把单机 CLI 改成 100 个用户同时使用的服务，怎么设计？
-
-需要把当前进程内和 repo-local 能力拆成服务化组件：
-
-- API 层负责认证、限流、任务提交和流式事件。
-- 任务队列负责削峰、重试、取消和优先级。
-- Worker 在隔离工作区或容器中运行 Agent。
-- 数据库存 session、任务状态、事件和租户配置。
-- 对象存储保存较大的日志、patch 和产物。
-- Redis 可用于短期状态、分布式锁和配额计数。
-- 观测系统记录 trace、模型延迟、token、成本、工具成功率和失败分类。
-
-还必须处理幂等性、仓库隔离、API Key 管理、并发写冲突和任务超时。当前 CLI 没有这些能力，因为它的定位是单用户本地 Agent，不能拿单机设计冒充多租户平台。
+- 能从真实失败抽象通用控制层；
+- 能设计状态机、权限、证据和恢复；
+- 能处理模型不确定性与本地确定性代码的边界；
+- 能维护测试、文档和架构演进；
+- 能清楚说明已完成能力与尚未解决的问题。

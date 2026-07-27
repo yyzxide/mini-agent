@@ -1,12 +1,12 @@
 # 测试计划
 
-当前项目只保留本地 CLI Agent，因此测试目标也收缩为：保证 CLI、任务分流、工具系统、AgentLoop、LLM 客户端、patch、命令执行和 session 记录稳定。
+当前项目只保留本地 CLI Agent，因此测试目标是保证 CLI、统一语义与契约、工具系统、AgentLoop、LLM 客户端、Patch、命令、上下文、多 Agent 和 Session 审计稳定。
 
 截至本轮修复，已验证：
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 基线：59 个测试文件、522 个测试用例。
+- 正常环境全量 Vitest 通过；具体数量和验证日期只在[项目现状](PROJECT_STATUS.md#当前验证基线)维护。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -98,7 +98,7 @@
 - `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
 - `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
-- Direct/Web/Review/RepositoryAnalysis/AgentLoop 可按策略召回长期记忆，并把它标记为不可信历史证据；实时 Web 问题和易过期赛果必须禁用长期记忆召回。
+- 普通 Direct/Web 回答不主动召回长期记忆；仓库任务只按策略选择稳定偏好、项目约定和架构决策，显式历史召回才允许检索已验证结果。实时 Web 问题和易过期赛果必须禁用历史事实召回。
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
 - `structured-salience-v2` compaction 同时受字符与 Token 预算控制，分层保留用户硬约束、最近对话和执行证据。
 - 超长工具结果会单条裁剪，重复记录会去重；压缩正文保留来源 id，trace 能解释每条选择的分层、原因和裁剪状态。
@@ -143,7 +143,7 @@
 覆盖：
 
 - `TaskUnderstanding` 先确定性产出 operation、target、answerShape、answerDepth、外部事实策略和权限信号；高置信度短追问不增加额外模型调用，条件、复杂否定与间接动作进入带 Conversation 的模型结构化补全，合并策略必须保留显式只读/联网/本地事实硬约束。
-- 所有 CLI 请求最终都进入统一 `AgentLoop`，TaskRouter 只提供语义提示，`TaskContractBuilder` 负责编译能力和完成条件。
+- 所有 CLI 请求最终都进入统一 `AgentLoop`；TaskRouter 只映射最终语义记录到兼容标签，`TaskContractBuilder` 负责编译能力和完成条件。
 - 未显式传入契约的程序化调用方也使用语义推导契约；默认契约不授予仓库读取、写入、命令、Web、RAG、MCP 或委派能力。
 - 普通聊天和明确声明“代码片段 / 不要改文件”的请求生成 `DIRECT_RESPONSE` 单步契约，并保留 `DIRECT_ANSWER` 兼容标签。
 - 默认代码生成、仓库修改、测试和修复请求生成 `REPOSITORY_TASK`，并真正创建或修改仓库文件。
@@ -154,9 +154,9 @@
 - “世界杯”“股票”等主题名词不能单独强制联网；时效、精确属性、结果或显式研究意图仍应进入 Web。
 - 代码审查与仓库分析共用 `REPOSITORY_INVESTIGATION` 只读契约，只区分输出要求。
 - 多 Agent 默认可用；能力问句保持本地产品回答，明确“使用多个 subagent”进入仓库任务并成为完成条件，不依赖 CLI 开关。
-- 子任务协议覆盖 `READ_ONLY`、`PROPOSE_CHANGES` 和依赖前序 writer 的 `REVIEW_CHANGES`；writer 补丁经过校验但不能直接改变主工作区。
+- 子任务协议覆盖 `READ_ONLY`、`PROPOSE_CHANGES` 和依赖前序 Writer 的 `REVIEW_CHANGES`；Writer 在临时 worktree 修改和验证，但不能直接改变主工作区。
 - 主 Agent 只有在收到完成的 patch proposal 后才能执行 `APPLY_DELEGATED_PATCH`，并且合入后仍必须满足父级验证门禁。
-- 子 Agent 的任务开始、只读工具调用、任务完成、变更文件和依赖关系会进入统一终端事件流。
+- 子 Agent 的任务开始、worktree、读工具、Patch、受限验证命令、任务完成、变更文件和依赖关系会进入统一终端事件流。
 - 子 Agent 每次 LLM 决策前显示 `thinking step`，之后显示结构化 decision 摘要；协议错误、恢复动作和最终失败原因不得被空状态覆盖。
 - 新建独立文件的 writer 可以不读取无关仓库文件直接提交经校验的补丁；修改或删除已有文件仍必须先取得读取证据。
 - 常见子级 JSON/Schema 协议错误进行有界恢复；恢复耗尽后保留精确错误。
@@ -216,7 +216,7 @@
 - Harness 能校验成功状态、diff 内容和文件内容。
 - Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
 - stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call。
-- 普通 Web 问题没有可读正文时进入证据不足回答；实时问题必须至少抓取两个独立域名的正文，否则不得输出确定性结果。
+- 普通 Web 问题没有可读正文时进入证据不足回答；抓取数量和独立域名门槛由 Task Contract 按声明风险决定，测试不得把固定“双来源”误写成所有实时问题的唯一规则。
 - Web 答案中出现本轮来源列表之外的 URL 时必须触发重写；重写仍引用未知 URL 时由本地拦截。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
 - 后续真实场景可以沉淀成 scenario，不再完全依赖人工 CLI 试用。
@@ -271,13 +271,13 @@
 执行命令：
 
 ```bash
-npm run test:regression
+pnpm test:regression
 ```
 
 演示前快速验收：
 
 ```bash
-npm run verify:regression
+pnpm verify:regression
 ```
 
 ## 2. 手工测试范围
@@ -313,7 +313,7 @@ mini-agent tool run git_diff '{}'
 
 ```bash
 mini-agent command run "echo hello"
-mini-agent command run "npm test"
+mini-agent command run "pnpm test"
 mini-agent command run "sudo reboot"
 ```
 
@@ -384,12 +384,12 @@ mini-agent
 ## 3. 提交前命令
 
 ```bash
-npm run build
-npm run typecheck
-npm run lint:unused
-npm run test:regression
-npm test
-npm run verify
+pnpm build
+pnpm typecheck
+pnpm lint:unused
+pnpm test:regression
+pnpm test
+pnpm verify
 git diff --check
 ```
 
