@@ -21,8 +21,10 @@ export interface TaskChangeLogEntry {
   mode: StoredTaskChangeMode;
   success: boolean;
   summary: string;
+  beforeChangedFiles?: string[];
   currentChangedFiles: string[];
   newlyChangedFiles: string[];
+  taskChangedFiles?: string[];
   diffStat: string | null;
   tests: TaskChangeTestResult[];
   error?: string;
@@ -43,6 +45,7 @@ export interface AppendTaskChangeLogInput {
   summary: string;
   beforeChangedFiles?: string[];
   currentChangedFiles?: string[];
+  taskChangedFiles?: string[];
   diffStat?: string | null;
   tests?: TaskChangeTestResult[];
   error?: string;
@@ -63,7 +66,8 @@ export class TaskChangeLogStore {
   async append(input: AppendTaskChangeLogInput): Promise<TaskChangeLogEntry> {
     await ensureDir(resolveMiniAgentPath(this.repoPath), 0o700);
     const currentChangedFiles = sortUnique(input.currentChangedFiles ?? []);
-    const beforeChangedFiles = new Set(input.beforeChangedFiles ?? []);
+    const beforeChangedFiles = sortUnique(input.beforeChangedFiles ?? []);
+    const beforeChangedFileSet = new Set(beforeChangedFiles);
     const entry: TaskChangeLogEntry = {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
@@ -72,8 +76,10 @@ export class TaskChangeLogStore {
       mode: input.mode,
       success: input.success,
       summary: input.summary,
+      beforeChangedFiles,
       currentChangedFiles,
-      newlyChangedFiles: currentChangedFiles.filter((file) => !beforeChangedFiles.has(file)),
+      newlyChangedFiles: currentChangedFiles.filter((file) => !beforeChangedFileSet.has(file)),
+      taskChangedFiles: sortUnique(input.taskChangedFiles ?? []),
       diffStat: input.diffStat ?? null,
       tests: input.tests ?? [],
       ...(input.error ? { error: input.error } : {}),

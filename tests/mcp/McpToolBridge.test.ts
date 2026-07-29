@@ -86,6 +86,33 @@ describe("MCP tool bridge", () => {
     expect(callTool).toHaveBeenCalledWith("delete_event", { id: "event-1" });
   });
 
+  it("fails closed when a remote tool is called without a permission manager", async () => {
+    const callTool = vi.fn(async () => ({ structuredContent: { ok: true } }));
+    const config = McpServerConfigSchema.parse({
+      name: "external",
+      command: "unused-fixture",
+      defaultPermission: "SAFE",
+    });
+    const tool = new McpRemoteToolAdapter(config, {
+      name: "read_data",
+      inputSchema: { type: "object" },
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    }, {
+      connect: async () => undefined,
+      listTools: async () => [],
+      callTool,
+      close: async () => undefined,
+    });
+
+    const result = await tool.execute({}, { repoPath: process.cwd() });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: { code: "MCP_PERMISSION_MANAGER_REQUIRED" },
+    });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   it("discovers and calls tools over a real stdio JSON-RPC process", async () => {
     const config = McpServerConfigSchema.parse({
       name: "fixture",

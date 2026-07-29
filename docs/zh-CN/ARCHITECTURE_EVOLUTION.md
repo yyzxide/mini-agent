@@ -649,3 +649,60 @@ Git worktree 会覆盖父级当时的 staged、unstaged 和非忽略 untracked �
 - 词法规则仍用于路径、Patch、命令、URL 血缘、输出事实冲突和检索特征，这些规则不授予能力或选择执行模式；
 - 兼容入口应保持单向归一化，不能重新扩张成并行运行时；
 - 真实模型成功率仍需要版本化 AgentBench 和重复抽样证明。
+
+## 23. 从 clean build 到可直接启动的 CLI 发布物
+
+### A：源码和构建都正确，但全局命令失去执行权限
+
+clean build 会先删除整个 `dist/`。TypeScript 随后重新生成带有正确 `#!/usr/bin/env node` 的 `dist/cli/index.js`，但它不会承诺继承旧文件的 POSIX mode；在收紧的 umask 下，新入口可能成为 `600`。全局安装的 `mini-agent` 是指向这个文件的符号链接，因此直接运行会在 Bash 启动 Node 之前得到 `Permission denied`，而 `node dist/cli/index.js` 仍然正常。
+
+这说明“TypeScript 编译通过”和“CLI 发布物可执行”是两个不同的后置条件。只在当前机器手工 `chmod +x` 不能解决问题，因为下一次 clean build 会再次删除该 inode。
+
+### B：构建后定型与真实入口门禁
+
+构建链新增两个独立步骤：
+
+1. `scripts/finalize-build.mjs` 在编译后校验 Node shebang，并在非 Windows 平台把 CLI 入口设为 `755`；
+2. `scripts/check-cli-entry.mjs` 检查文件类型、shebang 和可执行位，然后不经过 `node <file>` 兜底，直接执行编译后的入口并核对 `--version` 与 `package.json`。
+
+`pnpm verify` 和 `pnpm verify:regression` 都在 clean build 后运行 `check:cli`，GitHub Actions 使用同一条门禁。Windows 没有 POSIX executable bit，检查器会改用当前 Node 执行同一入口并保留 shebang、版本校验。
+
+因此全局符号链接、npm `bin` 发布物和本地构建共享同一个可验证入口；以后即使 umask、构建目录或编译行为变化，也会在发布前失败，而不是等用户运行命令时才暴露。
+
+## 24. 边界默认拒绝、审计基线与物理拆分
+
+### A：主链路安全不代表工具适配层安全
+
+CLI 和 `AgentLoop` 一直会向 MCP Tool 传入 `PermissionManager`，但旧的 `McpRemoteTool` 使用可选调用；程序化调用方遗漏 manager 时会绕过检查。这属于工具边界的 fail-open，而不是 TaskFrame 控制面的路由问题。
+
+现在 MCP adapter 在调用任何远端工具前要求权限管理器存在，缺失时返回 `MCP_PERMISSION_MANAGER_REQUIRED`，不会连接远端 Server。修改型 MCP 仍保留逐工具、逐调用的显式批准。权限提示同时接受界面展示的 `1. yes / 2. no`，避免提示与解析分离。
+
+### B：任务 Diff 与仓库脏状态是两种不同证据
+
+任务级 `TaskDiffArtifact` 描述本轮相对基线真正修改了什么；Git working tree snapshot 描述任务前后仓库整体有哪些 staged、unstaged 和 untracked 文件。两者不能共用一个模糊的 `changedFiles`。
+
+变更日志现在分别保存：
+
+- `beforeChangedFiles`：任务开始前的仓库脏文件；
+- `currentChangedFiles`：任务结束后的仓库脏文件；
+- `newlyChangedFiles`：结束状态相对开始状态新增的脏文件；
+- `taskChangedFiles`：TaskDiff 证明由本轮产生或修改的文件。
+
+`GitManager` 使用独立临时 index 构造工作树快照，把 staged、unstaged 和非忽略 untracked 文件纳入同一统计，同时不修改用户真实 index。任务完成性仍由 `TaskDiffService` 的前后 tree 比较负责。
+
+### C：并发索引与确定性质量门禁
+
+RAG 的 embedding 计算在锁外进行，提交阶段进入跨进程写锁、重新读取最新 JSONL、合并本次来源并原子替换。这样不会把远端 embedding 延迟放进临界区，也不会让两个 CLI 进程对不同来源的导入互相覆盖。
+
+默认 `pnpm bench` 现在自动比较 `benchmarks/baselines/core-v1.json`；`pnpm verify` 也显式执行同一确定性门禁。真实模型和 Live Web 评测仍保持 opt-in，因为它们需要凭据并存在成本与外部波动。
+
+### D：按职责拆分，不重写控制面
+
+本轮没有新建第二条执行链，而是从两个集中式入口提取无状态或基础设施职责：
+
+- `AgentLoopSupport`：决策稳定键、重复调用判断、命令转换、遥测聚合和 Diff metadata；
+- `CliParsers` / `CliFormatters`：参数解析、输入读取和终端序列化；
+- `DoctorReport`：环境诊断；
+- `TaskChangeLogger`：Git 基线、任务 Diff 和测试证据汇总。
+
+`AgentLoop` 仍是唯一运行时，`src/cli/index.ts` 仍是组合入口；拆分降低物理耦合，不引入 Direct/Web/Edit 模式或新的自然语言硬编码路由。

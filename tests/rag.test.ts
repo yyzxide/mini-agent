@@ -50,6 +50,39 @@ describe("RAG knowledge base", () => {
     expect((await store.stats()).tags).toEqual({ backend: 1 });
   });
 
+  it("serializes concurrent index updates without losing either source", async () => {
+    await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks are resumable.\n", "utf8");
+    await fs.writeFile(path.join(repoPath, "docs", "review.md"), "# Review\n\nReview permissions are verified.\n", "utf8");
+    let embeddingsStarted = 0;
+    let releaseEmbeddings: (() => void) | undefined;
+    const bothEmbeddingsStarted = new Promise<void>((resolve) => {
+      releaseEmbeddings = resolve;
+    });
+    const provider: EmbeddingProvider = {
+      id: "concurrent-test-v1",
+      embed: async () => {
+        embeddingsStarted += 1;
+        if (embeddingsStarted === 2) releaseEmbeddings?.();
+        await bothEmbeddingsStarted;
+        return [1, 0, 0];
+      },
+    };
+
+    await Promise.all([
+      new RagStore({ repoPath, embeddingProvider: provider }).ingest(["docs/upload.md"]),
+      new RagStore({ repoPath, embeddingProvider: provider }).ingest(["docs/review.md"]),
+    ]);
+
+    expect(await new RagStore({ repoPath, embeddingProvider: provider }).stats()).toMatchObject({
+      totalChunks: 2,
+      sources: 2,
+      bySource: {
+        "docs/review.md": 1,
+        "docs/upload.md": 1,
+      },
+    });
+  });
+
   it("returns grounded citations and supports source and tag filters", async () => {
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nThe upload flow validates every chunk before merge.\n", "utf8");
     await fs.writeFile(path.join(repoPath, "docs", "review.md"), "# Review\n\nThe review workflow verifies reviewer ownership.\n", "utf8");

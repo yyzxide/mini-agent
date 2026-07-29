@@ -21,7 +21,8 @@
 - 从 `src/cli/index.ts` 建立 TypeScript import graph，拒绝不可达源码和无法解析的本地 import，并禁止已删除控制面文件或旧模式标识在迁移边界之外重新出现；
 - 检查源码导出是否至少被源码或测试引用，防止“文件可达但旧接口无人使用”；
 - 校验 README 与 `docs/` 中的本地链接和源码路径引用；
-- 清空 `dist/` 后重新执行 TypeScript 构建，避免旧编译产物伪装成当前功能；
+- 清空 `dist/` 后重新执行 TypeScript 构建，校验 shebang 并在 POSIX 平台恢复 `dist/cli/index.js` 的可执行位，避免旧编译产物或不可启动的 CLI 伪装成成功构建；
+- 通过真实可执行入口运行 `dist/cli/index.js --version`，并核对输出与 `package.json` 版本一致；
 - 开启 `noUnusedLocals` / `noUnusedParameters` 检查；
 - 运行完整 Vitest 测试集。
 
@@ -170,7 +171,7 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 - 多 Agent 要求进入 `TaskFrame.collaboration`，长会话取证进入 `TaskFrame.conversationEvidence`，Web 时效要求进入 `TaskFrame.webEvidencePolicy`。
 - 系统使用中性的最近窗口解析 TaskFrame，再根据模型给出的语义查询从完整 Session 有界召回历史消息和相邻上下文；它不是向量检索。
 - 产品元事实冲突、危险命令、路径、URL 血缘和 Memory 证据过滤仍有确定性规则；是否属于产品问题、是否召回历史记忆以及需要哪些能力只消费 TaskFrame，不再由这些规则选择 Direct/Web/Edit。
-- 配置中的 MCP Tool 可被模型逐个发现和申请；授权精确到 `<server>__<tool>`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准。
+- 配置中的 MCP Tool 可被模型逐个发现和申请；授权精确到 `<server>__<tool>`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准；程序化调用若没有提供权限管理器会直接失败，不存在 fail-open 旁路。
 
 ### 安全与隔离
 
@@ -188,7 +189,7 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 ### 产品化
 
 - CLI 是主要产品界面，没有 IDE 集成、Web 控制台或持续式全屏 TUI。
-- 本地 JSONL 和文件锁适合单用户 CLI，不适合多租户服务。
+- 本地 JSONL、RAG 跨进程写锁和原子替换适合单机 CLI；它们能避免并发索引更新丢失，但不替代多租户服务需要的数据库事务、ACL 和高可用。
 - 配置 profile、版本发布、安装分发和跨平台现场验证仍可继续打磨。
 
 ## 面试项目竞争力

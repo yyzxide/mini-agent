@@ -5,6 +5,8 @@
 当前验证基线：
 
 - `pnpm check:architecture` 会拒绝不可达源码、无法解析的本地 import、已删除控制面文件复活，以及旧执行模式标识越过持久化兼容边界。
+- `pnpm build` 会在 clean build 后校验 CLI shebang，并在 POSIX 平台把 `dist/cli/index.js` 恢复为可执行文件；`pnpm check:cli` 会直接运行该入口并核对版本。
+- `pnpm check:bench` 会运行确定性 AgentBench 数据集并与版本化 baseline 比较；`pnpm verify` 默认包含该门禁。
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
 - `corepack pnpm test` 全量 Vitest 通过；具体数量以当次命令输出为准，不在长期文档中写死。
@@ -39,6 +41,7 @@
 - stdio fixture 能完成 initialize、tools/list 和 tools/call。
 - Streamable HTTP fixture 能处理 JSON response、session header 和 close。
 - 远端工具名称隔离、permission mapping、错误包装和 Registry dispose。
+- 任何 MCP 远端工具在缺少权限管理器时默认拒绝，不允许程序化调用绕过检查。
 - `mini-agent mcp tools/status/call` 能输出结构化结果。
 
 ### 1.2 CommandRunner
@@ -61,6 +64,7 @@
 - `REVIEW` 和 `DANGEROUS` 的交互式确认。
 - 非交互模式拒绝。
 - autoApprove。
+- 提示中的 `1. yes / 2. no` 与实际输入解析一致。
 - 危险命令拦截。
 
 ### 1.4 Session/Event
@@ -82,7 +86,7 @@
 - 日志读取和按数量截断。
 - API key、authorization、token、password 等敏感字段脱敏。
 - 任务变更日志写入 `.mini-agent/change-log.jsonl`。
-- 新变更日志只写 `AGENT_LOOP / PLAN`，记录任务、session、成功失败、摘要、任务级变更文件、diff stat、测试结果和通用执行 metadata；读取边界仍兼容旧模式与旧 review metadata。
+- 新变更日志只写 `AGENT_LOOP / PLAN`，分别记录任务前仓库脏文件、任务后仓库脏文件、任务级变更文件、净新增脏文件、diff stat、测试结果和通用执行 metadata；读取边界仍兼容旧模式与旧 review metadata。
 - `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
 ### 1.4.2 Long-term Memory
@@ -111,6 +115,7 @@
 
 - Markdown/TXT 安全加载、按行分块、来源哈希和增量重建。
 - `.mini-agent/rag/index.jsonl` 与 `.mini-agent/memory/index.jsonl` 相互独立。
+- 并发 `ingest/remove/clear` 通过写锁内重新读取与原子替换避免丢失更新。
 - 关键词与向量混合检索、来源/标签过滤、Top-K、多来源和上下文预算。
 - `knowledge_search` 返回文件行号 citation，空索引、provider 不匹配和证据不足时拒答。
 - 自然语言知识库问题进入可调用 `knowledge_search` 的 Agent 路径；RAG 能力问题返回确定性的本地产品说明。
@@ -379,6 +384,7 @@ pnpm check:architecture
 pnpm check:exports
 pnpm check:docs
 pnpm build
+pnpm check:cli
 pnpm typecheck
 pnpm lint:unused
 pnpm test:regression
@@ -396,6 +402,7 @@ git diff --check
 | 路径越权 | fs/read_file/search_code/apply_patch 测试 |
 | 内部元数据泄露 | read_file/search_code 的 `.git`、`.mini-agent` 拒绝测试 |
 | 命令卡死 | CommandRunner 超时测试 |
+| clean build 后全局 `mini-agent` 权限被移除 | 构建后 chmod、shebang 校验和 `check:cli` 直接入口测试 |
 | URL 读取失控 | fetch_url 超时、大小、内网目标测试 |
 | patch 损坏 | PatchManager check 测试 |
 | Git 换行配置影响 patch | PatchManager `core.autocrlf=false` 回归测试 |

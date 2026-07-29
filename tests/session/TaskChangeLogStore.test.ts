@@ -37,6 +37,7 @@ describe("TaskChangeLogStore", () => {
       summary: "failed",
       beforeChangedFiles: ["README.md"],
       currentChangedFiles: ["README.md", "src/index.ts"],
+      taskChangedFiles: ["README.md", "src/index.ts"],
       diffStat: "2 files changed",
       tests: [{ type: "TEST_FAILED", command: "npm test", exitCode: 1 }],
       error: "boom",
@@ -46,7 +47,10 @@ describe("TaskChangeLogStore", () => {
 
     expect(entries).toHaveLength(2);
     expect(entries[0]?.task).toBe("second task");
+    expect(entries[0]?.beforeChangedFiles).toEqual(["README.md"]);
+    expect(entries[0]?.currentChangedFiles).toEqual(["README.md", "src/index.ts"]);
     expect(entries[0]?.newlyChangedFiles).toEqual(["src/index.ts"]);
+    expect(entries[0]?.taskChangedFiles).toEqual(["README.md", "src/index.ts"]);
     expect(entries[0]?.tests[0]).toMatchObject({ type: "TEST_FAILED", command: "npm test" });
     expect(entries[1]?.task).toBe("first task");
   });

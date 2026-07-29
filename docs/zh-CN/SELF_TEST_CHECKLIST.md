@@ -8,7 +8,7 @@
 corepack enable
 pnpm install --frozen-lockfile
 pnpm verify
-pnpm bench -- --baseline benchmarks/baselines/core-v1.json
+pnpm bench
 git diff --check
 ```
 

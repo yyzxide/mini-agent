@@ -6,7 +6,13 @@ import {
   type EmbeddingProvider,
 } from "../memory/EmbeddingProvider.js";
 import { cosineSimilarity, extractKeywords, unique } from "../memory/MemoryText.js";
-import { ensureDir, readJsonLines, resolveMiniAgentPath, truncateText } from "../utils/fs.js";
+import {
+  ensureDir,
+  readJsonLines,
+  resolveMiniAgentPath,
+  truncateText,
+  withFileLock,
+} from "../utils/fs.js";
 import { RagDocumentLoader } from "./DocumentLoader.js";
 import { hashText } from "./DocumentLoader.js";
 import type {
@@ -29,6 +35,7 @@ const MAX_RESULTS_PER_SOURCE = 2;
 
 export class RagStore {
   private readonly indexPath: string;
+  private readonly lockPath: string;
   private readonly embeddingProvider: EmbeddingProvider;
   private readonly defaults: Required<Pick<RagSearchOptions, "topK" | "minScore" | "maxContextChars">>;
 
@@ -40,6 +47,7 @@ export class RagStore {
     defaultMaxContextChars?: number;
   }) {
     this.indexPath = resolveMiniAgentPath(options.repoPath, ...RAG_INDEX_PATH);
+    this.lockPath = resolveMiniAgentPath(options.repoPath, "rag", "index.lock");
     this.embeddingProvider = options.embeddingProvider ?? createEmbeddingProviderFromEnvironment({ repoPath: options.repoPath });
     this.defaults = {
       topK: options.defaultTopK ?? DEFAULT_TOP_K,
@@ -75,11 +83,12 @@ export class RagStore {
     });
     const loaded = await loader.load(inputPaths, options.tags);
     const existing = await this.readAll();
-    let next = [...existing];
+    const preparedChunks = new Map<string, RagChunk[]>();
     let unchangedFiles = 0;
     let indexedFiles = 0;
     let indexedChunks = 0;
     let replacedChunks = 0;
+    let totalChunks = existing.length;
 
     for (const document of loaded.documents) {
       const sourceChunks = existing.filter((chunk) => chunk.source === document.source);
@@ -88,14 +97,13 @@ export class RagStore {
         continue;
       }
 
-      replacedChunks += next.filter((chunk) => chunk.source === document.source).length;
-      next = next.filter((chunk) => chunk.source !== document.source);
       const timestamp = new Date().toISOString();
       const drafts = chunkText(document.text, { chunkSize, overlap });
+      const chunks: RagChunk[] = [];
       for (const draft of drafts) {
         const embeddingText = [document.title, draft.heading, draft.text].filter(Boolean).join("\n");
         const contentHash = hashText(draft.text);
-        next.push({
+        chunks.push({
           ...draft,
           id: hashText(`${document.source}:${draft.startLine}:${draft.endLine}:${contentHash}`),
           source: document.source,
@@ -111,12 +119,24 @@ export class RagStore {
           metadata: { chunkSize, overlap },
         });
       }
+      preparedChunks.set(document.source, chunks);
       indexedFiles += 1;
       indexedChunks += drafts.length;
     }
 
-    next.sort((left, right) => left.source.localeCompare(right.source) || left.chunkIndex - right.chunkIndex);
-    if (indexedFiles > 0) await this.writeAll(next);
+    if (indexedFiles > 0) {
+      await withFileLock(this.lockPath, async () => {
+        let next = await this.readAll();
+        for (const [source, chunks] of preparedChunks) {
+          replacedChunks += next.filter((chunk) => chunk.source === source).length;
+          next = next.filter((chunk) => chunk.source !== source);
+          next.push(...chunks);
+        }
+        next.sort((left, right) => left.source.localeCompare(right.source) || left.chunkIndex - right.chunkIndex);
+        await this.writeAll(next);
+        totalChunks = next.length;
+      });
+    }
     return {
       inputPaths,
       discoveredFiles: loaded.documents.length,
@@ -124,7 +144,7 @@ export class RagStore {
       unchangedFiles,
       indexedChunks,
       replacedChunks,
-      totalChunks: next.length,
+      totalChunks,
       skipped: loaded.skipped,
       indexPath: this.indexPath,
       embeddingProvider: this.embeddingProvider.id,
@@ -174,17 +194,21 @@ export class RagStore {
 
   async removeSource(source: string): Promise<number> {
     await this.init();
-    const entries = await this.readAll();
-    const next = entries.filter((entry) => !sourceMatches(entry.source, source));
-    if (next.length !== entries.length) await this.writeAll(next);
-    return entries.length - next.length;
+    return await withFileLock(this.lockPath, async () => {
+      const entries = await this.readAll();
+      const next = entries.filter((entry) => !sourceMatches(entry.source, source));
+      if (next.length !== entries.length) await this.writeAll(next);
+      return entries.length - next.length;
+    });
   }
 
   async clear(): Promise<number> {
     await this.init();
-    const entries = await this.readAll();
-    await this.writeAll([]);
-    return entries.length;
+    return await withFileLock(this.lockPath, async () => {
+      const entries = await this.readAll();
+      await this.writeAll([]);
+      return entries.length;
+    });
   }
 
   async stats(): Promise<RagStats> {

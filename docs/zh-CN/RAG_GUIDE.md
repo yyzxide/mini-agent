@@ -17,7 +17,7 @@ Markdown/TXT
 -> 标题提取、文本规范化、source hash
 -> 按行分块和 overlap
 -> 关键词提取 + embedding
--> JSONL 原子落盘
+-> JSONL 写锁内原子落盘
 -> query embedding
 -> 来源/标签 metadata filter
 -> 向量与关键词混合打分
@@ -31,7 +31,7 @@ Markdown/TXT
 
 - `DocumentLoader`：只允许读取仓库内 `.md`、`.markdown`、`.txt`，跳过内部目录、符号链接、超大文件和不支持类型。
 - `TextChunker`：保留起止行号和 Markdown 标题，支持可配置 chunk size 与 overlap。
-- `RagStore`：增量索引、原子写入、混合检索、过滤、证据选择和索引维护。
+- `RagStore`：增量索引、跨进程写锁、原子替换、混合检索、过滤、证据选择和索引维护。
 - `KnowledgeSearchTool`：把检索能力注册为只读 `SAFE` Agent 工具。
 - `RagEvaluator`：计算 answerability accuracy、hit rate、Recall@K 和 MRR。
 
@@ -45,6 +45,8 @@ mini-agent rag ingest README.md docs/zh-CN --chunk-size 1200 --overlap 180
 ```
 
 重复导入未变化的同一文件会跳过。源内容、标签、分块参数或 embedding provider 变化时，会删除该来源旧分块并重建。
+
+`ingest`、`remove` 和 `clear` 在提交索引时使用同一把跨进程文件锁，并在锁内重新读取最新索引，因此两个 CLI 进程同时更新不同来源时不会发生最后写入者覆盖。Embedding 计算在锁外完成，避免远端调用长时间占锁；搜索通过原子 rename 读取提交前或提交后的完整版本。该机制保证单机多进程的索引一致性，但不等同于多租户数据库的事务、ACL 和高可用能力。
 
 查询和过滤：
 

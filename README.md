@@ -42,7 +42,7 @@ Every CLI request and every programmatic `AgentLoop` call enters the same loop a
 
 Execution starts from a least-privilege bootstrap contract. Safe tools can be discovered, while Web, write, command, and delegation effects are granted or denied as the model proposes concrete actions. Successful completion is checked locally against the TaskFrame, accumulated evidence, permissions, sandbox rules, and post-change verification.
 
-Configured MCP tools are exposed to TaskFrame as a bounded metadata catalog marked as untrusted data. The runtime grants only the exact MCP tool selected by the model, never an entire server or a neighboring repository/command capability. Read-only tools remain usable in Plan mode; mutating external calls still require explicit per-call approval.
+Configured MCP tools are exposed to TaskFrame as a bounded metadata catalog marked as untrusted data. The runtime grants only the exact MCP tool selected by the model, never an entire server or a neighboring repository/command capability. Read-only tools remain usable in Plan mode; mutating external calls still require explicit per-call approval. The MCP adapter fails closed when a programmatic caller omits the permission manager, including for tools advertised as read-only.
 
 ### Model-driven task understanding
 
@@ -237,7 +237,7 @@ The project keeps four concepts separate:
 - long-term memory: governed preferences, conventions, decisions, and verified outcomes;
 - provider prompt cache: provider-reported token reuse, observed but not controlled by the Agent.
 
-Context compaction uses structured salience rather than retaining only the latest tail. Selected, truncated, and excluded sections are observable in trace output. Repository RAG is a separate, citation-bearing Markdown/TXT knowledge index with hybrid retrieval and offline evaluation.
+Context compaction uses structured salience rather than retaining only the latest tail. Selected, truncated, and excluded sections are observable in trace output. Repository RAG is a separate, citation-bearing Markdown/TXT knowledge index with hybrid retrieval and offline evaluation. Its mutating operations merge under a cross-process file lock and publish through atomic rename, preventing concurrent CLI updates from silently replacing unrelated sources.
 
 ## Development and verification
 
@@ -247,10 +247,10 @@ pnpm build
 pnpm typecheck
 pnpm lint:unused
 pnpm test
-pnpm bench -- --baseline benchmarks/baselines/core-v1.json
+pnpm bench
 ```
 
-`pnpm verify` is the canonical gate: it checks that every TypeScript source file is reachable from the CLI entry point, rejects unreferenced exports, validates documentation references, performs a clean build, rejects unused local declarations, and runs the deterministic suite. The tests cover semantic contracts and permissions, conversation provenance, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
+`pnpm verify` is the canonical gate: it checks that every TypeScript source file is reachable from the CLI entry point, rejects unreferenced exports, validates documentation references, performs a clean build, restores and directly verifies the compiled CLI executable, compares the deterministic AgentBench dataset with its versioned baseline, rejects unused local declarations, and runs the deterministic suite. The tests cover semantic contracts and permissions, conversation provenance, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
 
 CI runs on pushes and pull requests to `main`. Real-model and live-Web behavior remain opt-in because CI must be deterministic and must not require external credentials.
 

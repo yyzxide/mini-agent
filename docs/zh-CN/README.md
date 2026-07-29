@@ -82,7 +82,7 @@ User request
 corepack enable
 pnpm install --frozen-lockfile
 pnpm verify
-pnpm bench -- --baseline benchmarks/baselines/core-v1.json
+pnpm bench
 ```
 
 如果当前 Node 安装不允许 `corepack enable`，可以把下面所有 `pnpm` 替换为 `corepack pnpm`，无需全局安装 pnpm。
