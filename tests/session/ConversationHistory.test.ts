@@ -7,7 +7,7 @@ import {
 import type { JsonObject, SessionRecord, SessionRecordType } from "../../src/session/SessionTypes.js";
 
 describe("ConversationHistory", () => {
-  it("turns agent summaries into assistant messages and removes direct-answer duplicates", () => {
+  it("turns agent summaries into assistant messages and removes legacy-answer duplicates", () => {
     const records: SessionRecord[] = [
       record("1", "USER_MESSAGE", { content: "讨论 Skill" }),
       record("2", "ASSISTANT_MESSAGE", { content: "Skill 很容易创建。" }),
@@ -63,7 +63,37 @@ describe("ConversationHistory", () => {
     ]);
   });
 
-  it("isolates the latest exchange for an implicit demonstrative", () => {
+  it("attaches trusted repository-effect evidence to prior assistant turns", () => {
+    const records: SessionRecord[] = [
+      record("1", "USER_MESSAGE", { content: "写一个小游戏", runId: "run-1" }),
+      record("2", "AGENT_CHECKPOINT", {
+        runId: "run-1",
+        status: "FINISHED",
+        workingSet: { modifiedFiles: [] },
+        effects: {
+          successfulPatch: false,
+          verificationAfterPatch: false,
+        },
+      }),
+      record("3", "ASSISTANT_MESSAGE", { content: "小游戏已经写好。" }),
+      record("4", "TASK_SUMMARY", { summary: "小游戏已经写好。", success: true }),
+    ];
+
+    expect(buildConversationHistory(records)).toEqual([
+      { role: "user", content: "写一个小游戏" },
+      {
+        role: "assistant",
+        content: "小游戏已经写好。",
+        executionEvidence: {
+          repositoryChanged: false,
+          changedFiles: [],
+          verificationAfterChange: false,
+        },
+      },
+    ]);
+  });
+
+  it("provides a neutral bounded recent window before semantic retrieval", () => {
     const messages = [
       { role: "user" as const, content: "测试 Skill" },
       { role: "assistant" as const, content: "Skill 测试完成。" },
@@ -71,77 +101,12 @@ describe("ConversationHistory", () => {
       { role: "assistant" as const, content: "五子棋已创建。" },
     ];
 
-    expect(focusConversationHistory(messages, "你觉得这个有难度吗")).toEqual({
+    expect(focusConversationHistory(messages, { maxMessages: 2, maxChars: 100 })).toEqual({
       messages: [
         { role: "user", content: "写个五子棋小游戏吧" },
         { role: "assistant", content: "五子棋已创建。" },
       ],
-      focusedOnLatestTurn: true,
-      strategy: "LATEST_REFERENT",
-      matchedAssistantMessages: 0,
-    });
-    expect(focusConversationHistory(messages, "之前那个 Skill 有难度吗")).toEqual({
-      messages,
       focusedOnLatestTurn: false,
-      strategy: "RECENT_HISTORY",
-      matchedAssistantMessages: 0,
-    });
-  });
-
-  it("retrieves disputed assistant claims instead of collapsing to the latest exchange", () => {
-    const messages = [
-      { role: "user" as const, content: "第三章有哪些特殊能力？" },
-      { role: "assistant" as const, content: "击败守门者以后会获得星核变身。" },
-      { role: "user" as const, content: "星核在哪里？" },
-      { role: "assistant" as const, content: "星核在旧港口的箱子里。" },
-      { role: "user" as const, content: "钥匙不是在下一章吗？" },
-      { role: "assistant" as const, content: "对，钥匙是在下一章拿到的。" },
-    ];
-
-    const focused = focusConversationHistory(
-      messages,
-      "这个游戏哪来的星核变身？以及你说的各种变身",
-    );
-
-    expect(focused.strategy).toBe("PRIOR_RESPONSE_AUDIT");
-    expect(focused.focusedOnLatestTurn).toBe(false);
-    expect(focused.matchedAssistantMessages).toBeGreaterThan(0);
-    expect(focused.messages.map((message) => message.content)).toEqual(expect.arrayContaining([
-      "击败守门者以后会获得星核变身。",
-      "钥匙不是在下一章吗？",
-      "对，钥匙是在下一章拿到的。",
-    ]));
-    expect(focused.messages.length).toBeGreaterThan(2);
-  });
-
-  it("can retrieve a disputed claim beyond the old newest-16 boundary", () => {
-    const messages = [
-      { role: "user" as const, content: "旧问题" },
-      { role: "assistant" as const, content: "旧回答声称月影协议会自动删除备份。" },
-      ...Array.from({ length: 30 }, (_, index) => ({
-        role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
-        content: `无关消息 ${String(index)}`,
-      })),
-    ];
-
-    const focused = focusConversationHistory(
-      messages,
-      "你之前说月影协议会自动删除备份，这个说法哪来的？",
-      { maxMessages: 16, maxChars: 12_000 },
-    );
-
-    expect(focused.strategy).toBe("PRIOR_RESPONSE_AUDIT");
-    expect(focused.messages.some((message) => message.content.includes("月影协议"))).toBe(true);
-    expect(focused.messages.length).toBeLessThanOrEqual(16);
-  });
-
-  it("does not treat a normal reference to the assistant's proposal as an audit", () => {
-    const messages = [
-      { role: "user" as const, content: "给一个重构方案" },
-      { role: "assistant" as const, content: "可以拆分解析器和执行器。" },
-    ];
-
-    expect(focusConversationHistory(messages, "你说的方案怎么做")).toMatchObject({
       strategy: "RECENT_HISTORY",
       matchedAssistantMessages: 0,
     });

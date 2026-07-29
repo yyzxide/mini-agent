@@ -45,11 +45,20 @@ function normalizeDecisionCandidate(value: unknown): unknown {
           : {}),
       };
     case "DELEGATE":
-    case "DELEGATE_READONLY":
       return {
         type,
         reason: readString(value.reason) ?? readString(value.message) ?? readString(value.description),
         tasks: Array.isArray(value.tasks) ? value.tasks : [],
+      };
+    case "DELEGATE_READONLY":
+      return {
+        type: "DELEGATE",
+        reason: readString(value.reason) ?? readString(value.message) ?? readString(value.description),
+        tasks: Array.isArray(value.tasks)
+          ? value.tasks.map((task) => isObject(task)
+            ? { ...task, access: "READ_ONLY", dependsOn: [] }
+            : task)
+          : [],
       };
     case "APPLY_DELEGATED_PATCH":
       return {
@@ -89,12 +98,15 @@ function normalizeDecisionCandidate(value: unknown): unknown {
         type,
         message: readString(value.message) ?? readString(value.question) ?? readString(value.summary),
       };
-    case "FINAL":
+    case "FINAL": {
+      const evidenceStatus = readEvidenceStatus(value.evidenceStatus);
       return {
         type,
         summary: readString(value.summary) ?? readString(value.message) ?? readString(value.answer),
         success: typeof value.success === "boolean" ? value.success : true,
+        ...(evidenceStatus ? { evidenceStatus } : {}),
       };
+    }
     case "FAILED":
       return {
         type,
@@ -103,10 +115,6 @@ function normalizeDecisionCandidate(value: unknown): unknown {
     default:
       return { ...value, type };
   }
-}
-
-export function parseAgentDecision(rawText: string): AgentDecision {
-  return new DecisionParser().parse(rawText);
 }
 
 function extractJsonText(rawText: string): string {
@@ -241,7 +249,6 @@ function assertRequiredDecisionFields(value: unknown): void {
       }
       return;
     case "DELEGATE":
-    case "DELEGATE_READONLY":
     case "APPLY_DELEGATED_PATCH":
       return;
     case "APPLY_PATCH":
@@ -276,4 +283,12 @@ function readString(value: unknown): string | undefined {
 
 function readRawString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readEvidenceStatus(value: unknown): "SATISFIED" | "INSUFFICIENT" | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toUpperCase();
+  return normalized === "SATISFIED" || normalized === "INSUFFICIENT"
+    ? normalized
+    : undefined;
 }

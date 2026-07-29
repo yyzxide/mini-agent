@@ -26,6 +26,20 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("normalizes structured final evidence status", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "final",
+      summary: "Only partial evidence was available.",
+      success: true,
+      evidenceStatus: "insufficient",
+    }))).toEqual({
+      type: "FINAL",
+      summary: "Only partial evidence was available.",
+      success: true,
+      evidenceStatus: "INSUFFICIENT",
+    });
+  });
+
   it("ignores non-JSON code blocks before a JSON decision", () => {
     expect(parser.parse([
       "I would run:",
@@ -74,7 +88,7 @@ describe("DecisionParser", () => {
     });
   });
 
-  it("parses bounded read-only delegation decisions", () => {
+  it("normalizes the legacy read-only decision into the current delegation protocol", () => {
     expect(parser.parse(JSON.stringify({
       type: "delegate_readonly",
       reason: "Inspect independent concerns",
@@ -83,8 +97,11 @@ describe("DecisionParser", () => {
         { id: "risks", role: "risk_reviewer", objective: "Find concurrency risks", focusPaths: [] },
       ],
     }))).toMatchObject({
-      type: "DELEGATE_READONLY",
-      tasks: [{ id: "architecture" }, { id: "risks" }],
+      type: "DELEGATE",
+      tasks: [
+        { id: "architecture", access: "READ_ONLY", dependsOn: [] },
+        { id: "risks", access: "READ_ONLY", dependsOn: [] },
+      ],
     });
   });
 
@@ -119,12 +136,7 @@ describe("DecisionParser", () => {
     });
   });
 
-  it("rejects duplicate or undersized delegation batches", () => {
-    expect(() => parser.parse(JSON.stringify({
-      type: "DELEGATE_READONLY",
-      reason: "Too small",
-      tasks: [{ id: "one", role: "repository_analyst", objective: "Inspect", focusPaths: [] }],
-    }))).toThrow(/schema validation failed/);
+  it("rejects duplicate legacy delegation task ids after normalization", () => {
     expect(() => parser.parse(JSON.stringify({
       type: "DELEGATE_READONLY",
       reason: "Duplicates",

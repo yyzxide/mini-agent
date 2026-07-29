@@ -34,6 +34,11 @@ export interface WebResearchProgress {
   authorityCandidateUrls: string[];
 }
 
+export interface WebLimitationFinal {
+  summary: string;
+  success: boolean;
+}
+
 const FINAL_SYNTHESIS_RESERVE_STEPS = 2;
 
 export function buildWebResearchProgress(state: AgentState): WebResearchProgress | undefined {
@@ -141,6 +146,56 @@ export function formatWebResearchProgress(progress: WebResearchProgress | undefi
 
 export function isWebSynthesisReserveActive(state: AgentState): boolean {
   return buildWebResearchProgress(state)?.synthesisReserved === true;
+}
+
+/**
+ * Deterministic liveness fallback for the final synthesis reserve. The model
+ * still writes the substantive draft, but it cannot keep retrying a success
+ * claim after the evidence budget is exhausted.
+ */
+export function buildWebLimitationFinal(
+  state: AgentState,
+  proposedSummary?: string,
+): WebLimitationFinal | undefined {
+  const progress = buildWebResearchProgress(state);
+  if (
+    !progress?.synthesisReserved
+    || progress.recommendedAction !== "LIMITATION_FINAL"
+  ) {
+    return undefined;
+  }
+
+  const profile = state.taskContract.taskFrame?.webEvidencePolicy.profile ?? "ORDINARY";
+  const inspectedUrls = successfulFetchedUrls(state);
+  const discoveredUrls = successfulSearchUrls(state)
+    .filter((url) => !inspectedUrls.includes(url));
+  const visibleUrls = (inspectedUrls.length > 0 ? inspectedUrls : discoveredUrls).slice(0, 5);
+  const draft = proposedSummary?.trim();
+  const limitation = [
+    "证据限制 / Evidence limitation:",
+    `现有证据不足以满足 ${String(progress.requiredFetchedSources)} 个已抓取来源、${String(progress.requiredFetchedDomains)} 个独立域名的完整核验门槛；当前为 ${String(progress.fetchedSources)} 个来源、${String(progress.fetchedDomains)} 个域名。`,
+    "以下结论只能作为基于当前可用资料的有限总结，不能视为已经完成多源或时效性核验。",
+  ].join(" ");
+  const sourceSection = visibleUrls.length > 0
+    ? [
+      inspectedUrls.length > 0
+        ? "已成功检查的来源 / Successfully inspected sources:"
+        : "已发现但未能完整抓取的候选来源 / Discovered source candidates:",
+      ...visibleUrls.map((url) => `- ${url}`),
+    ].join("\n")
+    : "本轮没有获得可引用的公开来源 / No citable public source was obtained.";
+
+  return {
+    // An ordinary lookup can still be usefully completed with transparent
+    // partial evidence. Explicit corroboration/current/high-stakes requests
+    // remain unsuccessful when their requested threshold was not met.
+    success: profile === "ORDINARY" && progress.citationsAvailable > 0,
+    summary: [
+      draft || "未能在当前检索条件下形成可充分核验的完整答案。",
+      limitation,
+      sourceSection,
+    ].join("\n\n"),
+  };
 }
 
 function successfulSearchQueries(state: AgentState): string[] {

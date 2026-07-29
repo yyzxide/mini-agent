@@ -9,7 +9,6 @@ export function decisionToMessage(decision: AgentDecision): string {
         ? `${decision.reason} → ${decision.toolName}`
         : `Calling tool ${decision.toolName}`;
     case "DELEGATE":
-    case "DELEGATE_READONLY":
       return `Delegating ${String(decision.tasks.length)} coordinated task(s): ${decision.reason}`;
     case "APPLY_DELEGATED_PATCH":
       return `Applying delegated patch from ${decision.taskId}: ${decision.description}`;

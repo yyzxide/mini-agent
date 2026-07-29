@@ -56,6 +56,7 @@ interface FetchUrlData {
   status: number;
   statusText: string;
   contentType: string;
+  charset: string;
   text: string;
   bytesRead: number;
   truncated: boolean;
@@ -398,10 +399,38 @@ describe("read-only repository tools", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
     expect(result.data.status).toBe(200);
     expect(result.data.contentType).toContain("text/html");
+    expect(result.data.charset).toBe("utf-8");
     expect(result.data.text).toContain("Docs");
     expect(result.data.text).toContain("Hello & welcome.");
     expect(result.data.text).not.toContain("bad()");
     expect(result.data.truncated).toBe(false);
+  });
+
+  it("fetch_url decodes legacy Chinese HTML from a meta charset declaration", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const prefix = new TextEncoder().encode("<html><head><meta charset=\"gb2312\"></head><body>");
+    const chinese = Uint8Array.from([
+      0xc2, 0xe5, 0xbf, 0xcb, 0xcd, 0xf5, 0xb9, 0xfa, 0xb9, 0xd9, 0xcd, 0xf8,
+    ]);
+    const suffix = new TextEncoder().encode("</body></html>");
+    const body = new Uint8Array(prefix.length + chinese.length + suffix.length);
+    body.set(prefix);
+    body.set(chinese, prefix.length);
+    body.set(suffix, prefix.length + chinese.length);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    })));
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("fetch_url", {
+      url: "https://example.com/chinese",
+    }, fetchUrlContext());
+
+    expectSuccess<FetchUrlData>(result);
+    expect(result.data.charset).toBe("gb18030");
+    expect(result.data.text).toContain("洛克王国官网");
+    expect(result.data.text).not.toContain("�");
   });
 
   it("fetch_url rejects HTTP-200 WAF and CAPTCHA shells as unusable evidence", async () => {

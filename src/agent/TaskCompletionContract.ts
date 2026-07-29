@@ -25,8 +25,6 @@ export interface TaskCompletionContract {
 const SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte)$/i;
 const CONFIG_EXTENSION_PATTERN = /\.(?:json|ya?ml|toml|xml)$/i;
 const DOCUMENT_EXTENSION_PATTERN = /\.(?:md|markdown|mdx|txt|rst|adoc)$/i;
-const TEST_REQUIRED_PATTERN = /(?:修复|回归|重构|缺陷)|\b(?:bug|regression|refactor|fix)\b/i;
-const EXPLICIT_TEST_PATTERN = /(?:运行|执行|验证|检查|确保).{0,24}(?:测试|test)|(?:run|execute|verify|validate|ensure).{0,24}tests?/i;
 const STATIC_SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|vue|svelte)$/i;
 const DYNAMIC_SOURCE_EXTENSION_PATTERN = /\.(?:js|jsx|mjs|cjs|py|rb|php|sh|bash)$/i;
 const FILE_PATH_PATTERN = /(?:^|[\s`'"(（])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte|html|css|md|markdown|mdx|txt|rst|adoc|json|ya?ml|toml|xml))(?:$|[\s`'",.!?，。！？)）:：])/gi;
@@ -58,17 +56,13 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
   const hasDocumentTarget = targetFiles.length > 0 && targetFiles.every((file) => DOCUMENT_EXTENSION_PATTERN.test(file));
   const explicitVerification = taskFrame !== undefined
     && taskFrame.effects.verification !== "NONE";
-  const inferredSourceTask = false;
   const requiredVerificationLevel = requiresRepositoryChange || explicitVerification
     ? taskFrame && taskFrame.effects.verification !== "NONE"
       ? taskFrame.effects.verification
       : determineRequiredVerificationLevel({
-        userGoal: "",
         targetFiles,
-        explicitVerification,
         hasSourceTarget,
         hasConfigTarget,
-        inferredSourceTask,
       })
     : "NONE";
   const requiresVerification = requiredVerificationLevel !== "NONE";
@@ -76,7 +70,7 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
   let kind: TaskCompletionKind = "ANSWER";
   if (requiresKnowledgeEvidence) kind = "KNOWLEDGE_QUERY";
   else if (explicitVerification && !requiresRepositoryChange) kind = "VERIFICATION";
-  else if (hasSourceTarget || inferredSourceTask) kind = "SOURCE_CHANGE";
+  else if (hasSourceTarget) kind = "SOURCE_CHANGE";
   else if (hasConfigTarget) kind = "CONFIGURATION_CHANGE";
   else if (requiresRepositoryChange && hasDocumentTarget) kind = "DOCUMENTATION_CHANGE";
   else if (requiresRepositoryChange) kind = "REPOSITORY_CHANGE";
@@ -134,23 +128,18 @@ export function formatTaskCompletionContract(
 }
 
 function determineRequiredVerificationLevel(input: {
-  userGoal: string;
   targetFiles: string[];
-  explicitVerification: boolean;
   hasSourceTarget: boolean;
   hasConfigTarget: boolean;
-  inferredSourceTask: boolean;
 }): VerificationLevel {
   if (input.targetFiles.length > 0 && input.targetFiles.every((file) => DOCUMENT_EXTENSION_PATTERN.test(file))) {
     return "NONE";
   }
   const testTarget = input.targetFiles.some((file) => /(?:^|[._-])(?:test|spec)\.[^.]+$/i.test(file));
-  const codeLikeTarget = input.hasSourceTarget || input.hasConfigTarget || input.inferredSourceTask || testTarget;
-  if (EXPLICIT_TEST_PATTERN.test(input.userGoal) || testTarget
-    || (codeLikeTarget && TEST_REQUIRED_PATTERN.test(input.userGoal))) {
+  if (testTarget) {
     return "TEST";
   }
-  if (input.hasConfigTarget || input.inferredSourceTask
+  if (input.hasConfigTarget
     || input.targetFiles.some((file) => STATIC_SOURCE_EXTENSION_PATTERN.test(file))) {
     return "STATIC";
   }
@@ -158,7 +147,7 @@ function determineRequiredVerificationLevel(input: {
     return "SYNTAX";
   }
   if (input.hasSourceTarget) return "STATIC";
-  return input.explicitVerification ? "STATIC" : "NONE";
+  return "NONE";
 }
 
 function extractTargetFiles(state: AgentState): string[] {

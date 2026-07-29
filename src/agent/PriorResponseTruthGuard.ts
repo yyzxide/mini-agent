@@ -1,9 +1,4 @@
-import {
-  findPriorAssistantClaimMatches,
-  isPriorResponseAuditRequest,
-  type ConversationMessage,
-  type PriorAssistantClaimMatch,
-} from "../session/ConversationHistory.js";
+import type { ConversationMessage } from "../session/ConversationHistory.js";
 
 export type PriorResponseConsistencyCode =
   | "PRIOR_RESPONSE_DENIAL"
@@ -17,6 +12,14 @@ export interface PriorResponseConsistencyViolation {
 
 export interface PriorResponseTruthGuardOptions {
   historyTruncated?: boolean;
+  auditRequested?: boolean;
+  semanticQueries?: string[];
+}
+
+interface AssistantEvidenceMatch {
+  content: string;
+  matchedTerms: string[];
+  score: number;
 }
 
 /**
@@ -30,14 +33,17 @@ export function inspectPriorResponseConsistency(
   conversation: ConversationMessage[],
   options: PriorResponseTruthGuardOptions = {},
 ): PriorResponseConsistencyViolation | undefined {
-  if (!isPriorResponseAuditRequest(userGoal) || !containsPriorOutputDenial(draft)) {
+  if (options.auditRequested !== true || !containsPriorOutputDenial(draft)) {
     return undefined;
   }
   if (containsPriorOutputAcknowledgement(draft)) {
     return undefined;
   }
 
-  const matches = findPriorAssistantClaimMatches(conversation, userGoal);
+  const matches = findAssistantEvidenceMatches(
+    conversation,
+    options.semanticQueries?.length ? options.semanticQueries : [userGoal],
+  );
   const bestMatch = matches[0];
   if (bestMatch) {
     return {
@@ -53,24 +59,6 @@ export function inspectPriorResponseConsistency(
     };
   }
   return undefined;
-}
-
-export function buildPriorResponseRevisionContext(
-  violation: PriorResponseConsistencyViolation,
-  rejectedDraft: string,
-): string {
-  const evidence = violation.excerpt
-    ? `Visible earlier assistant output:\n${violation.excerpt}`
-    : "The available conversation selection is incomplete, so absence from it cannot prove that no earlier statement exists.";
-  return [
-    "Conversation consistency revision required:",
-    evidence,
-    "Revise the answer once. Distinguish these two questions: (1) what the conversation record proves you previously output, and (2) whether that external claim is actually true.",
-    "Do not deny, minimize, or rewrite a visible earlier statement. If external evidence is unavailable, retract the unverified claim and state the uncertainty without inventing replacement details.",
-    "",
-    "Rejected first draft:",
-    rejectedDraft.slice(0, 2_000),
-  ].join("\n");
 }
 
 export function renderPriorResponseSafeFallback(
@@ -114,7 +102,54 @@ function containsPriorOutputAcknowledgement(value: string): boolean {
   ].some((pattern) => pattern.test(value));
 }
 
-function excerptFromMatch(match: PriorAssistantClaimMatch): string {
+function findAssistantEvidenceMatches(
+  messages: ConversationMessage[],
+  queries: string[],
+): AssistantEvidenceMatch[] {
+  const terms = extractSemanticTerms(queries);
+  if (terms.length === 0) return [];
+
+  return messages
+    .flatMap((message): AssistantEvidenceMatch[] => {
+      if (message.role !== "assistant") return [];
+      const normalizedContent = normalizeForMatch(message.content);
+      const matchedTerms = terms.filter((term) => normalizedContent.includes(term));
+      const distinctiveTerms = matchedTerms.filter((term) => term.length >= 3);
+      const shortTerms = new Set(matchedTerms.filter((term) => term.length === 2));
+      if (distinctiveTerms.length === 0 && shortTerms.size < 2) return [];
+      return [{
+        content: message.content,
+        matchedTerms,
+        score: matchedTerms.reduce((total, term) => total + Math.min(12, term.length ** 2), 0),
+      }];
+    })
+    .sort((left, right) => right.score - left.score);
+}
+
+function extractSemanticTerms(queries: string[]): string[] {
+  const terms = new Set<string>();
+  for (const query of queries) {
+    const normalized = query.normalize("NFKC").toLowerCase();
+    for (const token of normalized.match(/[a-z0-9_./-]{2,}|[\p{Script=Han}]{2,}/gu) ?? []) {
+      terms.add(token);
+      if (/^[\p{Script=Han}]+$/u.test(token) && token.length > 3) {
+        for (let index = 0; index < token.length - 1; index += 1) {
+          terms.add(token.slice(index, index + 2));
+        }
+      }
+    }
+  }
+  return [...terms].sort((left, right) => right.length - left.length).slice(0, 32);
+}
+
+function normalizeForMatch(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}+#./-]+/gu, "");
+}
+
+function excerptFromMatch(match: AssistantEvidenceMatch): string {
   const content = match.content.replace(/\s+/g, " ").trim();
   const rawTerm = match.matchedTerms.find((term) => content.toLowerCase().includes(term));
   const center = rawTerm ? content.toLowerCase().indexOf(rawTerm) : 0;

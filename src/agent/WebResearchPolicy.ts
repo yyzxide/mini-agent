@@ -11,16 +11,20 @@ export interface HigherNamedVersionCandidate {
 
 /**
  * Search queries may add synonyms for recall, but must not silently strengthen
- * a representative request into a ranking/superlative request. The answer
- * scope remains the user's wording even when later queries broaden retrieval.
+ * the TaskFrame's representative scope into a ranking/superlative request.
+ * Natural-language intent is compiled upstream; this function validates only
+ * the model-proposed query against that structured policy.
  */
 export function validateWebSearchQueryScope(
-  userGoal: string,
+  ranking: "REPRESENTATIVE" | "SUPERLATIVE",
   query: string,
 ): WebQueryScopeViolation | undefined {
-  const goal = normalize(userGoal);
   const candidate = normalize(query);
-  if (!candidate || hasRankingSuperlative(goal) || !hasRankingSuperlative(candidate)) {
+  if (
+    !candidate
+    || ranking === "SUPERLATIVE"
+    || !hasRankingSuperlative(candidate)
+  ) {
     return undefined;
   }
 

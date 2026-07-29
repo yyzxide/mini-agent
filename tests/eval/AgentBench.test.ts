@@ -7,6 +7,7 @@ import { loadAgentBenchDataset, loadAgentBenchReport } from "../../src/eval/Agen
 import type { AgentBenchSummary } from "../../src/eval/AgentBenchTypes.js";
 import type { AgentBenchDataset } from "../../src/eval/AgentBenchTypes.js";
 import type { LlmClient } from "../../src/llm/LlmClient.js";
+import { createTestTaskFrame } from "../helpers/TaskFrameContract.js";
 
 describe("AgentBench", () => {
   it("loads and runs the versioned core dataset through its quality gate", async () => {
@@ -55,7 +56,12 @@ describe("AgentBench", () => {
     let metricDrains = 0;
     const client: LlmClient & { drainCallMetrics: () => unknown[] } = {
       chat: async () => ({ type: "FINAL", success: true, summary: "done" }),
-      completeText: async () => ({ success: true, text: "done" }),
+      compileTaskFrame: async () => ({
+        success: true,
+        text: JSON.stringify(createTestTaskFrame({
+          objective: "Answer the benchmark scenario.",
+        })),
+      }),
       drainCallMetrics: () => {
         metricDrains += 1;
         return metricDrains === 1 ? [] : [callMetric];

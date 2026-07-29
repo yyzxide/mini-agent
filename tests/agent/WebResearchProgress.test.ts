@@ -87,9 +87,8 @@ function webState(userGoal: string): AgentState {
       target: "WORLD",
       effects: { webEvidence: true },
       webEvidencePolicy: {
-        searchViews: 2,
-        freshness: "CURRENT",
-        authority: "REQUIRED",
+        profile: "CURRENT",
+        basis: "VOLATILE_CURRENT_CLAIM",
       },
     }),
   });

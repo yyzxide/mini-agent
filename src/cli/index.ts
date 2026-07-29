@@ -30,7 +30,12 @@ import { EventStore } from "../session/EventStore.js";
 import { readSessionMemory } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
-import type { TaskChangeLogEntry, TaskChangeMode, TaskChangeTestResult } from "../session/TaskChangeLogStore.js";
+import type {
+  StoredTaskChangeMode,
+  TaskChangeLogEntry,
+  TaskChangeMode,
+  TaskChangeTestResult,
+} from "../session/TaskChangeLogStore.js";
 import type { EventRecord, JsonObject, SessionMeta, SessionRecord } from "../session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext } from "../tools/Tool.js";
@@ -116,7 +121,7 @@ interface SessionAgentStatusOutput {
   updatedAt: string;
   messageCount: number;
   eventCount: number;
-  lastMode?: TaskChangeMode;
+  lastMode?: StoredTaskChangeMode;
   lastUserMessage?: string;
   latestSummary?: string;
   checkpoint: {
@@ -177,8 +182,6 @@ export function createProgram(): Command {
     .option("--event-stream", "Print structured MINI_AGENT_EVENT lines for local integrations")
     .option("--verbose", "Show tool inputs, context compaction, cache, and token details")
     .option("--trace", "Show complete redacted runtime decisions and context allocation traces")
-    .option("--iterative", "Use the iterative decision protocol for direct-answer tasks")
-    .option("--agent-loop", "Deprecated alias for --iterative")
     .option("--agents <number>", "Override controlled sub-agent concurrency (2-3; 1 disables)", parseAgentCount)
     .action(async (taskParts: string[], options: AgentCliOptions) => {
       const task = taskParts.join(" ").trim();
@@ -210,7 +213,6 @@ export function createProgram(): Command {
       if (!task) throw new Error("Plan task cannot be empty.");
       const result = await runAgentTask(process.cwd(), task, {
         ...options,
-        agentLoop: true,
         operatingMode: "PLAN",
         nonInteractive: true,
       });
@@ -921,7 +923,7 @@ async function startInteractive(repoPath: string, resumeSessionId?: string): Pro
         session: currentSessionId,
         nonInteractive: false,
         keepSessionActive: true,
-        ...(meta.operatingMode === "PLAN" ? { agentLoop: true, operatingMode: "PLAN" as const } : {}),
+        ...(meta.operatingMode === "PLAN" ? { operatingMode: "PLAN" as const } : {}),
       }, async (message) => await rl.question(message));
       const diffArtifactId = result.metadata ? readPayloadString(result.metadata, "diffArtifactId") : undefined;
       if (diffArtifactId && result.sessionId && process.stdin.isTTY && process.stdout.isTTY) {
@@ -1027,7 +1029,6 @@ async function handleInteractiveSlashCommand(input: {
       if (argument) {
         await runAgentTask(input.repoPath, argument, {
           session: input.currentSessionId,
-          agentLoop: true,
           operatingMode: "PLAN",
           keepSessionActive: true,
           nonInteractive: false,
@@ -1060,7 +1061,6 @@ async function handleInteractiveSlashCommand(input: {
       ].join("\n");
       await runAgentTask(input.repoPath, executionGoal, {
         session: input.currentSessionId,
-        agentLoop: true,
         operatingMode: "EXECUTE",
         keepSessionActive: true,
         nonInteractive: false,
@@ -1349,7 +1349,10 @@ async function readLatestSessionSummary(sessionStore: SessionStore, sessionId: s
   return undefined;
 }
 
-async function readLastTaskMode(sessionStore: SessionStore, sessionId: string): Promise<TaskChangeMode | undefined> {
+async function readLastTaskMode(
+  sessionStore: SessionStore,
+  sessionId: string,
+): Promise<StoredTaskChangeMode | undefined> {
   const records = await sessionStore.readRecords(sessionId).catch(() => []);
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
@@ -1752,7 +1755,7 @@ async function runAgentTask(
   const taskContract = createTaskFrameBootstrapContract({
     operatingMode: options.operatingMode ?? "EXECUTE",
     });
-  const routeReason = "TaskFrame semantic control plane; no deterministic natural-language route was applied.";
+  const controlReason = "TaskFrame semantic control plane; no deterministic natural-language route was applied.";
   const mode: TaskChangeMode = taskContract.resultMode;
   const logger = createRuntimeLogger(repoPath);
   const beforeSnapshot = await readGitSnapshot(repoPath);
@@ -1761,7 +1764,7 @@ async function runAgentTask(
   await logger.info("cli", "Task started", {
     task: userGoal,
     mode,
-    reason: routeReason,
+    reason: controlReason,
     semanticFrame: "task-frame",
     requestedSessionId: options.session ?? null,
     multiAgentRequested: multiAgentPolicy.enabled,

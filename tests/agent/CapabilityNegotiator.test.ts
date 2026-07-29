@@ -8,9 +8,8 @@ import { createTestTaskContract } from "../helpers/TaskFrameContract.js";
 
 describe("CapabilityNegotiator", () => {
   it("treats a model patch action as a capability request", () => {
-    const contract = directContract("继续优化当前实现");
+    const contract = answerOnlyContract("继续优化当前实现");
     const result = negotiateCapabilities({
-      userGoal: "继续优化当前实现",
       contract,
       decision: {
         type: "APPLY_PATCH",
@@ -39,7 +38,7 @@ describe("CapabilityNegotiator", () => {
   });
 
   it("makes requestable read-only tools visible before their capability is granted", () => {
-    const contract = directContract("请判断需要哪些证据");
+    const contract = answerOnlyContract("请判断需要哪些证据");
     const names = selectToolsForCapabilityNegotiation(
       createDefaultToolRegistry().listSpecs(),
       contract,
@@ -56,10 +55,9 @@ describe("CapabilityNegotiator", () => {
     expect(names).not.toContain("apply_patch");
   });
 
-  it("upgrades a Direct contract when the model selects a Web tool", () => {
-    const contract = directContract("需要核实一个外部事实");
+  it("upgrades an answer-only contract when the model selects a Web tool", () => {
+    const contract = answerOnlyContract("需要核实一个外部事实");
     const result = negotiateCapabilities({
-      userGoal: "需要核实一个外部事实",
       contract,
       decision: {
         type: "TOOL_CALL",
@@ -98,7 +96,6 @@ describe("CapabilityNegotiator", () => {
       capabilities: { ...base.capabilities, webAccess: true },
     };
     const result = negotiateCapabilities({
-      userGoal,
       contract,
       decision: {
         type: "APPLY_PATCH",
@@ -136,7 +133,6 @@ describe("CapabilityNegotiator", () => {
       constraints: { readOnly: true, noCommands: true },
     });
     const result = negotiateCapabilities({
-      userGoal: "只分析 demo.txt，不要修改文件",
       contract,
       decision: {
         type: "RUN_COMMAND",
@@ -156,7 +152,7 @@ describe("CapabilityNegotiator", () => {
   });
 });
 
-function directContract(userGoal: string) {
+function answerOnlyContract(userGoal: string) {
   return createTestTaskContract({
     objective: userGoal,
   });

@@ -8,7 +8,6 @@ import { isToolAllowedByTaskContract } from "./AgentTaskContract.js";
 import type { AgentOperatingMode } from "./AgentOperatingMode.js";
 
 export interface CapabilityNegotiationInput {
-  userGoal: string;
   contract: AgentTaskContract;
   decision: AgentDecision;
   availableTools: ToolSpec[];
@@ -185,7 +184,6 @@ function inferDecisionRequirement(
     case "RUN_COMMAND":
       return { action: "RUN_COMMAND", capabilities: ["commandExecution"] };
     case "DELEGATE":
-    case "DELEGATE_READONLY":
       return { action: "DELEGATE", capabilities: ["delegation"] };
     case "TOOL_CALL": {
       const tool = availableTools.find((candidate) => candidate.name === decision.toolName);
@@ -239,7 +237,7 @@ function buildUpgradeContract(
         knowledgeSearch: true,
       },
       maxSteps: Math.max(input.contract.maxSteps, 8),
-      routeReason: appendReason(input.contract, "Model-selected knowledge_search requested indexed knowledge."),
+      controlReason: appendReason(input.contract, "Model-selected knowledge_search requested indexed knowledge."),
       instructions: unique([
         ...input.contract.instructions,
         "Use knowledge_search evidence and preserve its file-and-line citations.",
@@ -256,7 +254,7 @@ function buildUpgradeContract(
       ) as Partial<AgentCapabilities>,
     ),
     maxSteps: Math.max(input.contract.maxSteps, 14),
-    routeReason: appendReason(input.contract, `Model action requested ${requested.join(", ")}.`),
+    controlReason: appendReason(input.contract, `Model action requested ${requested.join(", ")}.`),
     instructions: unique([
       ...input.contract.instructions,
       "Capabilities were negotiated from the model's selected action. Execution remains subject to permission and sandbox policy.",
@@ -275,7 +273,7 @@ function buildMcpToolUpgrade(
     }),
     mcpToolGrants: unique([...(input.contract.mcpToolGrants ?? []), toolName]),
     maxSteps: Math.max(input.contract.maxSteps, 14),
-    routeReason: appendReason(
+    controlReason: appendReason(
       input.contract,
       `Model-selected MCP tool ${toolName} requested an exact tool grant.`,
     ),
@@ -295,7 +293,7 @@ function buildRepositoryExecutionUpgrade(
       repositoryWrite: true,
     }),
     maxSteps: Math.max(input.contract.maxSteps, 20),
-    routeReason: appendReason(
+    controlReason: appendReason(
       input.contract,
       "Model-selected repository write action was authorized.",
     ),
@@ -321,7 +319,7 @@ function buildWebUpgrade(input: CapabilityNegotiationInput): AgentTaskContract {
       webCitation: true,
     },
     maxSteps: Math.max(input.contract.maxSteps, 20),
-    routeReason: appendReason(input.contract, "Model-selected Web action was authorized."),
+    controlReason: appendReason(input.contract, "Model-selected Web action was authorized."),
     instructions: unique([
       ...input.contract.instructions,
       "Use gathered Web evidence only as one capability within this same AgentLoop; continue to repository actions when the objective requires them.",
@@ -354,7 +352,7 @@ function mergeCapabilities(
 }
 
 function appendReason(contract: AgentTaskContract, reason: string): string {
-  return `${contract.routeReason ?? "Initial task interpretation."} ${reason}`;
+  return `${contract.controlReason ?? "Initial task interpretation."} ${reason}`;
 }
 
 function unique<T>(values: T[]): T[] {

@@ -61,7 +61,7 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).not.toContain('\"patchResults\"');
   });
 
-  it("injects runtime context into direct text completions", async () => {
+  it("injects runtime context into semantic TaskFrame compilation", async () => {
     const calls: RequestInit[] = [];
     const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
@@ -77,17 +77,16 @@ describe("OpenAICompatibleClient", () => {
       fetchFn,
     });
 
-    const result = await client.completeText({
+    const result = await client.compileTaskFrame({
       userGoal: "今天几号？",
       context: "[user] 之前聊过时间",
-      mode: "direct",
     });
 
     expect(result.success).toBe(true);
     const body = JSON.parse(String(calls[0]?.body)) as {
       messages: Array<{ role: string; content: string }>;
     };
-    expect(body.messages[0]?.content).toContain("runtime context");
+    expect(body.messages[0]?.content).toContain("semantic TaskFrame compiler");
     expect(body.messages[1]?.content).toContain("Runtime context:");
     expect(body.messages[1]?.content).toContain("Current local date:");
     expect(body.messages[1]?.content).toContain("Current user request (authoritative):");
@@ -139,9 +138,8 @@ describe("OpenAICompatibleClient", () => {
       }) as typeof fetch,
     });
 
-    const result = await client.completeText({
+    const result = await client.compileTaskFrame({
       userGoal: "Handle it",
-      mode: "task_frame",
     });
 
     expect(result.success).toBe(true);
@@ -164,13 +162,12 @@ describe("OpenAICompatibleClient", () => {
       }) as typeof fetch,
     });
 
-    await client.completeText({
+    await client.compileTaskFrame({
       userGoal: "你觉得这个有难度吗",
       conversation: [
         { role: "user", content: "写个五子棋小游戏吧" },
         { role: "assistant", content: "已创建 gobang.html。" },
       ],
-      mode: "direct",
     });
 
     const body = JSON.parse(String(calls[0]?.body)) as {
@@ -180,9 +177,48 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).toBe("写个五子棋小游戏吧");
     expect(body.messages[2]?.content).toBe("已创建 gobang.html。");
     expect(body.messages[3]?.content).toContain("你觉得这个有难度吗");
-    expect(body.messages[0]?.content).toContain("authoritative evidence of what you previously output");
-    expect(body.messages[0]?.content).toContain("Do not fabricate a complete-looking list");
-    expect(body.messages[0]?.content).toContain("do not deny it");
+    expect(body.messages[0]?.content).toContain("Interpret the current user request together with recent conversation");
+  });
+
+  it("injects prior-turn repository effects as trusted control-plane evidence", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "{\"version\":1}" } }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.compileTaskFrame({
+      userGoal: "在哪里",
+      conversation: [
+        { role: "user", content: "写一个小游戏" },
+        {
+          role: "assistant",
+          content: "小游戏已经写好。",
+          executionEvidence: {
+            repositoryChanged: false,
+            changedFiles: [],
+            verificationAfterChange: false,
+          },
+        },
+      ],
+    });
+
+    const body = JSON.parse(String(calls[0]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const ledger = body.messages.find((message) =>
+      message.content.startsWith("Runtime-provided prior-turn execution evidence"),
+    );
+    expect(ledger?.role).toBe("system");
+    expect(ledger?.content).toContain("\"repositoryChanged\":false");
+    expect(ledger?.content).toContain("only read is not a file created");
   });
 
   it("preserves selected conversation evidence for iterative task contracts", async () => {
@@ -250,10 +286,9 @@ describe("OpenAICompatibleClient", () => {
       }), { status: 200 }),
     });
 
-    const result = await client.completeText({
+    const result = await client.compileTaskFrame({
       userGoal: "你好",
       context: "上下文",
-      mode: "direct",
     });
 
     expect(result.success).toBe(true);
@@ -275,44 +310,7 @@ describe("OpenAICompatibleClient", () => {
     expect(client.drainCallMetrics()).toEqual([]);
   });
 
-  it("continues direct answers when the first completion stops due to token length", async () => {
-    const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        model: "agent-model",
-        choices: [{ finish_reason: "length", message: { content: "第一段代码\n```html\n<div>2048" } }],
-      }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        model: "agent-model",
-        choices: [{ finish_reason: "stop", message: { content: "</div>\n```" } }],
-      }), { status: 200 })) as unknown as typeof fetch;
-
-    const client = new OpenAICompatibleClient({
-      baseUrl: "https://llm.example/v1",
-      apiKey: "secret-key",
-      model: "agent-model",
-      fetchFn,
-    });
-
-    const result = await client.completeText({
-      userGoal: "写个 2048 页面",
-      context: "[user] 需要完整 HTML",
-      mode: "direct",
-    });
-
-    expect(result).toEqual({
-      success: true,
-      text: "第一段代码\n```html\n<div>2048</div>\n```",
-    });
-    expect(fetchFn).toHaveBeenCalledTimes(2);
-
-    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
-      messages: Array<{ content: string }>;
-    };
-    expect(retryBody.messages[1]?.content).toContain("Continue the previous answer for the same request.");
-    expect(retryBody.messages[1]?.content).toContain("Previously generated partial answer");
-  });
-
-  it("does not expose reasoning_content as a direct answer", async () => {
+  it("does not expose reasoning_content as a TaskFrame response", async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
       apiKey: "secret-key",
@@ -331,10 +329,9 @@ describe("OpenAICompatibleClient", () => {
       }), { status: 200 }),
     });
 
-    const result = await client.completeText({
+    const result = await client.compileTaskFrame({
       userGoal: "我们上次讨论了什么",
       context: "[user] 伦敦大师赛冠军是哪支队伍",
-      mode: "direct",
     });
 
     expect(result.success).toBe(false);

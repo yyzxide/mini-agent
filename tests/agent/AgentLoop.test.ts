@@ -85,8 +85,8 @@ describe("AgentLoop", () => {
       },
     ];
     const llmClient: LlmClient = {
-      completeText: async (input) => {
-        expect(input.mode).toBe("task_frame");
+      compileTaskFrame: async (input) => {
+        expect(input.userGoal).toBe("把 demo.txt 改好并验证");
         return {
           success: true,
           text: JSON.stringify({
@@ -175,6 +175,127 @@ describe("AgentLoop", () => {
       .resolves.toBe("single control chain\n");
   });
 
+  it("fails closed before any action when a required TaskFrame remains invalid after repair", async () => {
+    const chat = vi.fn<LlmClient["chat"]>(async () => ({
+      type: "FINAL",
+      success: true,
+      summary: "This decision must never be accepted.",
+    }));
+    let taskFrameCalls = 0;
+    const llmClient: LlmClient = {
+      compileTaskFrame: async () => {
+        taskFrameCalls += 1;
+        return {
+          success: true,
+          text: taskFrameCalls === 1 ? "not json" : "{\"version\":1}",
+        };
+      },
+      chat,
+    };
+    const loop = createLoop({ llmClient });
+
+    const result = await loop.run({
+      userGoal: "写一个新的贪吃蛇小游戏",
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(taskFrameCalls).toBe(2);
+    expect(chat).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining("TASK_FRAME_UNRESOLVED"),
+    });
+    await expect(fs.access(path.join(repoPath, "snake.html"))).rejects.toBeDefined();
+  });
+
+  it("does not treat a pre-existing artifact as the product of a new create request", async () => {
+    await fs.writeFile(path.join(repoPath, "snake.html"), "<title>old snake</title>\n", "utf8");
+    const progress: AgentProgressEvent[] = [];
+    let decisionIndex = 0;
+    let taskFrameCalls = 0;
+    const decisions: AgentDecision[] = [
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "snake.html" },
+        reason: "Inspect the existing artifact before deciding how to implement the request",
+      },
+      {
+        type: "FINAL",
+        success: true,
+        summary: "贪吃蛇小游戏已经写好，文件为 snake.html。",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Replace the old placeholder with the requested game",
+        patch: [
+          "diff --git a/snake.html b/snake.html",
+          "--- a/snake.html",
+          "+++ b/snake.html",
+          "@@ -1 +1,2 @@",
+          "-<title>old snake</title>",
+          "+<title>new snake game</title>",
+          "+<canvas id=\"game\"></canvas>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "FINAL",
+        success: true,
+        summary: "本轮已更新 snake.html，写入新的贪吃蛇游戏页面。",
+      },
+    ];
+    const llmClient: LlmClient = {
+      compileTaskFrame: async () => {
+        taskFrameCalls += 1;
+        return {
+          success: true,
+          text: JSON.stringify({
+            ...createTestTaskFrame({
+              objective: "Create a new snake game in the repository.",
+              target: "REPOSITORY",
+              effects: {
+                repositoryRead: true,
+                repositoryWrite: "REQUIRED",
+              },
+            }),
+            conversationEvidence: {
+              requiresHistory: false,
+              queries: [],
+              includeRecentMessages: 1,
+            },
+          }),
+        };
+      },
+      chat: async () => decisions[decisionIndex++]
+        ?? { type: "FAILED", error: "No scripted decision" },
+    };
+    const loop = createLoop({
+      llmClient,
+      onProgress: (event) => progress.push(event),
+    });
+
+    const result = await loop.run({
+      userGoal: "写一个贪吃蛇小游戏",
+      taskContract: createTaskFrameBootstrapContract(),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(taskFrameCalls).toBe(1);
+    expect(result).toMatchObject({
+      success: true,
+      summary: expect.stringContaining("本轮已更新"),
+    });
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "FINAL_WITHOUT_REPOSITORY_CHANGE",
+    }));
+    await expect(fs.readFile(path.join(repoPath, "snake.html"), "utf8"))
+      .resolves.toContain("<canvas");
+  });
+
   it.each([
     "帮我分析一下这个文件",
     "请读取并分析",
@@ -220,7 +341,7 @@ describe("AgentLoop", () => {
     expect(result.error).toBeUndefined();
     expect(result.success).toBe(true);
     expect(result.summary).toContain("2048.html");
-    expect(client.getTextCallInputs()).toHaveLength(0);
+    expect(client.getTaskFrameCallInputs()).toHaveLength(0);
     expect(client.getCallInputs()).toHaveLength(2);
     expect(client.getCallInputs()[0]?.availableTools.map((tool) => tool.name))
       .toEqual(expect.arrayContaining(["read_file", "list_files", "search_code"]));
@@ -311,6 +432,11 @@ describe("AgentLoop", () => {
 
     const result = await loop.run({
       userGoal: "读取 demo.txt 并说明内容",
+      taskContract: createTestTaskContract({
+        objective: "Read demo.txt and explain its contents.",
+        target: "REPOSITORY",
+        effects: { repositoryRead: true },
+      }),
       nonInteractive: true,
     });
 
@@ -364,25 +490,18 @@ describe("AgentLoop", () => {
     const sessionStore = new SessionStore({ repoPath });
     let semanticCalls = 0;
     const llmClient: LlmClient = {
-      completeText: async () => {
+      compileTaskFrame: async () => {
         semanticCalls += 1;
         return {
           success: true,
-          text: JSON.stringify({
-            operation: "ANSWER",
+          text: JSON.stringify(createTestTaskFrame({
+            objective: "Explain how core.ts could be modified without editing it now.",
             target: "REPOSITORY",
-            answerShape: "EXPLANATION",
-            answerDepth: "BALANCED",
-            externalFactPolicy: "NOT_EXTERNAL_FACT",
-            explicitWeb: false,
-            explicitRepositoryTarget: true,
-            explicitMutation: false,
-            mutationRequirement: "NONE",
-            completeFileRead: false,
+            answer: { shape: "EXPLANATION" },
+            effects: { repositoryRead: false, repositoryWrite: "NONE" },
             confidence: 0.98,
-            ambiguities: [],
             rationale: "The user asks for an explanation of how to edit, not for an edit now.",
-          }),
+          })),
         };
       },
       chat: async () => ({
@@ -410,23 +529,18 @@ describe("AgentLoop", () => {
 
   it("allows a conditional fix task to finish without a patch when inspection finds no issue", async () => {
     const llmClient: LlmClient = {
-      completeText: async () => ({
+      compileTaskFrame: async () => ({
         success: true,
-        text: JSON.stringify({
-          operation: "CHANGE_REPOSITORY",
+        text: JSON.stringify(createTestTaskFrame({
+          objective: "Inspect demo.txt and repair it only if a defect is found.",
           target: "REPOSITORY",
-          answerShape: "FREEFORM",
-          answerDepth: "BALANCED",
-          externalFactPolicy: "NOT_EXTERNAL_FACT",
-          explicitWeb: false,
-          explicitRepositoryTarget: true,
-          explicitMutation: true,
-          mutationRequirement: "CONDITIONAL",
-          completeFileRead: false,
+          effects: {
+            repositoryRead: true,
+            repositoryWrite: "CONDITIONAL",
+          },
           confidence: 0.97,
-          ambiguities: [],
           rationale: "A patch is requested only if inspection establishes a defect.",
-        }),
+        })),
       }),
       chat: async (input) => input.state.step === 0
         ? { type: "TOOL_CALL", toolName: "read_file", input: { path: "demo.txt" } }
@@ -515,7 +629,7 @@ describe("AgentLoop", () => {
     expect(eventTypes(events)).toContain("PATCH_APPLY_FINISHED");
   });
 
-  it("corrects an iterative direct answer that denies a visible prior assistant claim", async () => {
+  it("corrects an iterative answer that denies a visible prior assistant claim", async () => {
     const progress: AgentProgressEvent[] = [];
     const sessionStore = new SessionStore({ repoPath });
     const eventStore = new EventStore({ repoPath });
@@ -524,6 +638,7 @@ describe("AgentLoop", () => {
       objective: userGoal,
       target: "SESSION",
       conversationEvidence: {
+        purpose: "PRIOR_RESPONSE_AUDIT",
         requiresHistory: true,
         queries: ["星核变身"],
       },
@@ -557,7 +672,7 @@ describe("AgentLoop", () => {
         estimatedOutputTokens: 80,
         truncated: true,
         focusedOnLatestTurn: false,
-        selectionStrategy: "PRIOR_RESPONSE_AUDIT",
+        selectionStrategy: "TASK_FRAME_RETRIEVAL",
         matchedAssistantMessages: 1,
         roles: ["user", "assistant"],
       },
@@ -713,7 +828,7 @@ describe("AgentLoop", () => {
     const eventStore = new EventStore({ repoPath });
     const client = new ScriptedLlmClient([
       {
-        type: "DELEGATE_READONLY",
+        type: "DELEGATE",
         reason: "Inspect architecture and risks independently",
         tasks: [
           { id: "architecture", role: "repository_analyst", objective: "Map the loop", focusPaths: ["src/agent"] },
@@ -957,8 +1072,8 @@ describe("AgentLoop", () => {
     ];
     let decisionCalls = 0;
     const client: LlmClient = {
-      completeText: async (input) => {
-        expect(input.mode).toBe("task_frame");
+      compileTaskFrame: async (input) => {
+        expect(input.userGoal).toBe("demo.txt 这个实现看着不太对，你处理一下");
         return {
           success: true,
           text: JSON.stringify(createTestTaskFrame({
@@ -1198,6 +1313,10 @@ describe("AgentLoop", () => {
     const next = await createLoop({ sessionStore, eventStore, llmClient: nextClient }).run({
       sessionId: session.sessionId,
       userGoal: "Explain the next independent task.",
+      taskContract: createTestTaskContract({
+        objective: "Explain the next independent task.",
+        target: "DERIVATION",
+      }),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -1552,6 +1671,15 @@ describe("AgentLoop", () => {
         "export class MedianFinder {}",
         "```",
       ].join("\n"),
+      taskContract: createTestTaskContract({
+        objective: "Write the supplied MedianFinder code to a repository file.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "STATIC",
+        },
+      }),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -1612,12 +1740,22 @@ describe("AgentLoop", () => {
       llmClient: new ScriptedLlmClient([
         { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "上传策略" } },
         { type: "FINAL", success: true, summary: "上传必须校验 SHA-256。" },
-        { type: "FINAL", success: true, summary: "知识库中没有找到相关证据，无法回答。" },
+        {
+          type: "FINAL",
+          success: true,
+          evidenceStatus: "INSUFFICIENT",
+          summary: "知识库中没有找到相关证据，无法回答。",
+        },
       ]),
     });
 
     const result = await loop.run({
       userGoal: "请用知识库查一下上传策略",
+      taskContract: createTestTaskContract({
+        objective: "Answer the upload-policy question from indexed knowledge.",
+        target: "REPOSITORY",
+        effects: { knowledgeEvidence: true },
+      }),
       autoApprove: true,
       nonInteractive: true,
     });
@@ -1686,6 +1824,7 @@ describe("AgentLoop", () => {
         {
           type: "FINAL",
           success: true,
+          evidenceStatus: "INSUFFICIENT",
           summary: "本轮 web_search 连接失败，当前来源不足，无法核验这项公开事实。",
         },
       ]),
@@ -1703,6 +1842,62 @@ describe("AgentLoop", () => {
     expect(result.summary).not.toContain("failed too many consecutive steps");
     const records = await sessionStore.readRecords(result.sessionId);
     expect(records.some((record) => JSON.stringify(record.payload).includes("WEB_SEARCH_FAILED"))).toBe(true);
+  });
+
+  it("deterministically returns a limitation final instead of exhausting steps when strict Web evidence is incomplete", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      "<html><body>",
+      "<div class=\"result\">",
+      "<a class=\"result__a\" href=\"/l/?uddg=https%3A%2F%2Fexample.com%2Fresearch\">Research Result</a>",
+      "<a class=\"result__snippet\">One available public source.</a>",
+      "</div>",
+      "</body></html>",
+    ].join(""), {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    })));
+    const progress: AgentProgressEvent[] = [];
+    const baseContract = createTestTaskContract({
+      objective: "Corroborate a public fact.",
+      target: "WORLD",
+      effects: { webEvidence: true },
+      webEvidencePolicy: {
+        profile: "CORROBORATED",
+        basis: "USER_REQUESTED_CORROBORATION",
+      },
+    });
+    const loop = createLoop({
+      onProgress: (event) => { progress.push(event); },
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "web_search", input: { query: "public fact" } },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "The available result suggests a possible answer.",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "请用多个来源核实这项公开事实",
+      taskContract: {
+        ...baseContract,
+        capabilities: { ...baseContract.capabilities, webAccess: true },
+        maxSteps: 3,
+      },
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.summary).toContain("The available result suggests a possible answer.");
+    expect(result.summary).toContain("现有证据不足");
+    expect(result.summary).toContain("https://example.com/research");
+    expect(result.summary).not.toContain("reaching max steps");
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "WEB_LIMITATION_FINAL_APPLIED",
+    }));
   });
 
   it("rejects a strengthened ranking query and retries with the user's original scope", async () => {
@@ -1928,6 +2123,16 @@ describe("AgentLoop", () => {
     const result = await loop.run({
       userGoal: "修改 demo.txt 并测试",
       operatingMode: "PLAN",
+      taskContract: createTestTaskContract({
+        objective: "Plan how to modify demo.txt and test the change.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          verification: "TEST",
+        },
+        operatingMode: "PLAN",
+      }),
       autoApprove: true,
       nonInteractive: true,
     });

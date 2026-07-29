@@ -78,22 +78,6 @@ export const DelegateDecisionSchema = z.object({
   });
 });
 
-/** @deprecated Persisted sessions may still contain the legacy read-only decision. */
-export const DelegateReadonlyDecisionSchema = z.object({
-  type: z.literal("DELEGATE_READONLY"),
-  reason: z.string().trim().min(1).max(1_000),
-  tasks: z.array(SubAgentTaskSchema).min(2).max(3),
-}).strict().superRefine((value, context) => {
-  const ids = value.tasks.map((task) => task.id);
-  if (new Set(ids).size !== ids.length) {
-    context.addIssue({
-      code: "custom",
-      path: ["tasks"],
-      message: "DELEGATE_READONLY task ids must be unique",
-    });
-  }
-});
-
 export const ApplyDelegatedPatchDecisionSchema = z.object({
   type: z.literal("APPLY_DELEGATED_PATCH"),
   taskId: z.string().trim().min(1).max(48),
@@ -153,6 +137,7 @@ export const FinalDecisionSchema = z.object({
   type: z.literal("FINAL"),
   summary: z.string().min(1),
   success: z.boolean(),
+  evidenceStatus: z.enum(["SATISFIED", "INSUFFICIENT"]).optional(),
 }).strict();
 
 export const FailedDecisionSchema = z.object({
@@ -164,7 +149,6 @@ export const AgentDecisionSchema = z.discriminatedUnion("type", [
   PlanDecisionSchema,
   ToolCallDecisionSchema,
   DelegateDecisionSchema,
-  DelegateReadonlyDecisionSchema,
   ApplyDelegatedPatchDecisionSchema,
   ApplyPatchDecisionSchema,
   RunCommandDecisionSchema,
@@ -174,13 +158,3 @@ export const AgentDecisionSchema = z.discriminatedUnion("type", [
 ]);
 
 export type AgentDecision = z.infer<typeof AgentDecisionSchema>;
-export type PlanDecision = z.infer<typeof PlanDecisionSchema>;
-export type ToolCallDecision = z.infer<typeof ToolCallDecisionSchema>;
-export type DelegateDecision = z.infer<typeof DelegateDecisionSchema>;
-export type DelegateReadonlyDecision = z.infer<typeof DelegateReadonlyDecisionSchema>;
-export type ApplyDelegatedPatchDecision = z.infer<typeof ApplyDelegatedPatchDecisionSchema>;
-export type ApplyPatchDecision = z.infer<typeof ApplyPatchDecisionSchema>;
-export type RunCommandDecision = z.infer<typeof RunCommandDecisionSchema>;
-export type AskUserDecision = z.infer<typeof AskUserDecisionSchema>;
-export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
-export type FailedDecision = z.infer<typeof FailedDecisionSchema>;

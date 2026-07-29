@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fileURLToPath } from "node:url";
 import { McpServerConfigSchema } from "../../src/mcp/McpTypes.js";
 import { StdioMcpClient } from "../../src/mcp/StdioMcpClient.js";
 import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
@@ -86,19 +87,10 @@ describe("MCP tool bridge", () => {
   });
 
   it("discovers and calls tools over a real stdio JSON-RPC process", async () => {
-    const serverCode = [
-      "const readline=require('node:readline').createInterface({input:process.stdin});",
-      "readline.on('line',(line)=>{const message=JSON.parse(line);if(message.id===undefined)return;",
-      "let result={};",
-      "if(message.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};",
-      "if(message.method==='tools/list')result={tools:[{name:'echo',description:'Echo input',inputSchema:{type:'object',properties:{text:{type:'string'}},required:['text']},annotations:{readOnlyHint:true}}]};",
-      "if(message.method==='tools/call')result={content:[{type:'text',text:message.params.arguments.text}],structuredContent:{echo:message.params.arguments.text}};",
-      "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:message.id,result})+'\\n');});",
-    ].join("");
     const config = McpServerConfigSchema.parse({
       name: "fixture",
       command: process.execPath,
-      args: ["-e", serverCode],
+      args: [fileURLToPath(new URL("../fixtures/stdio-mcp-server.cjs", import.meta.url))],
       timeoutMs: 5_000,
     });
     const client = new StdioMcpClient(config);

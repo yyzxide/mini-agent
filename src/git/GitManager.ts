@@ -17,10 +17,6 @@ export interface GitDiffResult {
   truncated: boolean;
 }
 
-export interface GitStatusResult {
-  status: string;
-}
-
 export interface GitCommitResult {
   commitHash: string;
   message: string;

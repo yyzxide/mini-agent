@@ -743,7 +743,6 @@ function summarizeChildDecision(decision: AgentDecision): string {
     case "TOOL_CALL":
       return `${decision.reason ?? "Inspect repository evidence"} → ${decision.toolName}`;
     case "DELEGATE":
-    case "DELEGATE_READONLY":
       return decision.reason;
     case "APPLY_DELEGATED_PATCH":
     case "APPLY_PATCH":

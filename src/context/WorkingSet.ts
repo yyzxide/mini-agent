@@ -4,7 +4,6 @@ import type { WorkingSet } from "./ContextTypes.js";
 import { detectTaskPhase } from "./TaskPhaseDetector.js";
 
 const FILE_PATH_PATTERN = /(?:^|[\s`'"(（])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|html|css|md|markdown|json|ya?ml|toml|sh))(?:$|[\s`'",，。)）:：])/g;
-const CONSTRAINT_PATTERN = /(?:不要|不得|不能|必须|只能|仅限|保持|避免|禁止|do not|don't|must|only|without|keep|avoid)/i;
 
 export function buildWorkingSet(state: AgentState): WorkingSet {
   const phase = detectTaskPhase(state);
@@ -29,10 +28,7 @@ export function buildWorkingSet(state: AgentState): WorkingSet {
   return {
     goal: state.userGoal,
     phase,
-    constraints: uniqueStrings([
-      ...(recovered?.constraints ?? []),
-      ...goalAndMessages.flatMap(extractConstraints),
-    ]).slice(-12),
+    constraints: formatStructuredConstraints(state),
     relevantFiles: relevantFiles.slice(-20),
     modifiedFiles: uniqueStrings([...(recovered?.modifiedFiles ?? []), ...modifiedFiles]).slice(-20),
     completedActions: uniqueStrings([
@@ -70,15 +66,23 @@ export function formatWorkingSet(workingSet: WorkingSet): string {
   ].join("\n");
 }
 
-function extractConstraints(value: string): string[] {
-  return value
-    .split(/[\n。！？!?；;]/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0 && CONSTRAINT_PATTERN.test(item));
-}
-
 function extractFilePaths(value: string): string[] {
   return [...value.matchAll(FILE_PATH_PATTERN)].map((match) => match[1]).filter((item): item is string => Boolean(item));
+}
+
+function formatStructuredConstraints(state: AgentState): string[] {
+  const frame = state.taskContract.taskFrame;
+  if (!frame) return [];
+  return [
+    frame.constraints.readOnly ? "readOnly: repository mutation is prohibited" : undefined,
+    frame.constraints.noWeb ? "noWeb: Web access is prohibited" : undefined,
+    frame.constraints.noCommands ? "noCommands: command execution is prohibited" : undefined,
+    frame.constraints.noDelegation ? "noDelegation: child-agent delegation is prohibited" : undefined,
+    frame.constraints.noMcp ? "noMcp: MCP calls are prohibited" : undefined,
+    frame.constraints.requireCompleteFileRead
+      ? "requireCompleteFileRead: every line of the target file must be read"
+      : undefined,
+  ].filter((value): value is string => value !== undefined);
 }
 
 function extractPathsFromToolResult(input: Record<string, unknown>, data: unknown): string[] {

@@ -5,7 +5,6 @@ import { classifyVerificationCommandInput } from "../command/CommandClassificati
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import type {
   LlmClient,
-  LlmTextCompletionResult,
   ToolSpec,
 } from "../llm/LlmClient.js";
 import { PatchManager } from "../patch/PatchManager.js";
@@ -39,10 +38,8 @@ import { AgentStateReducer } from "./AgentStateReducer.js";
 import type { MultiAgentPolicy, SubAgentBatchResult, SubAgentCoordinator } from "./SubAgentTypes.js";
 import { normalizeSubAgentTask } from "./SubAgentTypes.js";
 import type { AgentTaskContract } from "./AgentTaskContract.js";
-import type { ArtifactFollowUpResolution } from "./ArtifactFollowUp.js";
 import { enforceCapabilityTruth } from "./CapabilityTruthGuard.js";
 import {
-  buildPriorResponseRevisionContext,
   inferPriorResponseLocale,
   inspectPriorResponseConsistency,
   renderPriorResponseSafeFallback,
@@ -63,8 +60,11 @@ import type {
   RuntimeConversationTrace,
   RuntimeLlmUsage,
 } from "../observability/AgentRuntimeEvent.js";
-import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
-import { resolveContractSubAgentIntent } from "./SubAgentIntent.js";
+import {
+  buildWebLimitationFinal,
+  isWebSynthesisReserveActive,
+} from "./WebResearchProgress.js";
+import { resolveTaskCollaborationPolicy } from "./TaskCollaborationPolicy.js";
 import { fingerprintWorkingTree } from "./SubAgentWorktree.js";
 import {
   negotiateCapabilities,
@@ -105,7 +105,6 @@ export interface AgentRunInput {
   conversation?: ConversationMessage[];
   conversationCorpus?: ConversationMessage[];
   conversationTrace?: RuntimeConversationTrace;
-  followUpResolution?: ArtifactFollowUpResolution;
 }
 
 export interface AgentRunResult {
@@ -202,6 +201,7 @@ export class AgentLoop {
     await this.emit({ type: "session", sessionId });
     let understandingMetrics: LlmCallMetrics[] = [];
     let understandingDurationMs = 0;
+    let taskFrameResolutionFailure: string | undefined;
     let understandingEvent: Extract<AgentRuntimeEvent, { type: "understanding" }> | undefined;
     if (
       taskContract.taskFrame === undefined
@@ -215,59 +215,72 @@ export class AgentLoop {
       });
       understandingDurationMs = Date.now() - startedAt;
       understandingMetrics = drainLlmCallMetrics(this.llmClient);
-      taskContract = compileTaskFrameContract({
-        frame: resolved.frame,
-        operatingMode,
-        multiAgentAvailable: input.multiAgent?.enabled === true
-          && this.subAgentCoordinator !== undefined,
-      });
-      if (
-        resolved.frame.collaboration.requestedAgents !== null
-        && input.multiAgent?.enabled === true
-      ) {
-        input = {
-          ...input,
-          multiAgent: {
-            ...input.multiAgent,
-            maxConcurrency: resolved.frame.collaboration.requestedAgents,
-            maxTasksPerRun: Math.max(
-              input.multiAgent.maxTasksPerRun,
-              resolved.frame.collaboration.requestedAgents,
-            ),
-          },
+      if (resolved.source === "UNRESOLVED") {
+        taskFrameResolutionFailure = resolved.reason;
+        understandingEvent = {
+          type: "understanding",
+          source: "MODEL_UNRESOLVED",
+          operation: "UNRESOLVED",
+          target: "UNKNOWN",
+          mutationRequirement: "NONE",
+          confidence: 0,
+          reason: resolved.reason,
         };
-      }
-      if (input.conversationCorpus?.length) {
-        const selection = selectTaskFrameConversation({
-          messages: input.conversationCorpus,
+      } else {
+        taskContract = compileTaskFrameContract({
           frame: resolved.frame,
+          operatingMode,
+          multiAgentAvailable: input.multiAgent?.enabled === true
+            && this.subAgentCoordinator !== undefined,
         });
-        input = {
-          ...input,
-          conversation: selection.messages,
-          conversationTrace: {
-            totalMessages: input.conversationCorpus.length,
-            selectedMessages: selection.messages.length,
-            estimatedInputTokens: input.conversationTrace?.estimatedInputTokens
-              ?? estimateConversationTokens(input.conversationCorpus),
-            estimatedOutputTokens: estimateConversationTokens(selection.messages),
-            truncated: selection.messages.length < input.conversationCorpus.length,
-            focusedOnLatestTurn: false,
-            selectionStrategy: "TASK_FRAME_RETRIEVAL",
-            matchedAssistantMessages: selection.matchedAssistantMessages,
-            roles: selection.messages.map((message) => message.role),
-          },
+        if (
+          resolved.frame.collaboration.requestedAgents !== null
+          && input.multiAgent?.enabled === true
+        ) {
+          input = {
+            ...input,
+            multiAgent: {
+              ...input.multiAgent,
+              maxConcurrency: resolved.frame.collaboration.requestedAgents,
+              maxTasksPerRun: Math.max(
+                input.multiAgent.maxTasksPerRun,
+                resolved.frame.collaboration.requestedAgents,
+              ),
+            },
+          };
+        }
+        if (input.conversationCorpus?.length) {
+          const selection = selectTaskFrameConversation({
+            messages: input.conversationCorpus,
+            frame: resolved.frame,
+          });
+          input = {
+            ...input,
+            conversation: selection.messages,
+            conversationTrace: {
+              totalMessages: input.conversationCorpus.length,
+              selectedMessages: selection.messages.length,
+              estimatedInputTokens: input.conversationTrace?.estimatedInputTokens
+                ?? estimateConversationTokens(input.conversationCorpus),
+              estimatedOutputTokens: estimateConversationTokens(selection.messages),
+              truncated: selection.messages.length < input.conversationCorpus.length,
+              focusedOnLatestTurn: false,
+              selectionStrategy: "TASK_FRAME_RETRIEVAL",
+              matchedAssistantMessages: selection.matchedAssistantMessages,
+              roles: selection.messages.map((message) => message.role),
+            },
+          };
+        }
+        understandingEvent = {
+          type: "understanding",
+          source: "MODEL_TASK_FRAME",
+          operation: taskFrameOperation(resolved.frame),
+          target: resolved.frame.target,
+          mutationRequirement: resolved.frame.effects.repositoryWrite,
+          confidence: resolved.frame.confidence,
+          reason: resolved.reason,
         };
       }
-      understandingEvent = {
-        type: "understanding",
-        source: resolved.source === "MODEL" ? "MODEL_TASK_FRAME" : "MODEL_FALLBACK",
-        operation: taskFrameOperation(resolved.frame),
-        target: resolved.frame.target,
-        mutationRequirement: resolved.frame.effects.repositoryWrite,
-        confidence: resolved.frame.confidence,
-        reason: resolved.reason,
-      };
     } else if (taskContract.taskFrame) {
       const frame = taskContract.taskFrame;
       understandingEvent = {
@@ -345,25 +358,16 @@ export class AgentLoop {
     }
 
     await this.recordUserMessage(state, originalUserGoal);
-    if (input.followUpResolution) {
-      const resolution = input.followUpResolution;
-      const files = resolution.files.map((file) => file.relativePath);
-      await this.eventStore.appendEvent(sessionId, {
-        type: "FOLLOW_UP_RESOLVED",
-        payload: {
-          intent: resolution.intent,
-          source: resolution.source,
-          files,
-          llmSkipped: false,
-        },
-      });
-      await this.emit({
-        type: "follow_up",
-        intent: resolution.intent,
-        source: resolution.source,
-        files,
-        llmSkipped: false,
-      });
+    if (taskFrameResolutionFailure) {
+      const error = [
+        "TASK_FRAME_UNRESOLVED:",
+        "the semantic TaskFrame could not be resolved; one bounded repair was attempted when the failure was structurally repairable.",
+        "AgentLoop stopped before executing tools or accepting a success claim, because falling back to an unverified intent could apply the wrong completion contract.",
+        taskFrameResolutionFailure,
+      ].join(" ");
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      return await this.fail(state, error, input);
     }
     await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
@@ -441,6 +445,28 @@ export class AgentLoop {
       await this.recordDecision(state.sessionId, decision);
       state.addAssistantMessage(decisionToMessage(decision));
       await this.recordDecisionCheckpoint(state, decision);
+
+      if (synthesisReserveActive) {
+        const proposedSummary = decision.type === "FINAL"
+          ? decision.summary
+          : decision.type === "FAILED"
+            ? decision.error
+            : undefined;
+        const limitation = buildWebLimitationFinal(state, proposedSummary);
+        if (limitation) {
+          await this.emit({
+            type: "guardrail",
+            code: "WEB_LIMITATION_FINAL_APPLIED",
+            message: "The Web evidence threshold could not be completed within the action budget; returning a transparent limitation final instead of retrying.",
+          });
+          return await this.finish(
+            state,
+            limitation.summary,
+            limitation.success,
+            input,
+          );
+        }
+      }
 
       const decisionKey = stableDecisionKey(decision);
       if (decisionKey === previousDecisionKey) {
@@ -577,7 +603,6 @@ export class AgentLoop {
         return { failed: await this.executeToolDecision(state, decision.toolName, decision.input, input) };
 
       case "DELEGATE":
-      case "DELEGATE_READONLY":
         if (!state.taskContract.capabilities.delegation) {
           const code = "TASK_CAPABILITY_DELEGATION_BLOCKED";
           return {
@@ -618,7 +643,7 @@ export class AgentLoop {
           };
         }
         {
-          const collaborationIntent = resolveContractSubAgentIntent(
+          const collaborationIntent = resolveTaskCollaborationPolicy(
             state.taskContract,
           );
           if (
@@ -671,7 +696,6 @@ export class AgentLoop {
     decision: AgentDecision,
   ): Promise<StepOutcome | undefined> {
     const result = negotiateCapabilities({
-      userGoal: state.userGoal,
       contract: state.taskContract,
       decision,
       availableTools: this.availableTools,
@@ -743,7 +767,7 @@ export class AgentLoop {
 
   private async executeDelegationDecision(
     state: AgentState,
-    decision: Extract<AgentDecision, { type: "DELEGATE" | "DELEGATE_READONLY" }>,
+    decision: Extract<AgentDecision, { type: "DELEGATE" }>,
     input: AgentRunInput,
   ): Promise<StepOutcome> {
     const policy = input.multiAgent;
@@ -844,7 +868,7 @@ export class AgentLoop {
     if (incomplete) {
       state.setLastError(`MULTI_AGENT_BATCH_FAILED: ${message}`);
       await this.recordError(state.sessionId, state.lastError);
-      const collaborationIntent = resolveContractSubAgentIntent(
+      const collaborationIntent = resolveTaskCollaborationPolicy(
         state.taskContract,
       );
       const requiredWriterDeadEnd = collaborationIntent.preference === "REQUIRED"
@@ -932,7 +956,7 @@ export class AgentLoop {
         guardrailCode: code,
       };
     }
-    const collaborationIntent = resolveContractSubAgentIntent(
+    const collaborationIntent = resolveTaskCollaborationPolicy(
       state.taskContract,
     );
     if (
@@ -1388,11 +1412,11 @@ export class AgentLoop {
     context: string,
     availableTools: ToolSpec[],
     conversation: ConversationMessage[] | undefined,
-    singleShotUserGoal: string,
+    originalUserGoal: string,
     conversationHistoryTruncated: boolean,
     finalOnly: boolean,
   ): Promise<AgentDecision> {
-    const mode = state.taskContract.executionStrategy === "SINGLE_SHOT" ? "agent_single_shot" : "agent_decision";
+    const mode = "agent_decision";
     const startedAt = Date.now();
     await this.eventStore.appendEvent(state.sessionId, {
       type: "LLM_CALL_STARTED",
@@ -1400,32 +1424,6 @@ export class AgentLoop {
     });
     await this.emit({ type: "llm", phase: "started", mode });
     try {
-      if (state.taskContract.executionStrategy === "SINGLE_SHOT") {
-        if (!this.llmClient.completeText) {
-          return { type: "FAILED", error: "The configured LLM client does not support single-shot text completion" };
-        }
-        const firstResult = await this.llmClient.completeText({
-          userGoal: singleShotUserGoal,
-          context,
-          ...(conversation && conversation.length > 0 ? { conversation } : {}),
-          mode: "direct",
-        });
-        const result = await this.revisePriorResponseDenial(
-          state,
-          singleShotUserGoal,
-          context,
-          conversation ?? [],
-          conversationHistoryTruncated,
-          firstResult,
-        );
-        await this.recordLlmUsage(state, drainLlmCallMetrics(this.llmClient), mode, Date.now() - startedAt);
-        const correctedText = result.success && result.text
-          ? await this.correctCapabilityClaim(state, singleShotUserGoal, result.text)
-          : undefined;
-        return correctedText
-          ? { type: "FINAL", summary: correctedText, success: true }
-          : { type: "FAILED", error: result.error ?? "Single-shot answer failed" };
-      }
       const decision = await this.llmClient.chat({
         userGoal,
         context,
@@ -1438,14 +1436,14 @@ export class AgentLoop {
       if (decision.type !== "FINAL") return decision;
       const conversationSafeSummary = await this.correctPriorResponseDenial(
         state,
-        singleShotUserGoal,
+        originalUserGoal,
         decision.summary,
         conversation ?? [],
         conversationHistoryTruncated,
       );
       return {
         ...decision,
-        summary: await this.correctCapabilityClaim(state, singleShotUserGoal, conversationSafeSummary),
+        summary: await this.correctCapabilityClaim(state, originalUserGoal, conversationSafeSummary),
       };
     } catch (error) {
       const message = `LLM decision failed: ${errorToMessage(error)}`;
@@ -1461,70 +1459,6 @@ export class AgentLoop {
     }
   }
 
-  private async revisePriorResponseDenial(
-    state: AgentState,
-    userGoal: string,
-    context: string,
-    conversation: ConversationMessage[],
-    historyTruncated: boolean,
-    firstResult: LlmTextCompletionResult,
-  ): Promise<LlmTextCompletionResult> {
-    if (!firstResult.success || !firstResult.text || !this.llmClient.completeText) {
-      return firstResult;
-    }
-    const violation = inspectPriorResponseConsistency(
-      userGoal,
-      firstResult.text,
-      conversation,
-      { historyTruncated },
-    );
-    if (!violation) return firstResult;
-    if (violation.code === "INSUFFICIENT_HISTORY_FOR_DENIAL") {
-      return {
-        success: true,
-        text: await this.recordPriorResponseFallback(state, userGoal, violation),
-      };
-    }
-
-    const message = violation.excerpt
-      ? "Draft denied or rewrote a relevant earlier assistant output; retrying once with the visible original wording."
-      : "Draft made a definitive denial from an incomplete conversation selection; retrying once with an uncertainty requirement.";
-    await this.eventStore.appendEvent(state.sessionId, {
-      type: "PRIOR_RESPONSE_CONSISTENCY_RETRY",
-      payload: {
-        code: violation.code,
-        matchedTerms: violation.matchedTerms,
-        excerpt: violation.excerpt ?? null,
-        message,
-      },
-    });
-    await this.emit({ type: "guardrail", code: "PRIOR_RESPONSE_CONSISTENCY_RETRY", message });
-
-    const revision = await this.llmClient.completeText({
-      userGoal,
-      context: [
-        context,
-        buildPriorResponseRevisionContext(violation, firstResult.text),
-      ].filter(Boolean).join("\n\n"),
-      ...(conversation.length > 0 ? { conversation } : {}),
-      mode: "direct",
-    });
-    if (revision.success && revision.text) {
-      const repeatedViolation = inspectPriorResponseConsistency(
-        userGoal,
-        revision.text,
-        conversation,
-        { historyTruncated },
-      );
-      if (!repeatedViolation) return revision;
-    }
-
-    return {
-      success: true,
-      text: await this.recordPriorResponseFallback(state, userGoal, violation),
-    };
-  }
-
   private async correctPriorResponseDenial(
     state: AgentState,
     userGoal: string,
@@ -1536,7 +1470,7 @@ export class AgentLoop {
       userGoal,
       text,
       conversation,
-      { historyTruncated },
+      priorResponseGuardOptions(state, historyTruncated),
     );
     if (!violation) return text;
     return await this.recordPriorResponseFallback(state, userGoal, violation);
@@ -1566,7 +1500,13 @@ export class AgentLoop {
     userGoal: string,
     text: string,
   ): Promise<string> {
-    const correction = enforceCapabilityTruth(userGoal, text);
+    const correction = enforceCapabilityTruth({
+      ...(state.taskContract.taskFrame
+        ? { taskFrame: state.taskContract.taskFrame }
+        : {}),
+      userGoal,
+      answer: text,
+    });
     if (!correction.corrected) return text;
     const capabilities = correction.conflicts.join(",");
     const message = `Model capability claim contradicted the local Capability Registry and was replaced (${capabilities}).`;
@@ -1619,7 +1559,7 @@ export class AgentLoop {
       await this.recordCheckpoint(state, "RUNNING", `tool:${decision.toolName}`);
       return;
     }
-    if (decision.type === "DELEGATE" || decision.type === "DELEGATE_READONLY") {
+    if (decision.type === "DELEGATE") {
       await this.recordCheckpoint(state, "RUNNING", `delegation:${decision.reason}`);
       return;
     }
@@ -2103,6 +2043,22 @@ function isRedundantSuccessfulIdempotentToolCall(
 
 function isRecoverableLlmProtocolFailure(error: string): boolean {
   return /(?:invalid json|schema validation failed|did not contain a json object|did not include parsable content|response is empty|missing type|agentdecision schema)/i.test(error);
+}
+
+function priorResponseGuardOptions(
+  state: AgentState,
+  historyTruncated: boolean,
+): {
+  historyTruncated: boolean;
+  auditRequested: boolean;
+  semanticQueries: string[];
+} {
+  const evidence = state.taskContract.taskFrame?.conversationEvidence;
+  return {
+    historyTruncated,
+    auditRequested: evidence?.purpose === "PRIOR_RESPONSE_AUDIT",
+    semanticQueries: evidence?.queries ?? [],
+  };
 }
 
 function taskDiffRecordMetadata(artifact: TaskDiffArtifact | undefined): Record<string, unknown> {

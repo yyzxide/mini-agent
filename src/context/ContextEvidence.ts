@@ -88,7 +88,6 @@ function formatDecision(decision: AgentDecision): string {
     case "TOOL_CALL":
       return `TOOL_CALL: ${decision.toolName} ${safeJson(decision.input, 500, "head")}`;
     case "DELEGATE":
-    case "DELEGATE_READONLY":
       return `DELEGATE: ${decision.reason}; tasks=${decision.tasks.map((task) => task.id).join(", ")}`;
     case "APPLY_DELEGATED_PATCH":
       return `APPLY_DELEGATED_PATCH: ${decision.taskId}; ${decision.description}`;

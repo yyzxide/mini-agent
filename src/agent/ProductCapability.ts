@@ -4,90 +4,17 @@ import {
   type ProductCapabilityDefinition,
   type ProductCapabilityId,
 } from "./CapabilityRegistry.js";
-import { classifySubAgentIntent } from "./SubAgentIntent.js";
 
 export type ProductMetaTopic = "ALL" | "WEB_RESEARCH" | "REPOSITORY_WRITE" | "MULTI_AGENT_COLLABORATION";
 export type ProductMetaAct = "INVENTORY" | "AVAILABILITY" | "EXPLAIN_LIMITATION";
 
-export interface ProductMetaIntent {
-  kind: "PRODUCT_META";
+export interface ProductCapabilityView {
   topic: ProductMetaTopic;
   act: ProductMetaAct;
-  confidence: number;
-  signals: string[];
-}
-
-/**
- * Classifies product-meta semantics compositionally. It deliberately combines
- * subject, capability topic, modality, question, and historical-reference
- * signals instead of enumerating complete user sentences.
- */
-export function classifyProductMetaIntent(value: string): ProductMetaIntent | undefined {
-  const normalized = normalize(value);
-  if (!normalized.compact) return undefined;
-
-  const signals: string[] = [];
-  const subject = hasSubjectSignal(normalized.text);
-  const web = hasWebTopic(normalized.text);
-  const repositoryWrite = hasRepositoryWriteTopic(normalized.text);
-  const subAgent = classifySubAgentIntent(value);
-  const generalScope = hasGeneralCapabilityScope(normalized.text);
-  const modality = hasCapabilityModality(normalized.text);
-  const explanation = hasExplanationFrame(normalized.text);
-  const question = hasQuestionFrame(value, normalized.text);
-  const explicitAction = looksLikeExplicitWebAction(value);
-
-  if (subject) signals.push("product-subject");
-  if (web) signals.push("web-topic");
-  if (repositoryWrite) signals.push("repository-write-topic");
-  if (subAgent.mentioned) signals.push("multi-agent-topic");
-  if (generalScope) signals.push("general-capability-scope");
-  if (modality) signals.push("capability-modality");
-  if (explanation) signals.push("historical-explanation");
-  if (question) signals.push("question-frame");
-
-  // “请联网查一下” is an action request even though it mentions networking.
-  if (explicitAction && !explanation && !question) return undefined;
-
-  const topic: ProductMetaTopic = [web, repositoryWrite, subAgent.mentioned].filter(Boolean).length > 1
-    ? "ALL"
-    : web
-      ? "WEB_RESEARCH"
-      : repositoryWrite
-        ? "REPOSITORY_WRITE"
-        : subAgent.mentioned
-          ? "MULTI_AGENT_COLLABORATION"
-          : "ALL";
-  const act: ProductMetaAct = explanation
-    ? "EXPLAIN_LIMITATION"
-    : generalScope || (!web && !repositoryWrite && !subAgent.mentioned) ? "INVENTORY" : "AVAILABILITY";
-
-  const isCapabilityQuestion = generalScope
-    || explanation
-    || subAgent.capabilityQuestion
-    || ((web || repositoryWrite || subAgent.mentioned) && modality && (subject || question));
-  if (!isCapabilityQuestion) return undefined;
-
-  let confidence = 0.45;
-  if (subject) confidence += 0.12;
-  if (web || repositoryWrite || subAgent.mentioned) confidence += 0.16;
-  if (generalScope) confidence += 0.22;
-  if (modality) confidence += 0.12;
-  if (explanation) confidence += 0.18;
-  if (question) confidence += 0.08;
-  if (explicitAction) confidence -= 0.2;
-
-  return {
-    kind: "PRODUCT_META",
-    topic,
-    act,
-    confidence: Math.max(0, Math.min(1, confidence)),
-    signals,
-  };
 }
 
 export function renderProductCapabilityAnswer(
-  intent: ProductMetaIntent,
+  intent: ProductCapabilityView,
   options: { priorDenialFound?: boolean; locale?: "zh" | "en" } = {},
 ): string {
   const locale = options.locale ?? "zh";
@@ -118,17 +45,6 @@ export function detectResponseCapabilityDenials(text: string): ProductCapability
     conflicts.push("MULTI_AGENT_COLLABORATION");
   }
   return conflicts;
-}
-
-export function looksLikeExplicitWebAction(value: string): boolean {
-  const text = value.trim().toLowerCase();
-  // "Explicit Web" is a hard semantic constraint, so keep this recognizer
-  // deliberately high precision. Bare 查/检查/搜索 wording is left to the
-  // semantic model instead of being treated as an irrevocable Web request.
-  return /(?:联网|上网|网上|网页|互联网|\bweb\b|\bonline\b|\binternet\b).{0,16}(?:查|查询|查找|搜|搜索|检索|浏览|核实|核验|查证|验证|事实核查|search|browse|look\s*up|find|verify)/i.test(text)
-    || /(?:查|查询|查找|搜|搜索|检索|浏览|核实|核验|查证|验证|search|browse|look\s*up|find|verify).{0,16}(?:联网|上网|网上|网页|互联网|\bweb\b|\bonline\b|\binternet\b)/i.test(text)
-    || /(?:search|browse|look\s*up|find).{0,12}(?:web|online|internet)/i.test(text)
-    || /(?:search|browse)(?:\s+the)?\s+web/i.test(text);
 }
 
 export function inferLocale(value: string): "zh" | "en" {
@@ -217,42 +133,4 @@ function containsAffirmation(text: string, capability: "WEB_RESEARCH" | "REPOSIT
   return capability === "WEB_RESEARCH"
     ? /(?:可以|能够|支持|具备|有).{0,10}(?:联网|上网|访问网页|web_search|fetch_url)|(?:联网|web).{0,10}(?:能力|支持)/i.test(text)
     : /(?:可以|能够|支持|具备|有).{0,10}(?:写入|修改|编辑|创建|保存).{0,8}(?:文件|代码|仓库)|(?:apply_patch|repository_task)/i.test(text);
-}
-
-function hasSubjectSignal(text: string): boolean {
-  return /(?:你|你的|这个(?:cli|助手|agent|程序|项目)|mini[\s-]*(?:agent|coding agent)|本(?:系统|项目|助手)|your|you|this\s+(?:cli|agent|assistant|product))/i.test(text);
-}
-
-function hasWebTopic(text: string): boolean {
-  return /(?:联网|互联网|上网|外网|网页|网络搜索|web[\s_-]*search|fetch[\s_-]*url|browse|browsing|internet|online)/i.test(text);
-}
-
-function hasRepositoryWriteTopic(text: string): boolean {
-  return /(?:(?:写|写入|改|修改|编辑|创建|保存|落盘|动).{0,8}(?:文件|代码|仓库|项目)|(?:文件|代码|仓库).{0,8}(?:写入|修改|编辑|创建|保存|落盘)|apply[\s_-]*patch|repository[\s_-]*write|(?:write|edit|modify|change|create)\s+(?:repository\s+)?files?)/i.test(text);
-}
-
-function hasGeneralCapabilityScope(text: string): boolean {
-  return /(?:干啥|做啥|做什么|能做哪些|可以做哪些|会些什么|有什么能力|哪些能力|能力(?:清单|范围|边界|是什么)|哪些功能|功能清单|哪些类型的任务|处理哪些任务|能帮.{0,4}什么|what\s+can\s+you\s+do|what\s+can\s+you\s+help|capabilit(?:y|ies)|feature\s+list)/i.test(text);
-}
-
-function hasCapabilityModality(text: string): boolean {
-  return /(?:能不能|能否|是否能|可以吗|是否可以|会不会|支持吗|是否支持|具备|能力|权限|只能|只会|不能|无法|没法|办不到|碰不到|永久限制|can\s+you|could\s+you|do\s+you\s+(?:have|support)|are\s+you\s+able|cannot|can't|unable|capabilit|permission)/i.test(text);
-}
-
-function hasExplanationFrame(text: string): boolean {
-  return /(?:(?:为什么|为何|怎么会).{0,18}(?:说|声称|表示|认为|不能|无法|限制)|(?:之前|刚才|上一轮|前面).{0,18}(?:说|不能|无法|限制|权限)|(?:限制|权限).{0,8}(?:永久|一直|以后)|why\s+(?:did|do)\s+you\s+(?:say|claim)|previous(?:ly)?.{0,20}(?:said|claimed|limit)|permanent\s+(?:limit|restriction))/i.test(text);
-}
-
-function hasQuestionFrame(raw: string, text: string): boolean {
-  return /[?？]/.test(raw)
-    || /(?:吗|么|呢|到底|是不是|是否|为什么|为何|怎么会)/.test(text)
-    || /^(?:can|could|do|does|are|why|what)\b/i.test(text.trim());
-}
-
-function normalize(value: string): { text: string; compact: string } {
-  const text = value.trim().toLowerCase();
-  return {
-    text,
-    compact: text.replace(/[\s,，。.!！？?;；:：“”"'‘’、\-—()（）[\]【】`]/g, ""),
-  };
 }

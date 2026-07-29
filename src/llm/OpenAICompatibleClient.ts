@@ -1,9 +1,13 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
-import { formatCapabilityRegistryForPrompt } from "../agent/CapabilityRegistry.js";
 import { formatRuntimeContext } from "../context/RuntimeContext.js";
 import { errorToMessage } from "../utils/errors.js";
 import { DecisionParser } from "./DecisionParser.js";
-import type { LlmClient, LlmInput } from "./LlmClient.js";
+import type {
+  LlmClient,
+  LlmInput,
+  TaskFrameCompletionInput,
+  TaskFrameCompletionResult,
+} from "./LlmClient.js";
 import { buildUserPrompt, CODING_AGENT_SYSTEM_PROMPT } from "./prompts.js";
 import type { ConversationMessage } from "../session/ConversationHistory.js";
 
@@ -16,23 +20,6 @@ export interface OpenAICompatibleClientOptions {
   timeoutMs?: number;
   fetchFn?: typeof fetch;
   decisionParser?: DecisionParser;
-}
-
-export interface LlmTextInput {
-  userGoal: string;
-  context?: string | undefined;
-  conversation?: ConversationMessage[] | undefined;
-  mode?: "direct" | "web" | "web_rewrite" | "task_frame" | undefined;
-}
-
-export interface LlmTextResult {
-  success: boolean;
-  text?: string;
-  error?: string;
-}
-
-interface LlmTextAttemptResult extends LlmTextResult {
-  finishReason?: string;
 }
 
 export interface LlmUsageMetrics {
@@ -96,56 +83,19 @@ export class OpenAICompatibleClient implements LlmClient {
     return { type: "FAILED", error: retryAttempt.error };
   }
 
-  async completeText(input: LlmTextInput): Promise<LlmTextResult> {
-    const firstAttempt = await this.requestTextCompletion(input);
-    if (!firstAttempt.success || !firstAttempt.text) {
-      return toPublicTextResult(firstAttempt);
-    }
-
-    if ((input.mode ?? "direct") !== "direct" || firstAttempt.finishReason !== "length") {
-      return toPublicTextResult(firstAttempt);
-    }
-
-    let accumulated = firstAttempt.text;
-    let latestAttempt = firstAttempt;
-
-    for (let index = 0; index < 2 && latestAttempt.finishReason === "length"; index += 1) {
-      const continuation = await this.requestTextCompletion({
-        userGoal: buildContinuationUserGoal(input.userGoal),
-        context: buildContinuationContext(input.context, accumulated),
-        conversation: input.conversation,
-        mode: input.mode,
-      });
-
-      if (!continuation.success || !continuation.text) {
-        return {
-          success: true,
-          text: `${accumulated}\n\n[output may be truncated: continuation request failed]`,
-        };
-      }
-
-      accumulated = mergeContinuationText(accumulated, continuation.text);
-      latestAttempt = continuation;
-    }
-
-    if (latestAttempt.finishReason === "length") {
-      return {
-        success: true,
-        text: `${accumulated}\n\n[output may be truncated: model reached max token limit]`,
-      };
-    }
-
-    return {
-      success: true,
-      text: accumulated,
-    };
+  async compileTaskFrame(
+    input: TaskFrameCompletionInput,
+  ): Promise<TaskFrameCompletionResult> {
+    return await this.requestTaskFrameCompilation(input);
   }
 
   drainCallMetrics(): LlmCallMetrics[] {
     return this.callMetricsBuffer.splice(0, this.callMetricsBuffer.length);
   }
 
-  private async requestTextCompletion(input: LlmTextInput): Promise<LlmTextAttemptResult> {
+  private async requestTaskFrameCompilation(
+    input: TaskFrameCompletionInput,
+  ): Promise<TaskFrameCompletionResult> {
     const configurationError = this.validateConfiguration();
     if (configurationError) {
       return { success: false, error: configurationError };
@@ -181,9 +131,9 @@ export class OpenAICompatibleClient implements LlmClient {
           messages: [
             {
               role: "system",
-              content: buildTextCompletionSystemPrompt(input.mode ?? "direct"),
+              content: buildTaskFrameSystemPrompt(),
             },
-            ...(input.conversation ?? []),
+            ...formatConversationForModel(input.conversation),
             {
               role: "user",
               content: userContent,
@@ -209,11 +159,9 @@ export class OpenAICompatibleClient implements LlmClient {
         return { success: false, error: buildEmptyContentError(body) };
       }
 
-      const finishReason = extractFinishReason(body);
       return {
         success: true,
         text,
-        ...(finishReason ? { finishReason } : {}),
       };
     } catch (error) {
       if (isAbortError(error)) {
@@ -253,7 +201,7 @@ export class OpenAICompatibleClient implements LlmClient {
               role: "system",
               content: CODING_AGENT_SYSTEM_PROMPT,
             },
-            ...(input.conversation ?? []),
+            ...formatConversationForModel(input.conversation),
             {
               role: "user",
               content: buildDecisionPrompt(userPrompt, retry),
@@ -368,12 +316,6 @@ interface OpenAIChatCompletionResponse {
   }>;
 }
 
-function toPublicTextResult(result: LlmTextAttemptResult): LlmTextResult {
-  return result.success
-    ? { success: true, ...(result.text ? { text: result.text } : {}) }
-    : { success: false, ...(result.error ? { error: result.error } : {}) };
-}
-
 function buildDecisionPrompt(userPrompt: string, retry: LlmRetryRequest | undefined): string {
   if (!retry) {
     return userPrompt;
@@ -410,52 +352,6 @@ function buildDecisionPrompt(userPrompt: string, retry: LlmRetryRequest | undefi
   ].filter(Boolean).join("\n");
 }
 
-function buildContinuationUserGoal(originalGoal: string): string {
-  return [
-    "Continue the previous answer for the same request.",
-    `Original request: ${originalGoal}`,
-    "Do not restart from the beginning.",
-    "Do not repeat any earlier text unless a tiny overlap is unavoidable.",
-    "Return only the remaining continuation.",
-    "If the previous answer started a fenced code block, continue inside it and close it when appropriate.",
-  ].join("\n");
-}
-
-function buildContinuationContext(previousContext: string | undefined, accumulatedText: string): string {
-  return [
-    ...(previousContext ? [previousContext, ""] : []),
-    "Previously generated partial answer already shown to the user:",
-    limitContinuationContext(accumulatedText, 8_000),
-  ].join("\n");
-}
-
-function limitContinuationContext(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-
-  return value.slice(-maxChars);
-}
-
-function mergeContinuationText(existing: string, continuation: string): string {
-  if (!continuation) {
-    return existing;
-  }
-
-  if (existing.endsWith(continuation)) {
-    return existing;
-  }
-
-  const maxOverlap = Math.min(existing.length, continuation.length, 400);
-  for (let size = maxOverlap; size > 0; size -= 1) {
-    if (existing.slice(-size) === continuation.slice(0, size)) {
-      return existing + continuation.slice(size);
-    }
-  }
-
-  return existing + continuation;
-}
-
 function shouldRetryWithoutResponseFormat(status: number, bodyPreview: string): boolean {
   if (![400, 404, 415, 422].includes(status)) {
     return false;
@@ -467,11 +363,6 @@ function shouldRetryWithoutResponseFormat(status: number, bodyPreview: string): 
     || normalized.includes("unsupported")
     || normalized.includes("not support")
     || normalized.includes("invalid parameter");
-}
-
-function extractFinishReason(body: OpenAIChatCompletionResponse): string | undefined {
-  const value = body.choices?.[0]?.finish_reason;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function extractTextCompletionContent(body: OpenAIChatCompletionResponse): string | undefined {
@@ -544,92 +435,58 @@ function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
   return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
 }
 
-function buildTextCompletionSystemPrompt(
-  mode: "direct" | "web" | "web_rewrite" | "task_frame",
-): string {
-  if (mode === "task_frame") {
-    return [
+function buildTaskFrameSystemPrompt(): string {
+  return [
       "You are the semantic TaskFrame compiler for a local coding agent.",
       "Interpret the current user request together with recent conversation. Do not answer the request and do not choose a tool yet.",
       "Describe the objective, requested effects, explicit constraints, and evidence-based completion criteria without assigning a runtime mode.",
       "An action mentioned as history, documentation, a quotation, or the object of a question is not necessarily an action requested now.",
+      "Runtime-provided prior-turn execution evidence is authoritative about whether a repository change actually happened. Existing or merely read files are not artifacts created by that turn.",
       "repositoryWrite is NONE when no edit is requested, CONDITIONAL when edits are allowed only if investigation establishes a need, and REQUIRED when a repository change is itself the requested outcome.",
       "Set collaboration.requirement to REQUIRED only when the user explicitly requires subagent work, OPTIONAL when delegation is requested as a preference, and NONE otherwise. Record required writer/reviewer outcomes separately.",
-      "Set conversationEvidence.requiresHistory when the task depends on an older statement, decision, artifact, constraint, or topic beyond the recent exchange. Provide concise semantic queries for retrieving that evidence; do not guess the answer.",
-      "When webEvidence is true, set webEvidencePolicy from the claim: ordinary research usually needs one search view and one fetched cited source; latest/current product, model, version, API, SDK, or release claims need freshness=CURRENT, authority=REQUIRED, and at least two non-equivalent search views.",
+      "Set conversationEvidence.requiresHistory when the task depends on an older statement, decision, artifact, constraint, or topic beyond the recent exchange. Set purpose=REFERENT for an ordinary cross-turn reference and purpose=PRIOR_RESPONSE_AUDIT only when the user is asking to inspect, challenge, or correct an earlier assistant response. Provide concise semantic queries for retrieving that evidence; do not guess the answer.",
+      "When webEvidence is true, classify its evidence profile instead of choosing numeric thresholds. Use ORDINARY/GENERAL_LOOKUP for definitions, explanations, and generic requests to search the Web. Do not elevate a request merely because current information could be useful or because a result may contain a date or version.",
+      "Use CORROBORATED/USER_REQUESTED_CORROBORATION only when the user explicitly asks for multiple independent sources or comparison. Use CURRENT/VOLATILE_CURRENT_CLAIM only for an explicitly latest/current/time-bound request or an inherently volatile fact. Use HIGH_STAKES/HIGH_STAKES_DOMAIN only when wrong or stale medical, legal, financial, or safety information could materially harm the user.",
+      "Set webEvidencePolicy.ranking=SUPERLATIVE only when the user actually requests a ranking, top/best/most result, or equivalent superlative. Otherwise use REPRESENTATIVE so search queries cannot silently strengthen the scope.",
       "Set readOnly only when the user actually prohibits changes. Set noWeb, noCommands, noDelegation, or noMcp only for explicit prohibitions.",
       "Return one JSON object only with this exact shape:",
-      "{\"version\":1,\"objective\":\"string\",\"target\":\"REPOSITORY|WORLD|PRODUCT|SESSION|DERIVATION|MIXED\",\"answer\":{\"shape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"depth\":\"BRIEF|BALANCED|DETAILED\"},\"effects\":{\"answer\":boolean,\"repositoryRead\":boolean,\"repositoryWrite\":\"NONE|CONDITIONAL|REQUIRED\",\"webEvidence\":boolean,\"knowledgeEvidence\":boolean,\"commandExecution\":boolean,\"verification\":\"NONE|SYNTAX|STATIC|TEST\",\"delegation\":boolean,\"mcp\":boolean},\"webEvidencePolicy\":{\"searchViews\":number,\"fetchedSources\":number,\"independentDomains\":number,\"citation\":boolean,\"freshness\":\"NONE|CURRENT\",\"authority\":\"NONE|REQUIRED\"},\"constraints\":{\"readOnly\":boolean,\"noWeb\":boolean,\"noCommands\":boolean,\"noDelegation\":boolean,\"noMcp\":boolean,\"requireCompleteFileRead\":boolean},\"collaboration\":{\"requirement\":\"NONE|OPTIONAL|REQUIRED\",\"changeProposal\":boolean,\"review\":boolean,\"requestedAgents\":number|null},\"conversationEvidence\":{\"requiresHistory\":boolean,\"queries\":[\"string\"],\"includeRecentMessages\":number},\"completionCriteria\":[\"string\"],\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
+      "{\"version\":1,\"objective\":\"string\",\"target\":\"REPOSITORY|WORLD|PRODUCT|SESSION|DERIVATION|MIXED\",\"answer\":{\"shape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"depth\":\"BRIEF|BALANCED|DETAILED\"},\"effects\":{\"answer\":boolean,\"repositoryRead\":boolean,\"repositoryWrite\":\"NONE|CONDITIONAL|REQUIRED\",\"webEvidence\":boolean,\"knowledgeEvidence\":boolean,\"commandExecution\":boolean,\"verification\":\"NONE|SYNTAX|STATIC|TEST\",\"delegation\":boolean,\"mcp\":boolean},\"webEvidencePolicy\":{\"profile\":\"ORDINARY|CORROBORATED|CURRENT|HIGH_STAKES\",\"basis\":\"GENERAL_LOOKUP|USER_REQUESTED_CORROBORATION|VOLATILE_CURRENT_CLAIM|HIGH_STAKES_DOMAIN\",\"ranking\":\"REPRESENTATIVE|SUPERLATIVE\"},\"constraints\":{\"readOnly\":boolean,\"noWeb\":boolean,\"noCommands\":boolean,\"noDelegation\":boolean,\"noMcp\":boolean,\"requireCompleteFileRead\":boolean},\"collaboration\":{\"requirement\":\"NONE|OPTIONAL|REQUIRED\",\"changeProposal\":boolean,\"review\":boolean,\"requestedAgents\":number|null},\"conversationEvidence\":{\"purpose\":\"CONTEXT|REFERENT|PRIOR_RESPONSE_AUDIT\",\"requiresHistory\":boolean,\"queries\":[\"string\"],\"includeRecentMessages\":number},\"completionCriteria\":[\"string\"],\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
       "Completion criteria describe observable outcomes, not internal labels. confidence must be between 0 and 1.",
-    ].join("\n");
+  ].join("\n");
+}
+
+function formatConversationForModel(
+  conversation: ConversationMessage[] | undefined,
+): Array<{ role: "user" | "assistant" | "system"; content: string }> {
+  const messages = (conversation ?? []).map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+  const ledger = (conversation ?? []).flatMap((message, index) => (
+    message.executionEvidence
+      ? [{
+          turn: index + 1,
+          role: message.role,
+          repositoryChanged: message.executionEvidence.repositoryChanged,
+          changedFiles: message.executionEvidence.changedFiles,
+          verificationAfterChange: message.executionEvidence.verificationAfterChange,
+        }]
+      : []
+  ));
+  if (ledger.length === 0) {
+    return messages;
   }
-  const commonRules = [
-    "You are Mini Coding Agent, a helpful local assistant inside the mini-agent coding CLI.",
-    "If the user asks your name or identity, identify yourself as Mini Coding Agent. Do not claim that you have no name.",
-    "The CLI uses one AgentLoop runtime. Direct responses, web research, code review, repository analysis, repository changes, and read-only planning are task contracts, not separate agents or chat modes.",
-    "Do not tell the user to exit, restart, or open a separate chat to switch modes. The CLI builds a task contract for each request automatically.",
-    formatCapabilityRegistryForPrompt(),
-    "Answer in the same language as the user unless the user asks otherwise.",
-    "The current user request is authoritative. Do not answer or repeat an older request unless the current request clearly refers to it.",
-    "Use the provided conversation context when it is relevant.",
-    "Conversation assistant turns are authoritative evidence of what you previously output, but they are not evidence that the external-world claims in those turns are true.",
-    "When the user challenges your earlier answer, inspect the visible original wording first. If it conflicts with your current answer, acknowledge and retract it; do not deny it, minimize it, or rewrite what you meant.",
-    "If the disputed original wording is not visible, say that the available conversation record is insufficient. Never infer from missing context that you did not say something.",
-    "If Context contains Active skills, follow those skill instructions when relevant unless they conflict with the current user request, repository evidence, safety rules, or this system prompt.",
-    "Use the provided runtime context as authoritative for current date and time questions. Never call its date 'future' merely because it is later than your training data.",
-    "If the user asks what was discussed before, summarize only what appears in the conversation context.",
-    "Do not claim that there is no memory when conversation context is present.",
-    "In this product, RAG or the knowledge base means the separately indexed repository Markdown/TXT document corpus queried through knowledge_search. It does not mean conversation history or long-term task memory.",
-    "Historical memory evidence comes from prior sessions and task summaries. Describe it as retrieval-based memory, never as the product's document RAG knowledge base.",
-    "For short follow-up fragments, infer the omitted topic or predicate from the immediately relevant conversation turn when it is clear; otherwise ask a concise clarification.",
-    "Do not modify files, do not emit AgentDecision JSON, and do not call tools.",
-    "Prefer a complete, useful answer over a terse one-line summary.",
-    "Without tool or source evidence, present model memory only as unverified general knowledge. Do not fabricate a complete-looking list or precise names, locations, dates, quantities, rewards, mechanics, or other details to fill a knowledge gap.",
-    "If the user exposes one unsupported or contradictory detail, re-evaluate the related claims as a group. Do not preserve the rest by default and do not replace the error with new unverified specifics.",
-    "Do not say that you checked, verified, searched, or confirmed an external fact unless evidence for that action is present in the current context.",
-    "For casual acknowledgements, corrections, cancellations, or 'never mind / I clicked the wrong thing' style messages, reply naturally like a person in one short sentence.",
-    "Do not turn casual chat into a ticket note, task log, operator summary, or third-person report.",
-    "Avoid phrases like '用户误触', '未做任何操作', 'the user mis-clicked', or 'no action was taken' unless the user explicitly asks for a formal log entry.",
-    "Use short paragraphs or bullets when they improve clarity.",
-    "For explicit snippet-only requests, provide complete code in a fenced code block and add only brief notes when useful.",
-    "Do not falsely claim that the overall CLI lacks file-writing capability. Explain that the current task contract may intentionally disable repository writes.",
-    "Do not falsely claim that the overall CLI lacks web capability. If the current contract has no gathered web evidence, say that limitation instead of saying the product cannot network.",
+  return [
+    ...messages,
+    {
+      role: "system",
+      content: [
+        "Runtime-provided prior-turn execution evidence (trusted control-plane metadata):",
+        JSON.stringify(ledger),
+        "A file that existed or was only read is not a file created or modified by that turn. If prior assistant prose conflicts with this ledger, the ledger wins.",
+      ].join("\n"),
+    },
   ];
-
-  if (mode === "web") {
-    return [
-      ...commonRules,
-      "The context may include web_search and fetch_url results gathered by the CLI.",
-      "Base current-fact answers on the provided web context.",
-      "Use conversation context to resolve follow-up questions and keep the same topic/scope unless the user clearly changes it.",
-      "Keep materially different categories, scopes, time periods, and data series separate unless the user explicitly asks to combine them.",
-      "For ambiguous entities or acronyms, do not assume the domain. If sources show multiple valid interpretations, list them by category and state what clarification would narrow the answer.",
-      "For live scores or very recent results, say clearly when the provided sources do not verify the exact current score.",
-      "Mention the main source titles or URLs when you rely on web context.",
-      "If sources disagree or are insufficient, say that clearly and explain the uncertainty.",
-      "Do not invent facts that are not supported by the web context.",
-    ].join("\n");
-  }
-
-  if (mode === "web_rewrite") {
-    return [
-      "You are a web question planner for a local assistant.",
-      "Your job is to rewrite the user's current question into a standalone web research plan.",
-      "Use the conversation memory to resolve follow-up questions, pronouns, omitted topics, and scope.",
-      "For very short follow-up fragments, infer the omitted predicate from the previous relevant user question when confidence is high.",
-      "Do not answer the user's question.",
-      "Return JSON only, with no markdown and no prose.",
-      "The JSON shape must be:",
-      "{\"standaloneQuestion\":\"string\",\"searchQueries\":[\"string\"],\"answerScope\":\"string\",\"sourceHints\":[\"string\"],\"answerInstructions\":[\"string\"],\"needsLiveData\":boolean,\"confidence\":\"high|medium|low\"}",
-      "Create 1 to 4 search queries.",
-      "If the user asks for current, latest, live, prices, scores, results, news, or recent facts, set needsLiveData to true.",
-      "For follow-up questions, preserve the previous topic/scope unless the user clearly changed topic.",
-      "Preserve category, scope, and time-period boundaries in answerInstructions.",
-      "If an entity/acronym can belong to multiple domains and the user did not specify the domain, do not silently choose one. Plan broad searches and add instructions to list major verified interpretations or ask for clarification.",
-    ].join("\n");
-  }
-
-  return commonRules.join("\n");
 }
 
 function extractUsageMetrics(body: OpenAIChatCompletionResponse): LlmUsageMetrics | undefined {

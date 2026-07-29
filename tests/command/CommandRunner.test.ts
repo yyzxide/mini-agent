@@ -29,7 +29,10 @@ describe("CommandRunner", () => {
   it("captures stdout", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stdout.write('out')"] });
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "require('node:fs').writeSync(1, 'out')"],
+    });
 
     expect(result.stdout).toBe("out");
   });
@@ -37,7 +40,10 @@ describe("CommandRunner", () => {
   it("captures stderr", async () => {
     const runner = new CommandRunner({ repoPath });
 
-    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stderr.write('err')"] });
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "require('node:fs').writeSync(2, 'err')"],
+    });
 
     expect(result.stderr).toBe("err");
   });
@@ -48,7 +54,10 @@ describe("CommandRunner", () => {
 
     const result = await runner.run({
       executable: process.execPath,
-      args: ["-e", "process.stdout.write('live-out'); process.stderr.write('live-err')"],
+      args: [
+        "-e",
+        "const fs = require('node:fs'); fs.writeSync(1, 'live-out'); fs.writeSync(2, 'live-err')",
+      ],
     }, {
       onOutput: (event) => { chunks.push(event); },
     });
@@ -81,7 +90,10 @@ describe("CommandRunner", () => {
   it("truncates long output", async () => {
     const runner = new CommandRunner({ repoPath, maxOutputChars: 10 });
 
-    const result = await runner.run({ executable: process.execPath, args: ["-e", "process.stdout.write('x'.repeat(1000))"] });
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "require('node:fs').writeSync(1, 'x'.repeat(1000))"],
+    });
 
     expect(result.truncated).toBe(true);
     expect(result.stdout).toHaveLength(10);

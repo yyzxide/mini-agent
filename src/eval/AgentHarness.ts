@@ -22,8 +22,8 @@ import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type {
   LlmClient,
   LlmInput,
-  LlmTextCompletionInput,
-  LlmTextCompletionResult,
+  TaskFrameCompletionInput,
+  TaskFrameCompletionResult,
 } from "../llm/LlmClient.js";
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 import { ScriptedLlmClient } from "./ScriptedLlmClient.js";
@@ -261,17 +261,14 @@ function createScriptedScenarioTaskFrame(scenario: AgentHarnessScenario): TaskFr
       commandExecution: decisions.some((decision) => decision.type === "RUN_COMMAND"),
       verification,
       delegation: decisions.some((decision) =>
-        decision.type === "DELEGATE" || decision.type === "DELEGATE_READONLY",
+        decision.type === "DELEGATE",
       ),
       mcp: false,
     },
     webEvidencePolicy: {
-      searchViews: 1,
-      fetchedSources: 1,
-      independentDomains: 1,
-      citation: true,
-      freshness: "NONE",
-      authority: "NONE",
+      profile: "ORDINARY",
+      basis: "GENERAL_LOOKUP",
+      ranking: "REPRESENTATIVE",
     },
     constraints: {
       readOnly: planMode,
@@ -288,6 +285,7 @@ function createScriptedScenarioTaskFrame(scenario: AgentHarnessScenario): TaskFr
       requestedAgents: null,
     },
     conversationEvidence: {
+      purpose: "CONTEXT",
       requiresHistory: false,
       queries: [],
       includeRecentMessages: 8,
@@ -454,15 +452,17 @@ class InstrumentedLlmClient implements LlmClient {
     return await this.delegate.chat(input);
   }
 
-  async completeText(input: LlmTextCompletionInput): Promise<LlmTextCompletionResult> {
+  async compileTaskFrame(
+    input: TaskFrameCompletionInput,
+  ): Promise<TaskFrameCompletionResult> {
     this.calls += 1;
-    if (!this.delegate.completeText) {
+    if (!this.delegate.compileTaskFrame) {
       return {
         success: false,
-        error: "The injected LLM client does not support single-shot text completion",
+        error: "The injected LLM client does not support semantic TaskFrame compilation",
       };
     }
-    return await this.delegate.completeText(input);
+    return await this.delegate.compileTaskFrame(input);
   }
 
   drainCallMetrics(): LlmCallMetrics[] {

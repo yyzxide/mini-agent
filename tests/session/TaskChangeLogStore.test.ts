@@ -21,7 +21,7 @@ describe("TaskChangeLogStore", () => {
     await store.append({
       sessionId: "session-1",
       task: "first task",
-      mode: "DIRECT_ANSWER",
+      mode: "PLAN",
       success: true,
       summary: "answered",
       beforeChangedFiles: [],

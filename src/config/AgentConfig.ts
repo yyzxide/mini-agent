@@ -5,7 +5,6 @@ import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJ
 import { DEFAULT_MULTI_AGENT_POLICY, type MultiAgentPolicy } from "../agent/SubAgentTypes.js";
 
 export const USER_CONFIG_FILE = "mini-agent.config.json";
-export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
 
 export type LlmMode = "real";
 
@@ -81,9 +80,6 @@ const llmConfigSchema = z.object({
 
 const agentConfigSchema = z.object({
   version: z.literal(1).default(1),
-  // Read and discard the removed switch so existing config files migrate to
-  // the single TaskFrame control plane instead of failing at startup.
-  controlPlane: z.enum(["v2", "legacy"]).optional(),
   repoPath: z.string().optional(),
   createdAt: z.string().optional(),
   llm: llmConfigSchema.optional(),

@@ -31,6 +31,50 @@ describe("mini-agent real-api style regressions", () => {
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     const responses = [
+      JSON.stringify({
+        version: 1,
+        objective: "Create a TypeScript implementation for longest valid parentheses.",
+        target: "REPOSITORY",
+        answer: { shape: "FREEFORM", depth: "BALANCED" },
+        effects: {
+          answer: true,
+          repositoryRead: false,
+          repositoryWrite: "REQUIRED",
+          webEvidence: false,
+          knowledgeEvidence: false,
+          commandExecution: true,
+          verification: "STATIC",
+          delegation: false,
+          mcp: false,
+        },
+        constraints: {
+          readOnly: false,
+          noWeb: false,
+          noCommands: false,
+          noDelegation: false,
+          noMcp: false,
+          requireCompleteFileRead: false,
+        },
+        collaboration: {
+          requirement: "NONE",
+          changeProposal: false,
+          review: false,
+          requestedAgents: null,
+        },
+        conversationEvidence: {
+          purpose: "CONTEXT",
+          requiresHistory: false,
+          queries: [],
+          includeRecentMessages: 8,
+        },
+        completionCriteria: [
+          "The TypeScript implementation exists.",
+          "Static verification passes after the patch.",
+        ],
+        confidence: 0.98,
+        ambiguities: [],
+        rationale: "The user explicitly requested a new implementation.",
+      }),
       "{\"type\":\"PLAN\",\"message\":\"将创建 src/generated_feature.ts，实现最长有效括号算法。\"}",
       JSON.stringify({
         type: "APPLY_PATCH",

@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  looksLikeCompleteFileReadRequest,
-  mergeFileReadCoverage,
-} from "../../src/agent/FileReadCoverage.js";
+import { mergeFileReadCoverage } from "../../src/agent/FileReadCoverage.js";
 import { AgentState } from "../../src/agent/AgentState.js";
 
 describe("file read coverage", () => {
@@ -68,14 +65,6 @@ describe("file read coverage", () => {
       result: { success: true },
     });
     expect(state.getFileReadCoverage()).toEqual([]);
-  });
-
-  it.each([
-    "完整读取 src/large.ts 后分析",
-    "把这个文件从头到尾检查一遍",
-    "Read the entire file and summarize it",
-  ])("recognizes explicit complete-file request %s", (goal) => {
-    expect(looksLikeCompleteFileReadRequest(goal)).toBe(true);
   });
 });
 

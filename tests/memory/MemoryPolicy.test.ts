@@ -42,20 +42,45 @@ describe("MemoryPolicy", () => {
   });
 
   it("separates stable repository memory from explicit historical recall", () => {
-    expect(planMemoryRead({ query: "实现新的 parser", mode: "AGENT_LOOP" })).toMatchObject({
+    expect(planMemoryRead({
+      query: "实现新的 parser",
+      repositoryWork: true,
+      historicalRecall: false,
+      webEvidence: false,
+    })).toMatchObject({
       retrieve: true,
       allowedKinds: ["USER_PREFERENCE", "PROJECT_CONVENTION", "ARCHITECTURE_DECISION"],
       allowedScopes: ["REPOSITORY", "USER"],
     });
-    expect(planMemoryRead({ query: "之前 parser 的错误怎么修的", mode: "DIRECT_ANSWER" })).toMatchObject({
+    expect(planMemoryRead({
+      query: "继续处理 parser",
+      resolvedQuery: "parser 的历史错误与修复",
+      repositoryWork: false,
+      historicalRecall: true,
+      webEvidence: false,
+    })).toMatchObject({
       retrieve: true,
+      query: "parser 的历史错误与修复",
       allowedKinds: expect.arrayContaining(["VERIFIED_OUTCOME", "ERROR_SOLUTION"]),
     });
   });
 
-  it("blocks ordinary direct answers, web paths, and knowledge-base requests", () => {
-    expect(planMemoryRead({ query: "解释一下 TypeScript", mode: "DIRECT_ANSWER" }).retrieve).toBe(false);
-    expect(planMemoryRead({ query: "某个网页问题", mode: "WEB_ANSWER" }).retrieve).toBe(false);
-    expect(planMemoryRead({ query: "知识库里的退款规则", mode: "AGENT_LOOP", indexedKnowledgeRequest: true }).retrieve).toBe(false);
+  it("uses structured task facts to block ordinary, Web, and knowledge requests", () => {
+    const ordinary = {
+      repositoryWork: false,
+      historicalRecall: false,
+      webEvidence: false,
+    };
+    expect(planMemoryRead({ query: "解释一下 TypeScript", ...ordinary }).retrieve).toBe(false);
+    expect(planMemoryRead({
+      query: "某个网页问题",
+      ...ordinary,
+      webEvidence: true,
+    }).retrieve).toBe(false);
+    expect(planMemoryRead({
+      query: "知识库里的退款规则",
+      ...ordinary,
+      indexedKnowledgeRequest: true,
+    }).retrieve).toBe(false);
   });
 });

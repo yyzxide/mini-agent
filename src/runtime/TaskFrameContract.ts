@@ -1,6 +1,9 @@
 import type { AgentOperatingMode } from "../agent/AgentOperatingMode.js";
 import type { AgentTaskContract } from "../agent/AgentTaskContract.js";
-import type { TaskFrame } from "./TaskFrame.js";
+import {
+  resolveWebEvidencePolicy,
+  type TaskFrame,
+} from "./TaskFrame.js";
 
 export function createTaskFrameBootstrapContract(input: {
   operatingMode?: AgentOperatingMode;
@@ -49,6 +52,7 @@ export function compileTaskFrameContract(input: {
 }): AgentTaskContract {
   const { frame } = input;
   const planMode = input.operatingMode === "PLAN";
+  const webPolicy = resolveWebEvidencePolicy(frame.webEvidencePolicy);
   return {
     ...createTaskFrameBootstrapContract({ operatingMode: input.operatingMode }),
     taskFrame: frame,
@@ -66,23 +70,23 @@ export function compileTaskFrameContract(input: {
       completeFileRead: frame.constraints.requireCompleteFileRead,
       webSearch: frame.effects.webEvidence && !frame.constraints.noWeb,
       webSearchViewCount: frame.effects.webEvidence && !frame.constraints.noWeb
-        ? frame.webEvidencePolicy.searchViews
+        ? webPolicy.searchViews
         : 0,
       fetchedWebSourceCount: frame.effects.webEvidence && !frame.constraints.noWeb
-        ? frame.webEvidencePolicy.fetchedSources
+        ? webPolicy.fetchedSources
         : 0,
       independentWebDomainCount: frame.effects.webEvidence && !frame.constraints.noWeb
-        ? frame.webEvidencePolicy.independentDomains
+        ? webPolicy.independentDomains
         : 0,
       webCitation: frame.effects.webEvidence
         && !frame.constraints.noWeb
-        && frame.webEvidencePolicy.citation,
+        && webPolicy.citation,
       webFreshnessRequired: frame.effects.webEvidence
         && !frame.constraints.noWeb
-        && frame.webEvidencePolicy.freshness === "CURRENT",
+        && webPolicy.freshness === "CURRENT",
       webAuthorityRequired: frame.effects.webEvidence
         && !frame.constraints.noWeb
-        && frame.webEvidencePolicy.authority === "REQUIRED",
+        && webPolicy.authority === "REQUIRED",
       knowledgeSearch: frame.effects.knowledgeEvidence,
     },
     maxSteps: planMode ? 14 : 20,
@@ -102,6 +106,6 @@ export function compileTaskFrameContract(input: {
         ? ["The TaskFrame requests delegation; use DELEGATE when it materially advances the task."]
         : []),
     ],
-    routeReason: `Semantic TaskFrame (${frame.confidence.toFixed(2)}): ${frame.rationale}`,
+    controlReason: `Semantic TaskFrame (${frame.confidence.toFixed(2)}): ${frame.rationale}`,
   };
 }

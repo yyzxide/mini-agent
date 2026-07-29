@@ -9,14 +9,16 @@ import {
 import { toJsonValue } from "../utils/json.js";
 import type { JsonValue } from "./SessionTypes.js";
 
-export type TaskChangeMode = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW" | "AGENT_LOOP" | "PLAN";
+export type TaskChangeMode = "AGENT_LOOP" | "PLAN";
+export type LegacyTaskChangeMode = "DIRECT_ANSWER" | "WEB_ANSWER" | "CODE_REVIEW";
+export type StoredTaskChangeMode = TaskChangeMode | LegacyTaskChangeMode;
 
 export interface TaskChangeLogEntry {
   id: string;
   timestamp: string;
   sessionId: string;
   task: string;
-  mode: TaskChangeMode;
+  mode: StoredTaskChangeMode;
   success: boolean;
   summary: string;
   currentChangedFiles: string[];

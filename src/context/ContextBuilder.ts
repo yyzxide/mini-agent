@@ -3,7 +3,7 @@ import { buildTaskCompletionContract, formatTaskCompletionContract } from "../ag
 import { isTestCommand } from "../command/CommandClassification.js";
 import { GitManager } from "../git/GitManager.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
-import { planMemoryRead, type MemoryConsumerMode } from "../memory/MemoryPolicy.js";
+import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { readSessionMemoryWithTrace } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
@@ -14,9 +14,6 @@ import {
   formatRecentEvidence,
 } from "./ContextEvidence.js";
 import type { ContextSectionCandidate, ContextTrace, WorkingSet } from "./ContextTypes.js";
-import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
-import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
-import { RepoScanner } from "./RepoScanner.js";
 import { formatRuntimeContext } from "./RuntimeContext.js";
 import { buildWorkingSet, formatWorkingSet } from "./WorkingSet.js";
 import { formatSubAgentResults } from "../agent/SubAgentTypes.js";
@@ -61,36 +58,35 @@ export class ContextBuilder {
     // ordinary chat does not pay for an unsolicited tree/status/diff scan.
     const hydrateRepositoryContext = state.taskContract.capabilities.repositoryRead
       && state.taskContract.evidence.repositoryRead;
-    // Repository material is acquired through safe tools rather than
-    // task-specific request regexes.
-    const needsTree = false;
-    const needsReadme = false;
-    const needsBuildFiles = false;
-    const needsFilePlacement = false;
-    const needsRepoState = false;
     const knowledgeRequest = state.taskContract.taskFrame?.effects.knowledgeEvidence === true
       || state.taskContract.evidence.knowledgeSearch;
+    const frame = state.taskContract.taskFrame;
     const memoryPlan = planMemoryRead({
       query: goal,
-      mode: memoryModeForTask(state),
-      needsLiveData: state.taskContract.taskFrame?.effects.webEvidence === true,
+      ...(frame?.conversationEvidence.queries.length
+        ? { resolvedQuery: frame.conversationEvidence.queries.join(" ") }
+        : frame?.objective ? { resolvedQuery: frame.objective } : {}),
+      repositoryWork: frame?.target === "REPOSITORY"
+        || frame?.target === "MIXED"
+        || frame?.effects.repositoryRead === true
+        || frame?.effects.repositoryWrite !== undefined
+          && frame.effects.repositoryWrite !== "NONE"
+        || state.taskContract.evidence.repositoryRead,
+      historicalRecall: frame?.target === "SESSION"
+        || frame?.conversationEvidence.requiresHistory === true,
+      webEvidence: frame?.effects.webEvidence === true,
       indexedKnowledgeRequest: knowledgeRequest,
     });
     const needsLongTermMemory = memoryPlan.retrieve;
     const needsSessionMemory = state.taskContract.taskFrame?.target === "SESSION"
       || state.taskContract.taskFrame?.conversationEvidence.requiresHistory === true;
 
-    const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
     const sessionStore = new SessionStore({ repoPath: this.repoPath });
     const memoryContextService = new MemoryContextService({ repoPath: this.repoPath });
     const skillStore = new SkillStore({ repoPath: this.repoPath });
 
     const [
-      repoStateDetails,
-      tree,
-      readme,
-      buildFiles,
       isGitRepository,
       status,
       diff,
@@ -98,19 +94,7 @@ export class ContextBuilder {
       longTermMemory,
       selectedSkills,
     ] = await Promise.all([
-      needsRepoState
-        ? new RepoStateAnalyzer({ repoPath: this.repoPath }).analyze().catch((error: unknown) => ({ error: errorToText(error) }))
-        : Promise.resolve(undefined),
-      needsTree
-        ? scanner.getTreeSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
-        : Promise.resolve(""),
-      needsReadme
-        ? scanner.readReadmeSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
-        : Promise.resolve(""),
-      needsBuildFiles
-        ? scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
-        : Promise.resolve(""),
-      hydrateRepositoryContext ? scanner.isGitRepository().catch(() => false) : Promise.resolve(false),
+      hydrateRepositoryContext ? git.isGitRepository().catch(() => false) : Promise.resolve(false),
       hydrateRepositoryContext
         ? git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`)
         : Promise.resolve(""),
@@ -151,18 +135,6 @@ export class ContextBuilder {
 
     const sessionMemory = sessionMemoryResult.memory;
 
-    const repoState = repoStateDetails === undefined
-      ? ""
-      : hasErrorRecord(repoStateDetails)
-        ? `error: ${repoStateDetails.error}`
-        : formatRepoState(repoStateDetails);
-    const filePlacement = !needsFilePlacement
-      ? ""
-      : repoStateDetails === undefined || hasErrorRecord(repoStateDetails)
-        ? "error: repository state unavailable for file-placement advice"
-        : await new FilePlacementAdvisor({ repoPath: this.repoPath }).advise(goal, repoStateDetails)
-          .then(formatFilePlacementAdvice)
-          .catch((error: unknown) => `error: ${errorToText(error)}`);
     const diagnostics = formatDiagnostics(state);
     const recentEvidence = formatRecentEvidence(state, phase);
     const activeFileChunk = formatLatestFileChunk(state);
@@ -176,17 +148,12 @@ export class ContextBuilder {
     const candidates = buildCandidates({
       state,
       workingSet,
-      repoState,
-      tree,
-      readme,
-      buildFiles,
       isGitRepository,
       status,
       diff,
       sessionMemory,
       longTermMemory,
       selectedSkills,
-      filePlacement,
       diagnostics,
       recentEvidence,
       activeFileChunk,
@@ -194,10 +161,6 @@ export class ContextBuilder {
       completionContract,
       agentTaskContract: formatAgentTaskContract(state.taskContract),
       webResearchProgress,
-      needsTree,
-      needsReadme,
-      needsBuildFiles,
-      needsFilePlacement,
       needsLongTermMemory,
     });
     const plan = this.planner.plan(phase, candidates);
@@ -225,27 +188,15 @@ export class ContextBuilder {
   }
 }
 
-function memoryModeForTask(state: AgentState): MemoryConsumerMode {
-  if (state.taskContract.taskFrame?.effects.webEvidence === true) return "WEB_ANSWER";
-  if (state.taskContract.outputKind === "CODE_REVIEW") return "CODE_REVIEW";
-  if (state.taskContract.outputKind === "REPOSITORY_ANALYSIS") return "REPOSITORY_ANALYSIS";
-  return "AGENT_LOOP";
-}
-
 function buildCandidates(input: {
   state: AgentState;
   workingSet: WorkingSet;
-  repoState: string;
-  tree: string;
-  readme: string;
-  buildFiles: string;
   isGitRepository: boolean | string;
   status: string;
   diff: string;
   sessionMemory: string;
   longTermMemory: string;
   selectedSkills: string;
-  filePlacement: string;
   diagnostics: string;
   recentEvidence: string;
   activeFileChunk: string;
@@ -253,10 +204,6 @@ function buildCandidates(input: {
   completionContract: string;
   agentTaskContract: string;
   webResearchProgress: string;
-  needsTree: boolean;
-  needsReadme: boolean;
-  needsBuildFiles: boolean;
-  needsFilePlacement: boolean;
   needsLongTermMemory: boolean;
 }): ContextSectionCandidate[] {
   const phase = input.workingSet.phase;
@@ -425,55 +372,6 @@ function buildCandidates(input: {
       reason: "Historical memory is retrieved only for explicit history or continuation requests.",
     },
     {
-      id: "repository_state",
-      title: "Repository state summary",
-      content: input.repoState,
-      priority: 78,
-      enabled: phase === "DISCOVERY" && input.repoState.length > 0,
-      stable: true,
-      maxTokens: 900,
-      reason: "Repository metadata helps initial discovery but is dropped after concrete evidence is available.",
-    },
-    {
-      id: "tree",
-      title: "Tree summary",
-      content: input.tree,
-      priority: 76,
-      enabled: input.needsTree,
-      stable: true,
-      maxTokens: 1_100,
-      reason: "The tree is useful only during discovery when target files are not yet known or the user asks for a repository overview.",
-    },
-    {
-      id: "readme",
-      title: "README evidence",
-      content: input.readme,
-      priority: 74,
-      enabled: input.needsReadme,
-      stable: true,
-      maxTokens: 900,
-      reason: "README content is included only when the task explicitly concerns project usage, setup, overview, or README itself.",
-    },
-    {
-      id: "build_files",
-      title: "Build-file evidence",
-      content: input.buildFiles,
-      priority: 73,
-      enabled: input.needsBuildFiles,
-      stable: true,
-      maxTokens: 900,
-      reason: "Build files are included only for setup, dependency, build, run, or test tasks.",
-    },
-    {
-      id: "file_placement",
-      title: "New file placement guidance",
-      content: input.filePlacement,
-      priority: 72,
-      enabled: input.needsFilePlacement,
-      maxTokens: 650,
-      reason: "Placement advice is only useful before creating a new artifact.",
-    },
-    {
       id: "git_state",
       title: "Git state",
       content: `Git repository: ${String(input.isGitRepository)}\nGit status:\n${input.status || "(clean)"}`,
@@ -539,9 +437,4 @@ function summarizeTestFailures(state: AgentState): string {
 
 function errorToText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function hasErrorRecord(value: unknown): value is { error: string } {
-  return typeof value === "object" && value !== null
-    && "error" in value && typeof (value as { error?: unknown }).error === "string";
 }

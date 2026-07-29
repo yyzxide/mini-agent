@@ -30,12 +30,6 @@ export interface ReadFileResultData {
   sourceVersion?: string;
 }
 
-const COMPLETE_FILE_READ_PATTERN = /(?:完整|全部|全文|整个文件|全文件|从头到尾|逐行|读完|全部内容).{0,20}(?:读|读取|查看|检查|审查|分析)|(?:读|读取|查看|检查|审查|分析).{0,20}(?:完整|全部|全文|整个文件|全文件|从头到尾|逐行|读完|全部内容)|\b(?:read|inspect|review|analy[sz]e)\b.{0,24}\b(?:entire|whole|complete|full)\s+file\b|\b(?:entire|whole|complete|full)\s+file\b.{0,24}\b(?:read|inspect|review|analy[sz]e)\b/i;
-
-export function looksLikeCompleteFileReadRequest(userGoal: string): boolean {
-  return COMPLETE_FILE_READ_PATTERN.test(userGoal);
-}
-
 export function parseReadFileResultData(value: unknown): ReadFileResultData | undefined {
   if (!isRecord(value)) return undefined;
   const { path, startLine, endLine, totalLines, content } = value;

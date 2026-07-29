@@ -1,5 +1,4 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
-import type { ArtifactFollowUpIntent } from "../agent/ArtifactFollowUp.js";
 import type { ContextTrace } from "../context/ContextTypes.js";
 import type { ConversationSelectionStrategy } from "../session/ConversationHistory.js";
 import type { JsonObject } from "../session/SessionTypes.js";
@@ -40,17 +39,10 @@ export interface RuntimeConversationTrace {
 
 export type AgentRuntimeEvent = RuntimeEventMetadata & (
   | { type: "session"; sessionId: string }
-  | {
-    type: "follow_up";
-    intent: ArtifactFollowUpIntent;
-    source: "FILE_CHANGE";
-    files: string[];
-    llmSkipped: boolean;
-  }
   | { type: "conversation"; trace: RuntimeConversationTrace }
   | {
     type: "understanding";
-    source: "DETERMINISTIC" | "MODEL_REFINED" | "MODEL_FALLBACK" | "MODEL_TASK_FRAME";
+    source: "MODEL_TASK_FRAME" | "MODEL_UNRESOLVED";
     operation: string;
     target: string;
     mutationRequirement: "NONE" | "CONDITIONAL" | "REQUIRED";

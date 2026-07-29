@@ -6,6 +6,10 @@ import {
 import type { ConversationMessage } from "../../src/session/ConversationHistory.js";
 
 describe("PriorResponseTruthGuard", () => {
+  const audit = {
+    auditRequested: true,
+    semanticQueries: ["星核变身"],
+  };
   const conversation: ConversationMessage[] = [
     { role: "user", content: "第三章有什么能力？" },
     { role: "assistant", content: "击败守门者以后会获得星核变身。" },
@@ -18,6 +22,7 @@ describe("PriorResponseTruthGuard", () => {
       "这个作品哪来的星核变身？以及你说的各种变身",
       "我之前没有说过会获得星核变身，我只是说可以击败守门者。",
       conversation,
+      audit,
     );
 
     expect(violation).toMatchObject({
@@ -32,6 +37,7 @@ describe("PriorResponseTruthGuard", () => {
       "这个作品哪来的星核变身？以及你说的各种变身",
       "所以之前我说“击败守门者获得星核变身”，指的是打这个角色，不是让玩家获得变身能力。",
       conversation,
+      audit,
     )).toMatchObject({
       code: "PRIOR_RESPONSE_DENIAL",
     });
@@ -42,6 +48,19 @@ describe("PriorResponseTruthGuard", () => {
       "你刚才说星核变身，这个说法是不是错了？",
       "我确实说过“会获得星核变身”，但这条说法没有证据，我撤回它。",
       conversation,
+      audit,
+    )).toBeUndefined();
+  });
+
+  it("does not infer audit intent from wording when TaskFrame did not request it", () => {
+    expect(inspectPriorResponseConsistency(
+      "这个作品哪来的星核变身？",
+      "我之前没有说过会获得星核变身。",
+      conversation,
+      {
+        auditRequested: false,
+        semanticQueries: ["星核变身"],
+      },
     )).toBeUndefined();
   });
 
@@ -50,7 +69,11 @@ describe("PriorResponseTruthGuard", () => {
       "你是不是说过会自动删除存档？",
       "我没有说过会自动删除存档。",
       conversation,
-      { historyTruncated: false },
+      {
+        ...audit,
+        semanticQueries: ["自动删除存档"],
+        historyTruncated: false,
+      },
     )).toBeUndefined();
   });
 
@@ -59,7 +82,11 @@ describe("PriorResponseTruthGuard", () => {
       "你是不是说过会自动删除存档？",
       "我没有说过会自动删除存档。",
       conversation,
-      { historyTruncated: true },
+      {
+        ...audit,
+        semanticQueries: ["自动删除存档"],
+        historyTruncated: true,
+      },
     )).toMatchObject({
       code: "INSUFFICIENT_HISTORY_FOR_DENIAL",
     });
@@ -70,6 +97,7 @@ describe("PriorResponseTruthGuard", () => {
       "你之前说星核变身，这个说法哪来的？",
       "我之前并未说过星核变身。",
       conversation,
+      audit,
     );
     expect(violation).toBeDefined();
 

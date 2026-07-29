@@ -46,10 +46,3 @@ export class MemoryContextService {
     ].join("\n"), input.maxChars ?? 5_000).text;
   }
 }
-
-export function appendLongTermMemoryContext(currentContext: string, memoryContext: string): string {
-  if (!memoryContext || memoryContext === "(none)") {
-    return currentContext;
-  }
-  return [currentContext, "", "Long-term memory:", memoryContext].join("\n");
-}

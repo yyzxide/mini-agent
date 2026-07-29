@@ -36,21 +36,28 @@ export const TaskFrameSchema = z.object({
     verification: z.enum(["NONE", "SYNTAX", "STATIC", "TEST"]).default("NONE"),
     delegation: z.boolean().default(false),
     mcp: z.boolean().default(false),
-  }).passthrough(),
+  }),
   webEvidencePolicy: z.object({
-    searchViews: z.number().int().min(1).max(4).default(1),
-    fetchedSources: z.number().int().min(1).max(4).default(1),
-    independentDomains: z.number().int().min(1).max(4).default(1),
-    citation: z.boolean().default(true),
-    freshness: z.enum(["NONE", "CURRENT"]).default("NONE"),
-    authority: z.enum(["NONE", "REQUIRED"]).default("NONE"),
+    profile: z.enum([
+      "ORDINARY",
+      "CORROBORATED",
+      "CURRENT",
+      "HIGH_STAKES",
+    ]).default("ORDINARY"),
+    basis: z.enum([
+      "GENERAL_LOOKUP",
+      "USER_REQUESTED_CORROBORATION",
+      "VOLATILE_CURRENT_CLAIM",
+      "HIGH_STAKES_DOMAIN",
+    ]).default("GENERAL_LOOKUP"),
+    ranking: z.enum([
+      "REPRESENTATIVE",
+      "SUPERLATIVE",
+    ]).default("REPRESENTATIVE"),
   }).default({
-    searchViews: 1,
-    fetchedSources: 1,
-    independentDomains: 1,
-    citation: true,
-    freshness: "NONE",
-    authority: "NONE",
+    profile: "ORDINARY",
+    basis: "GENERAL_LOOKUP",
+    ranking: "REPRESENTATIVE",
   }),
   constraints: z.object({
     readOnly: z.boolean().default(false),
@@ -59,12 +66,15 @@ export const TaskFrameSchema = z.object({
     noDelegation: z.boolean().default(false),
     noMcp: z.boolean().default(false),
     requireCompleteFileRead: z.boolean().default(false),
-  }).passthrough(),
+  }),
   collaboration: z.object({
     requirement: z.enum(["NONE", "OPTIONAL", "REQUIRED"]).default("NONE"),
     changeProposal: z.boolean().default(false),
     review: z.boolean().default(false),
-    requestedAgents: z.number().int().min(1).max(3).nullable().default(null),
+    requestedAgents: z.number().int()
+      .transform((value) => clamp(value, 1, 3))
+      .nullable()
+      .default(null),
   }).default({
     requirement: "NONE",
     changeProposal: false,
@@ -72,10 +82,18 @@ export const TaskFrameSchema = z.object({
     requestedAgents: null,
   }),
   conversationEvidence: z.object({
+    purpose: z.enum([
+      "CONTEXT",
+      "REFERENT",
+      "PRIOR_RESPONSE_AUDIT",
+    ]).default("CONTEXT"),
     requiresHistory: z.boolean().default(false),
     queries: z.array(z.string().trim().min(1).max(160)).max(6).default([]),
-    includeRecentMessages: z.number().int().min(2).max(12).default(8),
+    includeRecentMessages: z.number().int()
+      .transform((value) => clamp(value, 2, 12))
+      .default(8),
   }).default({
+    purpose: "CONTEXT",
     requiresHistory: false,
     queries: [],
     includeRecentMessages: 8,
@@ -84,111 +102,77 @@ export const TaskFrameSchema = z.object({
   confidence: z.number().min(0).max(1),
   ambiguities: z.array(z.string().trim().min(1).max(240)).max(6).default([]),
   rationale: z.string().trim().min(1).max(800),
-}).passthrough();
+});
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
 
 export type TaskFrame = z.infer<typeof TaskFrameSchema>;
 
-export function createFallbackTaskFrame(userGoal: string, reason: string): TaskFrame {
-  return {
-    version: 1,
-    objective: userGoal.trim() || "Respond to the current user request.",
-    target: "MIXED",
-    answer: {
-      shape: "FREEFORM",
-      depth: "BALANCED",
-    },
-    effects: {
-      answer: true,
-      repositoryRead: false,
-      repositoryWrite: "NONE",
-      webEvidence: false,
-      knowledgeEvidence: false,
-      commandExecution: false,
-      verification: "NONE",
-      delegation: false,
-      mcp: false,
-    },
-    webEvidencePolicy: {
-      searchViews: 1,
-      fetchedSources: 1,
-      independentDomains: 1,
-      citation: true,
-      freshness: "NONE",
-      authority: "NONE",
-    },
-    constraints: {
-      readOnly: false,
-      noWeb: false,
-      noCommands: false,
-      noDelegation: false,
-      noMcp: false,
-      requireCompleteFileRead: false,
-    },
-    collaboration: {
-      requirement: "NONE",
-      changeProposal: false,
-      review: false,
-      requestedAgents: null,
-    },
-    conversationEvidence: {
-      requiresHistory: false,
-      queries: [],
-      includeRecentMessages: 8,
-    },
-    completionCriteria: [
-      "Satisfy the current user request using observed evidence and available actions.",
-    ],
-    confidence: 0,
-    ambiguities: ["The semantic TaskFrame could not be parsed; the action loop must interpret the raw request."],
-    rationale: reason.slice(0, 800),
-  };
+export interface ResolvedWebEvidencePolicy {
+  profile: TaskFrame["webEvidencePolicy"]["profile"];
+  searchViews: number;
+  fetchedSources: number;
+  independentDomains: number;
+  citation: boolean;
+  freshness: "NONE" | "CURRENT";
+  authority: "NONE" | "REQUIRED";
+  strict: boolean;
 }
 
-export function formatTaskFrame(frame: TaskFrame): string {
-  return [
-    `Objective: ${frame.objective}`,
-    `Target: ${frame.target}`,
-    `Answer form: ${frame.answer.shape} / ${frame.answer.depth}`,
-    `Expected effects: ${formatEnabledEffects(frame)}`,
-    `Repository mutation: ${frame.effects.repositoryWrite}`,
-    `Web evidence policy: ${frame.effects.webEvidence
-      ? `${String(frame.webEvidencePolicy.searchViews)} search view(s), ${String(frame.webEvidencePolicy.fetchedSources)} fetched source(s), freshness=${frame.webEvidencePolicy.freshness}, authority=${frame.webEvidencePolicy.authority}, citation=${String(frame.webEvidencePolicy.citation)}`
-      : "not requested"}`,
-    `Constraints: ${formatEnabledConstraints(frame)}`,
-    `Completion criteria: ${frame.completionCriteria.length > 0
-      ? frame.completionCriteria.join(" | ")
-      : "Satisfy the objective with observed evidence."}`,
-    `Conversation evidence: ${frame.conversationEvidence.requiresHistory
-      ? frame.conversationEvidence.queries.join(" | ") || "history required"
-      : "recent context only"}`,
-    `Semantic confidence: ${frame.confidence.toFixed(2)}`,
-    ...(frame.ambiguities.length > 0 ? [`Ambiguities: ${frame.ambiguities.join(" | ")}`] : []),
-  ].join("\n");
-}
-
-function formatEnabledEffects(frame: TaskFrame): string {
-  const effects = [
-    frame.effects.answer ? "answer" : undefined,
-    frame.effects.repositoryRead ? "repository-read" : undefined,
-    frame.effects.repositoryWrite !== "NONE" ? "repository-write" : undefined,
-    frame.effects.webEvidence ? "web-evidence" : undefined,
-    frame.effects.knowledgeEvidence ? "knowledge-evidence" : undefined,
-    frame.effects.commandExecution ? "command-execution" : undefined,
-    frame.effects.verification !== "NONE" ? `verification:${frame.effects.verification}` : undefined,
-    frame.effects.delegation ? "delegation" : undefined,
-    frame.effects.mcp ? "mcp" : undefined,
-  ].filter((value): value is string => value !== undefined);
-  return effects.join(", ") || "answer";
-}
-
-function formatEnabledConstraints(frame: TaskFrame): string {
-  const constraints = [
-    frame.constraints.readOnly ? "read-only" : undefined,
-    frame.constraints.noWeb ? "no-web" : undefined,
-    frame.constraints.noCommands ? "no-commands" : undefined,
-    frame.constraints.noDelegation ? "no-delegation" : undefined,
-    frame.constraints.noMcp ? "no-mcp" : undefined,
-    frame.constraints.requireCompleteFileRead ? "complete-file-read" : undefined,
-  ].filter((value): value is string => value !== undefined);
-  return constraints.join(", ") || "none";
+/**
+ * The model classifies semantic evidence risk; deterministic policy owns the
+ * concrete threshold. This prevents arbitrary model-supplied counts from
+ * becoming hard postconditions while preserving autonomous intent judgment.
+ */
+export function resolveWebEvidencePolicy(
+  policy: TaskFrame["webEvidencePolicy"],
+): ResolvedWebEvidencePolicy {
+  switch (policy.profile) {
+    case "CORROBORATED":
+      return {
+        profile: policy.profile,
+        searchViews: 2,
+        fetchedSources: 2,
+        independentDomains: 2,
+        citation: true,
+        freshness: "NONE",
+        authority: "NONE",
+        strict: true,
+      };
+    case "CURRENT":
+      return {
+        profile: policy.profile,
+        searchViews: 2,
+        fetchedSources: 1,
+        independentDomains: 1,
+        citation: true,
+        freshness: "CURRENT",
+        authority: "REQUIRED",
+        strict: true,
+      };
+    case "HIGH_STAKES":
+      return {
+        profile: policy.profile,
+        searchViews: 2,
+        fetchedSources: 2,
+        independentDomains: 2,
+        citation: true,
+        freshness: "CURRENT",
+        authority: "REQUIRED",
+        strict: true,
+      };
+    case "ORDINARY":
+      return {
+        profile: policy.profile,
+        searchViews: 1,
+        fetchedSources: 1,
+        independentDomains: 1,
+        citation: true,
+        freshness: "NONE",
+        authority: "NONE",
+        strict: false,
+      };
+  }
 }

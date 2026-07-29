@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  classifyProductMetaIntent,
   detectResponseCapabilityDenials,
-  looksLikeExplicitWebAction,
   renderProductCapabilityAnswer,
 } from "../../src/agent/ProductCapability.js";
 import {
@@ -11,39 +9,14 @@ import {
   listProductCapabilities,
 } from "../../src/agent/CapabilityRegistry.js";
 import { enforceCapabilityTruth } from "../../src/agent/CapabilityTruthGuard.js";
+import { createTestTaskFrame } from "../helpers/TaskFrameContract.js";
 
 describe("product capability architecture", () => {
-  it.each([
-    ["你是不是压根碰不到互联网？", "WEB_RESEARCH", "AVAILABILITY"],
-    ["所以这个助手以后也没法碰外网了吗？", "WEB_RESEARCH", "AVAILABILITY"],
-    ["Can you modify repository files?", "REPOSITORY_WRITE", "AVAILABILITY"],
-    ["所以你只能聊天，不能动代码？", "REPOSITORY_WRITE", "AVAILABILITY"],
-    ["刚才那个权限限制是永久的吗？", "ALL", "EXPLAIN_LIMITATION"],
-    ["你的能力边界是什么？", "ALL", "INVENTORY"],
-    ["你都能处理哪些类型的任务？", "ALL", "INVENTORY"],
-    ["我们有subagent能力吗？", "MULTI_AGENT_COLLABORATION", "AVAILABILITY"],
-  ])("classifies compositional paraphrase %s", (input, topic, act) => {
-    expect(classifyProductMetaIntent(input)).toMatchObject({
-      kind: "PRODUCT_META",
-      topic,
-      act,
-      confidence: expect.any(Number),
-    });
-  });
-
-  it.each([
-    "请联网查一下 Node 24 的 release notes",
-    "Please search the web for Node 24 release notes",
-    "网上搜一下今天的新闻",
-  ])("keeps explicit web action %s out of product-meta classification", (input) => {
-    expect(looksLikeExplicitWebAction(input)).toBe(true);
-    expect(classifyProductMetaIntent(input)).toBeUndefined();
-  });
-
-  it("renders answers from the registry rather than a sentence-specific template", () => {
-    const intent = classifyProductMetaIntent("你是否具备修改仓库文件的能力？");
-    expect(intent).toBeDefined();
-    const answer = renderProductCapabilityAnswer(intent!, { locale: "zh" });
+  it("renders a TaskFrame-selected capability from the registry", () => {
+    const answer = renderProductCapabilityAnswer({
+      topic: "REPOSITORY_WRITE",
+      act: "AVAILABILITY",
+    }, { locale: "zh" });
     const capability = getProductCapability("REPOSITORY_WRITE");
 
     expect(answer).toContain(capability.zh.name);
@@ -62,7 +35,14 @@ describe("product capability architecture", () => {
   it("corrects false subagent capability denials", () => {
     const bad = "目前我没有 subagent 的能力，也不能委托子代理。";
     expect(detectResponseCapabilityDenials(bad)).toContain("MULTI_AGENT_COLLABORATION");
-    const correction = enforceCapabilityTruth("我们有subagent能力吗？", bad);
+    const correction = enforceCapabilityTruth({
+      taskFrame: createTestTaskFrame({
+        objective: "Explain the product's collaboration capability.",
+        target: "PRODUCT",
+      }),
+      userGoal: "我们有subagent能力吗？",
+      answer: bad,
+    });
     expect(correction.corrected).toBe(true);
     expect(correction.text).toContain("多 Agent 协作");
   });
@@ -71,10 +51,31 @@ describe("product capability architecture", () => {
     const bad = "我不能联网，也无法访问网页。";
     expect(detectResponseCapabilityDenials(bad)).toContain("WEB_RESEARCH");
 
-    const correction = enforceCapabilityTruth("所以这个助手以后也没法碰外网了吗？", bad);
+    const correction = enforceCapabilityTruth({
+      taskFrame: createTestTaskFrame({
+        objective: "Explain the product's Web capability.",
+        target: "PRODUCT",
+      }),
+      userGoal: "所以这个助手以后也没法碰外网了吗？",
+      answer: bad,
+    });
     expect(correction.corrected).toBe(true);
     expect(correction.text).toContain("支持受控联网研究");
     expect(correction.text).toContain("web_search");
+  });
+
+  it("does not rescan raw wording when TaskFrame says the request is not about the product", () => {
+    const correction = enforceCapabilityTruth({
+      taskFrame: createTestTaskFrame({
+        objective: "Summarize a quoted sentence.",
+        target: "DERIVATION",
+      }),
+      userGoal: "引用内容是：我不能联网，也无法访问网页。",
+      answer: "我不能联网，也无法访问网页。",
+    });
+
+    expect(correction.corrected).toBe(false);
+    expect(correction.conflicts).toContain("WEB_RESEARCH");
   });
 
   it("does not treat an explicit correction as another denial", () => {

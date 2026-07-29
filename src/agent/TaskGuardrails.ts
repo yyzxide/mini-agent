@@ -12,7 +12,7 @@ import {
 import { assessAuthoritativeFreshnessEvidence } from "./WebResearchEvidence.js";
 import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
 import { validateAnswerQuality } from "./AnswerQualityPolicy.js";
-import { resolveContractSubAgentIntent } from "./SubAgentIntent.js";
+import { resolveTaskCollaborationPolicy } from "./TaskCollaborationPolicy.js";
 
 export interface AgentDecisionGuardrailViolation {
   code: string;
@@ -57,6 +57,7 @@ function validateFinalDecision(
   if (!decision.success) {
     return undefined;
   }
+  const evidenceInsufficient = decision.evidenceStatus === "INSUFFICIENT";
   const contract = buildTaskCompletionContract(state);
   const completionEvidence = state.getCompletionEvidence();
   const currentVerificationEvidence = completionEvidence.repositoryChanged
@@ -68,7 +69,7 @@ function validateFinalDecision(
   ));
   const latestSufficientVerification = sufficientVerification.at(-1);
   const verificationSatisfied = latestSufficientVerification?.success === true;
-  const collaborationIntent = resolveContractSubAgentIntent(
+  const collaborationIntent = resolveTaskCollaborationPolicy(
     state.taskContract,
   );
   const delegatedResults = state.delegationBatches.flatMap((batch) => batch.results);
@@ -104,18 +105,29 @@ function validateFinalDecision(
     };
   }
 
-  const taskContractViolation = validateTaskContractEvidence(state, decision.summary);
+  const taskContractViolation = validateTaskContractEvidence(
+    state,
+    decision.summary,
+    evidenceInsufficient,
+  );
   if (taskContractViolation) {
     return taskContractViolation;
   }
-  if (state.taskContract.taskFrame?.effects.answer !== false) {
+  if (
+    state.taskContract.taskFrame?.effects.answer !== false
+    && !evidenceInsufficient
+  ) {
     const answerQualityViolation = validateAnswerQuality(
       decision.summary,
       state.taskContract.taskFrame,
     );
     if (answerQualityViolation) return answerQualityViolation;
   }
-  if (isKnowledgeTask(state) && !hasSuccessfulKnowledgeSearch(state)) {
+  if (
+    isKnowledgeTask(state)
+    && !hasSuccessfulKnowledgeSearch(state)
+    && !(hasAttemptedToolCall(state, "knowledge_search") && evidenceInsufficient)
+  ) {
     return {
       code: "FINAL_WITHOUT_KNOWLEDGE_SEARCH",
       message: [
@@ -130,7 +142,7 @@ function validateFinalDecision(
   if (
     isKnowledgeTask(state)
     && knowledgeOutcome?.found === false
-    && !reportsInsufficientKnowledgeEvidence(decision.summary)
+    && !evidenceInsufficient
   ) {
     return {
       code: "FINAL_IGNORES_INSUFFICIENT_KNOWLEDGE",
@@ -231,6 +243,7 @@ function validateFinalDecision(
 function validateTaskContractEvidence(
   state: AgentState,
   summary: string,
+  evidenceInsufficient: boolean,
 ): AgentDecisionGuardrailViolation | undefined {
   const requirements = state.taskContract.evidence;
 
@@ -277,24 +290,29 @@ function validateTaskContractEvidence(
     }
   }
 
-  if (requirements.webSearch && !hasSuccessfulToolCall(state, "web_search")) {
-    if (hasAttemptedToolCall(state, "web_search") && reportsInsufficientWebEvidence(summary)) {
-      return undefined;
-    }
+  if (
+    requirements.webSearch
+    && !hasSuccessfulToolCall(state, "web_search")
+    && !(hasAttemptedToolCall(state, "web_search") && evidenceInsufficient)
+  ) {
     return {
       code: "FINAL_WITHOUT_WEB_SEARCH",
       message: "Postcondition failed: this web research task must perform a successful web_search before answering.",
     };
   }
 
-  if (requirements.knowledgeSearch && !hasSuccessfulToolCall(state, "knowledge_search")) {
+  if (
+    requirements.knowledgeSearch
+    && !hasSuccessfulToolCall(state, "knowledge_search")
+    && !(hasAttemptedToolCall(state, "knowledge_search") && evidenceInsufficient)
+  ) {
     return {
       code: "FINAL_WITHOUT_KNOWLEDGE_SEARCH",
       message: "Postcondition failed: this knowledge task must perform a successful knowledge_search before answering.",
     };
   }
 
-  if (requirements.webFreshnessRequired && !reportsInsufficientWebEvidence(summary)) {
+  if (requirements.webFreshnessRequired && !evidenceInsufficient) {
     const searchQueries = successfulSearchQueries(state);
     if (searchQueries.length < requirements.webSearchViewCount) {
       return {
@@ -358,7 +376,7 @@ function validateTaskContractEvidence(
     const domains = new Set(fetchedUrls.map(readDomain).filter((value): value is string => value !== undefined));
     const enoughFetches = fetchedUrls.length >= requirements.fetchedWebSourceCount;
     const enoughDomains = domains.size >= requirements.independentWebDomainCount;
-    if ((!enoughFetches || !enoughDomains) && !reportsInsufficientWebEvidence(summary)) {
+    if ((!enoughFetches || !enoughDomains) && !evidenceInsufficient) {
       return {
         code: "FINAL_WITH_INSUFFICIENT_WEB_EVIDENCE",
         message: [
@@ -370,13 +388,13 @@ function validateTaskContractEvidence(
     }
   }
 
-  if (requirements.webCitation) {
+  if (requirements.webCitation && !evidenceInsufficient) {
     const gatheredUrls = requirements.fetchedWebSourceCount > 0
       ? successfulFetchedUrls(state)
       : successfulWebUrls(state);
     if (gatheredUrls.length > 0
       && !gatheredUrls.some((url) => summary.includes(url))
-      && !reportsInsufficientWebEvidence(summary)) {
+    ) {
       return {
         code: "FINAL_WITHOUT_WEB_CITATION",
         message: "Postcondition failed: cite at least one exact URL whose page was successfully fetched and inspected, or explicitly report insufficient evidence.",
@@ -517,7 +535,10 @@ function validateToolCallDecision(
         ].join(" "),
       };
     }
-    return query ? validateWebSearchQueryScope(state.userGoal, query) : undefined;
+    const ranking = state.taskContract.taskFrame?.webEvidencePolicy.ranking;
+    return query && ranking
+      ? validateWebSearchQueryScope(ranking, query)
+      : undefined;
   }
   if (decision.toolName !== "fetch_url") return undefined;
 
@@ -581,11 +602,6 @@ function readDomain(value: string): string | undefined {
   }
 }
 
-function reportsInsufficientWebEvidence(summary: string): boolean {
-  return /(?:证据|来源|资料).{0,8}(?:不足|不充分|无法核验|无法确认)|(?:不足以|无法).{0,12}(?:核验|确认|回答)/i.test(summary)
-    || /\b(?:insufficient|not enough|unable to verify|cannot verify|could not verify)\b/i.test(summary);
-}
-
 function hasSuccessfulKnowledgeSearch(state: AgentState): boolean {
   return readLatestKnowledgeSearchOutcome(state) !== undefined;
 }
@@ -617,11 +633,6 @@ function readLatestKnowledgeSearchOutcome(state: AgentState): KnowledgeSearchOut
     };
   }
   return state.recoveredCheckpoint?.effects.knowledgeSearch;
-}
-
-function reportsInsufficientKnowledgeEvidence(summary: string): boolean {
-  return /(?:未能?找到|没有找到|无(?:相关|可用|足够).{0,8}(?:证据|文档|内容|结果)|证据不足|知识库(?:中|里)?(?:没有|未找到|无)|无法(?:从|根据).{0,12}(?:知识库|索引文档).{0,12}(?:回答|确认)|无法回答)/i.test(summary)
-    || /\b(?:(?:no|not enough|insufficient)\s+(?:relevant\s+)?(?:evidence|documents?|results?|context)|(?:could not|couldn't|cannot|can't)\s+(?:find|answer|verify)|not found)\b/i.test(summary);
 }
 
 function isKnowledgeTask(state: AgentState): boolean {

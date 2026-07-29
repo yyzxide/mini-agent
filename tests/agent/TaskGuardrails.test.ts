@@ -178,7 +178,7 @@ describe("TaskGuardrails", () => {
   });
 
   it("blocks a web query that silently strengthens a representative request into a ranking", () => {
-    const state = webStateFor("Kanye West 有哪些知名的歌曲？");
+    const state = webStateFor("Search for relevant songs.");
 
     expect(validateAgentDecisionGuardrails(state, {
       type: "TOOL_CALL",
@@ -191,6 +191,27 @@ describe("TaskGuardrails", () => {
       type: "TOOL_CALL",
       toolName: "web_search",
       input: { query: "Kanye West 知名歌曲" },
+    })).toBeUndefined();
+
+    const rankedState = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal: "Search for representative songs.",
+      taskContract: createTestTaskContract({
+        objective: "Find the most famous Kanye West songs.",
+        target: "WORLD",
+        effects: { webEvidence: true },
+        webEvidencePolicy: {
+          profile: "ORDINARY",
+          basis: "GENERAL_LOOKUP",
+          ranking: "SUPERLATIVE",
+        },
+      }),
+    });
+    expect(validateAgentDecisionGuardrails(rankedState, {
+      type: "TOOL_CALL",
+      toolName: "web_search",
+      input: { query: "Kanye West most famous songs" },
     })).toBeUndefined();
   });
 
@@ -291,8 +312,16 @@ describe("TaskGuardrails", () => {
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
+      evidenceStatus: "INSUFFICIENT",
       summary: "本轮 web_search 连接失败，当前来源不足，无法核验这项事实。",
     })).toBeUndefined();
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "本轮 web_search 连接失败，当前来源不足，无法核验这项事实。",
+    })).toMatchObject({
+      code: "FINAL_WITHOUT_WEB_SEARCH",
+    });
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
@@ -614,9 +643,8 @@ function webStateFor(userGoal: string): AgentState {
       effects: { webEvidence: true },
       webEvidencePolicy: /最新/.test(userGoal)
         ? {
-          searchViews: 2,
-          freshness: "CURRENT",
-          authority: "REQUIRED",
+          profile: "CURRENT",
+          basis: "VOLATILE_CURRENT_CLAIM",
         }
         : undefined,
     }),

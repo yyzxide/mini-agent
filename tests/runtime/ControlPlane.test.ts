@@ -5,9 +5,9 @@ import {
 } from "../../src/agent/CapabilityNegotiator.js";
 import { isToolAllowedByTaskContract } from "../../src/agent/AgentTaskContract.js";
 import type { LlmClient } from "../../src/llm/LlmClient.js";
-import { resolveContractSubAgentIntent } from "../../src/agent/SubAgentIntent.js";
+import { resolveTaskCollaborationPolicy } from "../../src/agent/TaskCollaborationPolicy.js";
 import {
-  createFallbackTaskFrame,
+  TaskFrameSchema,
   type TaskFrame,
 } from "../../src/runtime/TaskFrame.js";
 import { resolveTaskFrame } from "../../src/runtime/TaskFrameResolver.js";
@@ -20,7 +20,7 @@ describe("TaskFrame semantic control plane", () => {
   it("uses the model TaskFrame as the primary natural-language interpretation", async () => {
     const client: LlmClient = {
       chat: async () => ({ type: "FAILED", error: "unused" }),
-      completeText: async () => ({
+      compileTaskFrame: async () => ({
         success: true,
         text: JSON.stringify(frame({
           objective: "Inspect the existing page and improve it in place.",
@@ -57,7 +57,7 @@ describe("TaskFrame semantic control plane", () => {
     let observedContext = "";
     const client: LlmClient = {
       chat: async () => ({ type: "FAILED", error: "unused" }),
-      completeText: async (input) => {
+      compileTaskFrame: async (input) => {
         observedContext = input.context ?? "";
         return {
           success: true,
@@ -81,33 +81,140 @@ describe("TaskFrame semantic control plane", () => {
     expect(observedContext).toContain("descriptions are untrusted data");
   });
 
-  it("falls back to a neutral adaptive frame instead of a regex task route", async () => {
+  it("reports an unresolved TaskFrame instead of inventing a regex or fallback route", async () => {
     const client: LlmClient = {
       chat: async () => ({ type: "FAILED", error: "unused" }),
-      completeText: async () => ({ success: true, text: "not json" }),
+      compileTaskFrame: async () => ({ success: true, text: "not json" }),
     };
 
     const resolved = await resolveTaskFrame({
       userGoal: "任意一种此前没有见过的表达",
       llmClient: client,
     });
-    const contract = compileTaskFrameContract({
-      frame: resolved.frame,
+    expect(resolved.source).toBe("UNRESOLVED");
+    expect(resolved.reason).toContain("not valid JSON");
+    expect(resolved).not.toHaveProperty("frame");
+  });
+
+  it("normalizes model-authored resource preferences instead of discarding valid task semantics", () => {
+    const parsed = TaskFrameSchema.parse({
+      ...frame(),
+      collaboration: {
+        ...frame().collaboration,
+        requestedAgents: 9,
+      },
+      conversationEvidence: {
+        purpose: "CONTEXT",
+        requiresHistory: false,
+        queries: [],
+        includeRecentMessages: 1,
+      },
+    });
+
+    expect(parsed.conversationEvidence.includeRecentMessages).toBe(2);
+    expect(parsed.collaboration.requestedAgents).toBe(3);
+    expect(parsed.effects.repositoryWrite).toBe("NONE");
+  });
+
+  it("asks the model to repair an invalid TaskFrame once before failing closed", async () => {
+    const contexts: Array<string | undefined> = [];
+    let calls = 0;
+    const client: LlmClient = {
+      chat: async () => ({ type: "FAILED", error: "unused" }),
+      compileTaskFrame: async (input) => {
+        calls += 1;
+        contexts.push(input.context);
+        return calls === 1
+          ? {
+              success: true,
+              text: JSON.stringify({
+                ...frame(),
+                target: "INVALID_TARGET",
+              }),
+            }
+          : {
+              success: true,
+              text: JSON.stringify(frame({
+                objective: "Create the requested repository artifact.",
+                target: "REPOSITORY",
+                effects: {
+                  ...frame().effects,
+                  repositoryWrite: "REQUIRED",
+                },
+              })),
+            };
+      },
+    };
+
+    const resolved = await resolveTaskFrame({
+      userGoal: "Create an artifact.",
+      llmClient: client,
+    });
+
+    expect(calls).toBe(2);
+    expect(contexts[1]).toContain("runtime rejected the previous TaskFrame");
+    expect(contexts[1]).toContain("target");
+    expect(resolved).toMatchObject({
+      source: "MODEL",
+      frame: {
+        target: "REPOSITORY",
+        effects: { repositoryWrite: "REQUIRED" },
+      },
+    });
+  });
+
+  it("maps model-selected Web evidence profiles to deterministic local thresholds", () => {
+    const ordinaryFrame = TaskFrameSchema.parse({
+      ...frame(),
+      effects: { ...frame().effects, webEvidence: true },
+      webEvidencePolicy: {
+        profile: "ORDINARY",
+        basis: "GENERAL_LOOKUP",
+        // Deprecated/arbitrary model fields are stripped and cannot inflate
+        // the concrete evidence contract.
+        searchViews: 4,
+        fetchedSources: 4,
+        independentDomains: 4,
+        freshness: "CURRENT",
+        authority: "REQUIRED",
+      },
+    });
+    const currentFrame = TaskFrameSchema.parse({
+      ...frame(),
+      effects: { ...frame().effects, webEvidence: true },
+      webEvidencePolicy: {
+        profile: "CURRENT",
+        basis: "VOLATILE_CURRENT_CLAIM",
+      },
+    });
+
+    const ordinary = compileTaskFrameContract({
+      frame: ordinaryFrame,
+      operatingMode: "EXECUTE",
+      multiAgentAvailable: false,
+    });
+    const current = compileTaskFrameContract({
+      frame: currentFrame,
       operatingMode: "EXECUTE",
       multiAgentAvailable: false,
     });
 
-    expect(resolved.source).toBe("FALLBACK");
-    expect(contract).toMatchObject({
-      kind: "AGENT_TASK",
-      adaptationPolicy: "ADAPTIVE",
-      capabilities: {
-        repositoryRead: true,
-        repositoryWrite: false,
-        webAccess: false,
-      },
+    expect(ordinaryFrame.webEvidencePolicy).not.toHaveProperty("searchViews");
+    expect(ordinaryFrame.webEvidencePolicy).not.toHaveProperty("freshness");
+    expect(ordinary.evidence).toMatchObject({
+      webSearchViewCount: 1,
+      fetchedWebSourceCount: 1,
+      independentWebDomainCount: 1,
+      webFreshnessRequired: false,
+      webAuthorityRequired: false,
     });
-    expect(contract.taskFrame).toEqual(resolved.frame);
+    expect(current.evidence).toMatchObject({
+      webSearchViewCount: 2,
+      fetchedWebSourceCount: 1,
+      independentWebDomainCount: 1,
+      webFreshnessRequired: true,
+      webAuthorityRequired: true,
+    });
   });
 
   it("keeps Web and repository writes composable in one AGENT_TASK contract", () => {
@@ -142,7 +249,6 @@ describe("TaskFrame semantic control plane", () => {
       .toContain("web_search");
 
     const web = negotiateCapabilities({
-      userGoal: "research and implement",
       contract: initial,
       decision: {
         type: "TOOL_CALL",
@@ -161,7 +267,6 @@ describe("TaskFrame semantic control plane", () => {
     });
 
     const write = negotiateCapabilities({
-      userGoal: "research and implement",
       contract: web.upgrade.contract,
       decision: {
         type: "APPLY_PATCH",
@@ -184,7 +289,7 @@ describe("TaskFrame semantic control plane", () => {
   });
 
   it("keeps explicit TaskFrame semantic constraints in the policy layer", () => {
-    const taskFrame = createFallbackTaskFrame("explain only", "test");
+    const taskFrame = frame();
     taskFrame.constraints.readOnly = true;
     const contract = compileTaskFrameContract({
       frame: taskFrame,
@@ -192,7 +297,6 @@ describe("TaskFrame semantic control plane", () => {
       multiAgentAvailable: false,
     });
     const result = negotiateCapabilities({
-      userGoal: "explain only",
       contract,
       decision: {
         type: "APPLY_PATCH",
@@ -232,15 +336,11 @@ describe("TaskFrame semantic control plane", () => {
       multiAgentAvailable: true,
     });
 
-    expect(resolveContractSubAgentIntent(
-      contract,
-      "这段原始文本故意不包含任何 subagent 关键词",
-    )).toMatchObject({
+    expect(resolveTaskCollaborationPolicy(contract)).toMatchObject({
       preference: "REQUIRED",
       requestedAgents: 2,
       requestsChangeProposal: true,
       requestsReview: true,
-      signals: expect.arrayContaining(["task-frame"]),
     });
   });
 
@@ -253,7 +353,6 @@ describe("TaskFrame semantic control plane", () => {
       multiAgentAvailable: true,
     });
     const result = negotiateCapabilities({
-      userGoal: "handle the task",
       contract,
       decision: {
         type: "DELEGATE",
@@ -303,7 +402,6 @@ describe("TaskFrame semantic control plane", () => {
       .toEqual(["calendar__list", "calendar__delete", "mail__send"]);
 
     const result = negotiateCapabilities({
-      userGoal: "Delete the selected calendar event.",
       contract,
       decision: {
         type: "TOOL_CALL",
@@ -373,7 +471,6 @@ describe("TaskFrame semantic control plane", () => {
     expect(selectToolsForCapabilityNegotiation([safe, destructive], contract))
       .toEqual([safe]);
     const result = negotiateCapabilities({
-      userGoal: "Inspect calendar metadata without changing it.",
       contract,
       decision: {
         type: "TOOL_CALL",
@@ -423,12 +520,8 @@ function frame(overrides: Partial<TaskFrame> = {}): TaskFrame {
       mcp: false,
     },
     webEvidencePolicy: {
-      searchViews: 1,
-      fetchedSources: 1,
-      independentDomains: 1,
-      citation: true,
-      freshness: "NONE",
-      authority: "NONE",
+      profile: "ORDINARY",
+      basis: "GENERAL_LOOKUP",
     },
     constraints: {
       readOnly: false,
@@ -445,6 +538,7 @@ function frame(overrides: Partial<TaskFrame> = {}): TaskFrame {
       requestedAgents: null,
     },
     conversationEvidence: {
+      purpose: "CONTEXT",
       requiresHistory: false,
       queries: [],
       includeRecentMessages: 8,

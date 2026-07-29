@@ -44,10 +44,9 @@ export async function runAgentLoopTask(
   // through conversationEvidence after semantic resolution.
   const conversationFocus = focusConversationHistory(
     conversationHistory.messages,
-    "",
     {
-    maxMessages: 16,
-    maxChars: 12_000,
+      maxMessages: 16,
+      maxChars: 12_000,
     },
   );
   const effectiveContract: AgentTaskContract = {

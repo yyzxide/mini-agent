@@ -49,7 +49,6 @@ export class MessageCompressor {
 function classifyBucket(line: string): CompactionBucket {
   if (
     /^\[(?:summary|error|memory)\]/i.test(line)
-    || (/^\[user\]/i.test(line) && hasConstraint(line))
     || /^(?:goal|result|error|files?|tests?):/i.test(line)
   ) {
     return "PINNED";
@@ -62,13 +61,8 @@ function classifyPriority(line: string): { priority: number; reason: string } {
   if (/^\[error\]|^error:/i.test(line)) return { priority: 100, reason: "error evidence" };
   if (/^\[summary\]|^result:/i.test(line)) return { priority: 96, reason: "task outcome" };
   if (/^\[memory/i.test(line)) return { priority: 94, reason: "preserved memory" };
-  if (/^\[user\]/i.test(line) && hasConstraint(line)) return { priority: 92, reason: "explicit user constraint" };
   if (/^\[user\]/i.test(line)) return { priority: 76, reason: "conversation request" };
   if (/^\[assistant\]/i.test(line)) return { priority: 68, reason: "conversation response" };
   if (/^(?:files?|tests?):/i.test(line)) return { priority: 64, reason: "task evidence" };
   return { priority: 48, reason: "recent transcript evidence" };
-}
-
-function hasConstraint(value: string): boolean {
-  return /(?:不要|不得|不能|必须|只能|需要|应该|希望|倾向|优先|保持|避免|禁止|do not|don't|must|only|need|should|prefer|keep|avoid)/i.test(value);
 }

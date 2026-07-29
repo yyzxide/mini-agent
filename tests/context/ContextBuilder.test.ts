@@ -74,9 +74,8 @@ describe("ContextBuilder", () => {
         target: "WORLD",
         effects: { webEvidence: true },
         webEvidencePolicy: {
-          searchViews: 2,
-          freshness: "CURRENT",
-          authority: "REQUIRED",
+          profile: "CURRENT",
+          basis: "VOLATILE_CURRENT_CLAIM",
         },
       }),
     });
@@ -113,6 +112,14 @@ describe("ContextBuilder", () => {
       sessionId: currentSession.sessionId,
       repoPath,
       userGoal: "之前那个贪吃蛇游戏怎么运行",
+      taskContract: createTestTaskContract({
+        objective: "Recall how to run the previously created snake game.",
+        target: "SESSION",
+        conversationEvidence: {
+          requiresHistory: true,
+          queries: ["贪吃蛇 demo_app.html 运行方式"],
+        },
+      }),
     });
 
     const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
@@ -180,7 +187,7 @@ describe("ContextBuilder", () => {
     expect(context.length).toBeLessThanOrEqual(900);
   });
 
-  it("drops README and repository discovery context after target-file evidence is available", async () => {
+  it("does not carry removed eager-discovery sections into iterative context", async () => {
     const state = new AgentState({
       sessionId: "implementation-session",
       repoPath,
@@ -212,8 +219,8 @@ describe("ContextBuilder", () => {
     expect(context).not.toContain("README evidence:");
     expect(context).not.toContain("Tree summary:");
     expect(context).not.toContain("Repository state summary:");
-    expect(trace?.sections.find((section) => section.id === "readme")?.selected).toBe(false);
-    expect(trace?.sections.find((section) => section.id === "tree")?.selected).toBe(false);
+    expect(trace?.sections.find((section) => section.id === "readme")).toBeUndefined();
+    expect(trace?.sections.find((section) => section.id === "tree")).toBeUndefined();
   });
 
   it("keeps the latest file chunk directly visible and reports coverage separately", async () => {

@@ -26,15 +26,13 @@ function rerankMemoryResult(
 ): LongTermMemorySearchResult {
   const recencyScore = calculateRecencyScore(result.entry.updatedAt, now);
   const sameSessionScore = query.sessionId && result.entry.sessionId === query.sessionId ? 1 : 0;
-  const modeScore = calculateModeScore(result, query);
   const entityScore = calculateEntityScore(result, query);
-  const sourceScore = result.entry.source === "TASK_SUMMARY" ? 0.08 : 0.04;
+  const sourceScore = result.entry.source === "TASK_SUMMARY" ? 0.05 : 0.025;
   const finalScore = clampScore(
-    result.score * 0.68
-      + recencyScore * query.recencyBias * 0.10
+    result.score * 0.72
+      + recencyScore * 0.10
       + sameSessionScore * query.sameSessionBias * 0.08
-      + modeScore * 0.08
-      + entityScore * 0.04
+      + entityScore * 0.05
       + sourceScore,
   );
   const selectionReasons = buildRerankReasons({
@@ -42,7 +40,6 @@ function rerankMemoryResult(
     query,
     recencyScore,
     sameSessionScore,
-    modeScore,
     entityScore,
     sourceScore,
   });
@@ -54,14 +51,6 @@ function rerankMemoryResult(
     score: finalScore,
     selectionReasons,
   };
-}
-
-function calculateModeScore(result: LongTermMemorySearchResult, query: MemoryQuery): number {
-  const mode = result.entry.metadata.mode;
-  if (typeof mode !== "string" || query.preferredModes.length === 0) {
-    return 0;
-  }
-  return query.preferredModes.includes(mode) ? 1 : 0;
 }
 
 function calculateEntityScore(result: LongTermMemorySearchResult, query: MemoryQuery): number {
@@ -90,7 +79,6 @@ function buildRerankReasons(input: {
   query: MemoryQuery;
   recencyScore: number;
   sameSessionScore: number;
-  modeScore: number;
   entityScore: number;
   sourceScore: number;
 }): string[] {
@@ -99,16 +87,13 @@ function buildRerankReasons(input: {
   if (input.result.matchedKeywords.length > 0) {
     reasons.push(`keyword:${input.result.matchedKeywords.slice(0, 5).join(",")}`);
   }
-  if (input.modeScore > 0) {
-    reasons.push(`mode:${String(input.result.entry.metadata.mode)}`);
-  }
   if (input.sameSessionScore > 0) {
     reasons.push("same-session");
   }
   if (input.entityScore > 0) {
     reasons.push("entity-match");
   }
-  if (input.recencyScore > 0.65 && input.query.recencyBias > 0.5) {
+  if (input.recencyScore > 0.65) {
     reasons.push("recent");
   }
   if (input.sourceScore > 0) {

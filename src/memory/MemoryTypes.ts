@@ -54,7 +54,7 @@ export function inferLegacyMemoryKind(input: {
   if (mode === "PLAN") {
     return "PLAN";
   }
-  if (mode === "WEB_ANSWER") {
+  if (mode === "WEB_ANSWER" || mode === "DIRECT_ANSWER") {
     return "EPHEMERAL_FACT";
   }
   if (input.source === "MANUAL") {

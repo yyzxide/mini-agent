@@ -114,7 +114,7 @@ describe("AgentHarness", () => {
       userGoal: "Analyze repository architecture",
       decisions: [
         {
-          type: "DELEGATE_READONLY",
+          type: "DELEGATE",
           reason: "Inspect architecture and risks",
           tasks: [
             { id: "architecture", role: "repository_analyst", objective: "Map modules", focusPaths: ["src"] },

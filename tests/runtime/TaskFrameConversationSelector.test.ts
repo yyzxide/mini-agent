@@ -16,6 +16,7 @@ describe("TaskFrameConversationSelector", () => {
     const selection = selectTaskFrameConversation({
       messages,
       frame: frame({
+        purpose: "REFERENT",
         requiresHistory: true,
         queries: ["blue-orchid 缓存失效策略"],
         includeRecentMessages: 4,
@@ -40,6 +41,7 @@ describe("TaskFrameConversationSelector", () => {
     const selection = selectTaskFrameConversation({
       messages,
       frame: frame({
+        purpose: "CONTEXT",
         requiresHistory: false,
         queries: [],
         includeRecentMessages: 3,

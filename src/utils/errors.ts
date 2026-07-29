@@ -66,20 +66,6 @@ export class PatchTooLargeError extends MiniAgentError {
   }
 }
 
-export class PatchCheckFailedError extends MiniAgentError {
-  constructor(message: string, details?: unknown) {
-    super("PATCH_CHECK_FAILED", message, details);
-    this.name = "PatchCheckFailedError";
-  }
-}
-
-export class PatchApplyFailedError extends MiniAgentError {
-  constructor(message: string, details?: unknown) {
-    super("PATCH_APPLY_FAILED", message, details);
-    this.name = "PatchApplyFailedError";
-  }
-}
-
 export class PatchPathOutsideRepoError extends MiniAgentError {
   constructor(targetPath: string) {
     super("PATCH_PATH_OUTSIDE_REPOSITORY", "Patch path is outside repository", { path: targetPath });
@@ -112,20 +98,6 @@ export class InvalidAgentDecisionError extends MiniAgentError {
   constructor(message: string, details?: unknown) {
     super("INVALID_AGENT_DECISION", message, details);
     this.name = "InvalidAgentDecisionError";
-  }
-}
-
-export class LlmConfigurationError extends MiniAgentError {
-  constructor(message: string, details?: unknown) {
-    super("LLM_CONFIGURATION_ERROR", message, details);
-    this.name = "LlmConfigurationError";
-  }
-}
-
-export class LlmRequestError extends MiniAgentError {
-  constructor(message: string, details?: unknown) {
-    super("LLM_REQUEST_ERROR", message, details);
-    this.name = "LlmRequestError";
   }
 }
 

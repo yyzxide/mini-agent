@@ -27,17 +27,18 @@ export interface LlmInput {
 
 export interface LlmClient {
   chat(input: LlmInput): Promise<AgentDecision>;
-  completeText?(input: LlmTextCompletionInput): Promise<LlmTextCompletionResult>;
+  compileTaskFrame?(
+    input: TaskFrameCompletionInput,
+  ): Promise<TaskFrameCompletionResult>;
 }
 
-export interface LlmTextCompletionInput {
+export interface TaskFrameCompletionInput {
   userGoal: string;
   context?: string;
   conversation?: ConversationMessage[];
-  mode?: "direct" | "web" | "web_rewrite" | "task_frame";
 }
 
-export interface LlmTextCompletionResult {
+export interface TaskFrameCompletionResult {
   success: boolean;
   text?: string;
   error?: string;

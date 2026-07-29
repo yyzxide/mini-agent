@@ -22,7 +22,7 @@ describe("TaskFrame single control chain", () => {
   it("resolves the model frame before entering the action loop", async () => {
     repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "mini-agent-task-frame-"));
     const llmClient: LlmClient = {
-      completeText: async () => ({
+      compileTaskFrame: async () => ({
         success: true,
         text: JSON.stringify({
           version: 1,

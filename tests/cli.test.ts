@@ -24,7 +24,7 @@ beforeEach(async () => {
     JSON.stringify({ version: 1 }),
     "utf8",
   );
-  vi.spyOn(OpenAICompatibleClient.prototype, "completeText").mockResolvedValue({
+  vi.spyOn(OpenAICompatibleClient.prototype, "compileTaskFrame").mockResolvedValue({
     success: true,
     text: JSON.stringify(createTestTaskFrame({
       objective: "Complete the CLI test request through the unified AgentLoop.",
@@ -790,6 +790,17 @@ describe("mini-agent CLI", () => {
 
   it("injects matching skills and long-term memory into unified-loop answers", async () => {
     process.chdir(tempRoot);
+    vi.mocked(OpenAICompatibleClient.prototype.compileTaskFrame).mockResolvedValue({
+      success: true,
+      text: JSON.stringify(createTestTaskFrame({
+        objective: "Recall the prior npm verification decision.",
+        target: "SESSION",
+        conversationEvidence: {
+          requiresHistory: true,
+          queries: ["npm 完整验证"],
+        },
+      })),
+    });
     const skillPath = path.join(tempRoot, "skills", "testing", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });
     await fs.writeFile(skillPath, [
@@ -1674,6 +1685,36 @@ describe("mini-agent CLI", () => {
 
   it("uses previous web context to scope follow-up searches", async () => {
     process.chdir(tempRoot);
+    vi.mocked(OpenAICompatibleClient.prototype.compileTaskFrame)
+      .mockResolvedValueOnce({
+        success: true,
+        text: JSON.stringify(createTestTaskFrame({
+          objective: "Research the latest World Cup scores.",
+          target: "WORLD",
+          effects: { webEvidence: true },
+          webEvidencePolicy: {
+            profile: "ORDINARY",
+            basis: "GENERAL_LOOKUP",
+          },
+        })),
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        text: JSON.stringify(createTestTaskFrame({
+          objective: "Within the prior World Cup scope, research Japan's recent match results.",
+          target: "WORLD",
+          effects: { webEvidence: true },
+          webEvidencePolicy: {
+            profile: "ORDINARY",
+            basis: "GENERAL_LOOKUP",
+          },
+          conversationEvidence: {
+            purpose: "REFERENT",
+            requiresHistory: true,
+            queries: ["世界杯 日本队 最近几场成绩"],
+          },
+        })),
+      });
 
     const sessionOutput = await captureStdout(async () => {
       await createProgram().parseAsync(["session", "create", "--title", "Web Memory"], { from: "user" });
@@ -1689,7 +1730,11 @@ describe("mini-agent CLI", () => {
       { type: "TOOL_CALL", toolName: "web_search", input: { query: "世界杯 最新比分 official live scores" } },
       { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
       { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://scores.example/japan" } },
-      { type: "FINAL", summary: "世界杯最新比分来源不足，当前证据无法完整核验。", success: true },
+      {
+        type: "FINAL",
+        summary: "世界杯最新比分来源不足，当前证据无法完整核验。来源：https://example.com/roco-news",
+        success: true,
+      },
       { type: "TOOL_CALL", toolName: "web_search", input: { query: "世界杯 日本队 最近几场 成绩 比分 official" } },
       { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://example.com/roco-news" } },
       { type: "TOOL_CALL", toolName: "fetch_url", input: { url: "https://scores.example/japan" } },
@@ -1722,36 +1767,6 @@ describe("mini-agent CLI", () => {
       }
 
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
-      const prompt = body.messages.at(-1)?.content ?? "";
-      if (body.messages[0]?.content.includes("web question planner")) {
-        const isJapanFollowUp = prompt.includes("日本队最近几场的成绩");
-        return new Response(JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify({
-                  standaloneQuestion: isJapanFollowUp
-                    ? "世界杯范围内，日本队最近几场比赛成绩"
-                    : "世界杯最新比分",
-                  searchQueries: isJapanFollowUp
-                    ? ["世界杯 日本队 最近几场 成绩 比分 赛果 official"]
-                    : ["世界杯 最新比分 official live scores"],
-                  answerScope: isJapanFollowUp
-                    ? "继承上一轮世界杯范围，只回答世界杯内日本队比赛。"
-                    : "回答世界杯最新比分。",
-                  sourceHints: ["official competition site", "live score source"],
-                  answerInstructions: [
-                    "Keep materially different categories, scopes, and time periods separate; for ambiguous entities, preserve multiple verified interpretations instead of silently choosing one.",
-                  ],
-                  needsLiveData: true,
-                  confidence: "high",
-                }),
-              },
-            },
-          ],
-        }), { status: 200 });
-      }
-
       answerContexts.push(body.messages);
       return new Response(JSON.stringify({
         choices: [
@@ -1969,10 +1984,17 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+      expect(secondBody.messages.map((message) => message.role)).toEqual([
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "user",
+      ]);
       expect(secondBody.messages[1]?.content).toBe("第一轮：我们聊了 session 记忆");
       expect(secondBody.messages[2]?.content).toBe("我们刚才聊了 session 记忆。");
-      const secondPrompt = JSON.parse(secondBody.messages[3]?.content ?? "{}") as { userGoal?: string };
+      expect(secondBody.messages[3]?.content).toContain("\"repositoryChanged\":false");
+      const secondPrompt = JSON.parse(secondBody.messages[4]?.content ?? "{}") as { userGoal?: string };
       expect(secondPrompt.userGoal).toBe("现在呢");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);

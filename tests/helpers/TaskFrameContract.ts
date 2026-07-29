@@ -43,12 +43,9 @@ export function createTestTaskFrame(options: TestTaskFrameOptions): TaskFrame {
       mcp: options.effects?.mcp ?? false,
     },
     webEvidencePolicy: {
-      searchViews: options.webEvidencePolicy?.searchViews ?? 1,
-      fetchedSources: options.webEvidencePolicy?.fetchedSources ?? 1,
-      independentDomains: options.webEvidencePolicy?.independentDomains ?? 1,
-      citation: options.webEvidencePolicy?.citation ?? true,
-      freshness: options.webEvidencePolicy?.freshness ?? "NONE",
-      authority: options.webEvidencePolicy?.authority ?? "NONE",
+      profile: options.webEvidencePolicy?.profile ?? "ORDINARY",
+      basis: options.webEvidencePolicy?.basis ?? "GENERAL_LOOKUP",
+      ranking: options.webEvidencePolicy?.ranking ?? "REPRESENTATIVE",
     },
     constraints: {
       readOnly: options.constraints?.readOnly ?? false,
@@ -65,6 +62,7 @@ export function createTestTaskFrame(options: TestTaskFrameOptions): TaskFrame {
       requestedAgents: options.collaboration?.requestedAgents ?? null,
     },
     conversationEvidence: {
+      purpose: options.conversationEvidence?.purpose ?? "CONTEXT",
       requiresHistory: options.conversationEvidence?.requiresHistory ?? false,
       queries: options.conversationEvidence?.queries ?? [],
       includeRecentMessages: options.conversationEvidence?.includeRecentMessages ?? 8,

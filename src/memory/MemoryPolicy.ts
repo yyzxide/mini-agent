@@ -8,13 +8,6 @@ import {
 } from "./MemoryTypes.js";
 import { extractChangedPathsFromUnifiedDiff } from "../diff/ChangedPaths.js";
 
-export type MemoryConsumerMode =
-  | "AGENT_LOOP"
-  | "DIRECT_ANSWER"
-  | "WEB_ANSWER"
-  | "CODE_REVIEW"
-  | "REPOSITORY_ANALYSIS";
-
 export interface MemoryReadPlan {
   retrieve: boolean;
   query: string;
@@ -36,9 +29,10 @@ export interface MemoryWritePlan {
 
 export function planMemoryRead(input: {
   query: string;
-  mode: MemoryConsumerMode;
   resolvedQuery?: string;
-  needsLiveData?: boolean;
+  repositoryWork: boolean;
+  historicalRecall: boolean;
+  webEvidence: boolean;
   indexedKnowledgeRequest?: boolean;
 }): MemoryReadPlan {
   const query = input.resolvedQuery?.trim() || input.query.trim();
@@ -48,11 +42,11 @@ export function planMemoryRead(input: {
   if (input.indexedKnowledgeRequest) {
     return disabledReadPlan(query, "Document knowledge-base requests must not mix in historical memory.");
   }
-  if (input.needsLiveData || input.mode === "WEB_ANSWER" || isVolatileQuery(query)) {
+  if (input.webEvidence) {
     return disabledReadPlan(query, "Live or web facts must use current tool evidence rather than memory.");
   }
 
-  if (isExplicitHistoricalRecall(query)) {
+  if (input.historicalRecall) {
     return {
       retrieve: true,
       query,
@@ -63,7 +57,7 @@ export function planMemoryRead(input: {
     };
   }
 
-  if (["AGENT_LOOP", "CODE_REVIEW", "REPOSITORY_ANALYSIS"].includes(input.mode)) {
+  if (input.repositoryWork) {
     return {
       retrieve: true,
       query,
@@ -74,7 +68,7 @@ export function planMemoryRead(input: {
     };
   }
 
-  return disabledReadPlan(query, "Ordinary direct answers do not automatically select a historical topic.");
+  return disabledReadPlan(query, "Ordinary answers do not automatically select a historical topic.");
 }
 
 export function planSessionMemoryWrite(record: SessionRecord): MemoryWritePlan {
@@ -95,19 +89,6 @@ export function planSessionMemoryWrite(record: SessionRecord): MemoryWritePlan {
     return { store: false, reason: "Only explicitly successful task summaries are eligible." };
   }
 
-  const mode = typeof record.payload.mode === "string" ? record.payload.mode : "";
-  if (mode === "PLAN") {
-    return { store: false, reason: "A successful plan is not an executed outcome." };
-  }
-  if (mode === "WEB_ANSWER") {
-    return { store: false, reason: "Web answers may become stale and are not promoted automatically." };
-  }
-  if (mode === "DIRECT_ANSWER") {
-    return { store: false, reason: "Transient direct answers are not long-term memory." };
-  }
-  if (mode !== "AGENT_LOOP") {
-    return { store: false, reason: `Mode ${mode || "(missing)"} is not an automatically verified repository outcome.` };
-  }
   const finalDiff = typeof record.payload.finalDiff === "string" ? record.payload.finalDiff : "";
   const changedFiles = Array.isArray(record.payload.changedFiles)
     ? record.payload.changedFiles.filter((file): file is string => typeof file === "string")
@@ -126,7 +107,7 @@ export function planSessionMemoryWrite(record: SessionRecord): MemoryWritePlan {
     confidence: 0.8,
     evidenceRefs: (changedFiles.length > 0 ? changedFiles : extractChangedPathsFromUnifiedDiff(finalDiff))
       .map((file) => `file:${file}`),
-    reason: "A successful AgentLoop task with an actual diff is a verified repository outcome.",
+    reason: "A successful task with an actual repository diff is a verified durable outcome.",
   };
 }
 
@@ -148,14 +129,6 @@ export function planManualMemoryWrite(input: {
     evidenceRefs: [],
     reason: "The user explicitly requested this memory.",
   };
-}
-
-export function isExplicitHistoricalRecall(query: string): boolean {
-  return /(?:之前|上次|过去|历史|还记得|跨会话|继续之前|我们曾经|以前)|\b(?:previous|last time|history|historical|remember|continue the earlier|we discussed before)\b/i.test(query);
-}
-
-function isVolatileQuery(query: string): boolean {
-  return /(?:今天|昨天|明天|现在|最新|实时|比分|赛果|股市|行情|汇率|新闻)|\b(?:today|yesterday|tomorrow|now|latest|live|score|stock|exchange rate|news)\b/i.test(query);
 }
 
 function disabledReadPlan(query: string, reason: string): MemoryReadPlan {

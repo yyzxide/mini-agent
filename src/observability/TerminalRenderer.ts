@@ -45,17 +45,13 @@ export class TerminalRenderer {
       case "session":
         this.line(`${this.paint("cyan", "●")} [session] ${sanitizeTerminalText(event.sessionId)}`);
         return;
-      case "follow_up":
-        this.line(`${this.paint("blue", "├─")} [follow-up] artifact ${event.intent.toLowerCase()} · source=${event.source}`);
-        this.detail(`${event.files.join(", ")}${event.llmSkipped ? " · LLM skipped" : ""}`);
-        return;
       case "conversation":
         this.renderConversation(event.trace);
         return;
       case "understanding":
-        if (event.source !== "DETERMINISTIC" || this.verbosity !== "normal") {
-          this.line(`${this.paint("cyan", "├─")} [understanding] ${event.source.toLowerCase()} · ${event.operation}/${event.target} · mutation=${event.mutationRequirement.toLowerCase()} · confidence=${event.confidence.toFixed(2)}`);
-          if (this.verbosity !== "normal") this.detail(event.reason);
+        this.line(`${this.paint("cyan", "├─")} [understanding] ${event.source.toLowerCase()} · ${event.operation}/${event.target} · mutation=${event.mutationRequirement.toLowerCase()} · confidence=${event.confidence.toFixed(2)}`);
+        if (event.source === "MODEL_UNRESOLVED" || this.verbosity !== "normal") {
+          this.detail(event.reason);
         }
         return;
       case "task_contract":
@@ -186,10 +182,8 @@ export class TerminalRenderer {
     const qualifiers = trace.totalMessages === 0
       ? ["new session"]
       : [
-        trace.selectionStrategy === "LATEST_REFERENT" ? "prioritized latest exchange" : undefined,
-        trace.selectionStrategy === "PRIOR_RESPONSE_AUDIT" ? "prior-response audit" : undefined,
         trace.selectionStrategy === "TASK_FRAME_RETRIEVAL" ? "TaskFrame semantic retrieval" : undefined,
-        trace.selectionStrategy === "PRIOR_RESPONSE_AUDIT" && trace.matchedAssistantMessages > 0
+        trace.selectionStrategy === "TASK_FRAME_RETRIEVAL" && trace.matchedAssistantMessages > 0
           ? `matched ${String(trace.matchedAssistantMessages)} prior assistant message(s)`
           : undefined,
         trace.truncated ? "history limited" : undefined,
@@ -313,11 +307,7 @@ export class TerminalRenderer {
         : "unreported";
       this.line(`${this.paint("magenta", "◆")} [usage] calls=${this.llmCalls} · in=${formatTokens(this.promptTokens)} · prompt-cache-read=${cacheRead} · out=${formatTokens(this.completionTokens)} · reasoning=${formatTokens(this.reasoningTokens)}${this.hasCacheWriteTelemetry ? ` · prompt-cache-write=${formatTokens(this.cacheWriteTokens)}` : " · prompt-cache-write=unreported"}`);
     }
-    if (this.contract.outputKind === "CODE_REVIEW") {
-      this.line(`[review]\n${safeSummary}`);
-    } else {
-      this.line(`[summary] ${safeSummary}`);
-    }
+    this.line(`[summary] ${safeSummary}`);
     if (!success && this.verbosity !== "normal") this.detail("task completed with success=false");
   }
 

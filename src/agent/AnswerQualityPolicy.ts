@@ -49,7 +49,6 @@ export function validateAnswerQuality(
   summary: string,
   frame?: TaskFrame,
 ): AnswerQualityViolation | undefined {
-  if (reportsEvidenceLimitation(summary)) return undefined;
   const profile = buildAnswerQualityProfile(frame);
   const normalized = normalize(summary);
 
@@ -146,10 +145,6 @@ function isSourceOnlyAnswer(value: string): boolean {
     .trim();
   return withoutLabels.length === 0
     || /^(?:已找到|请查看|可参考|详见|见上述|found it|see above|see the link)[。.!！]?$/i.test(withoutLabels);
-}
-
-function reportsEvidenceLimitation(value: string): boolean {
-  return /(?:证据|来源|资料).{0,10}(?:不足|不充分|无法核验|无法确认)|(?:不足以|无法).{0,16}(?:核验|确认|回答)|\b(?:insufficient|not enough|unable to verify|cannot verify|could not verify)\b/i.test(value);
 }
 
 function normalize(value: string): string {

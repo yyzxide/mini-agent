@@ -4,6 +4,28 @@ import type { ContextTrace } from "../../src/context/ContextTypes.js";
 import { TerminalRenderer } from "../../src/observability/TerminalRenderer.js";
 
 describe("TerminalRenderer", () => {
+  it("shows unresolved TaskFrame details at normal verbosity", () => {
+    const output: string[] = [];
+    const renderer = new TerminalRenderer({
+      contract: createDefaultAgentTaskContract(),
+      color: false,
+      write: (text) => output.push(text),
+    });
+
+    renderer.render({
+      type: "understanding",
+      source: "MODEL_UNRESOLVED",
+      operation: "UNRESOLVED",
+      target: "UNKNOWN",
+      mutationRequirement: "NONE",
+      confidence: 0,
+      reason: "The model TaskFrame failed schema validation: confidence: expected number",
+    });
+
+    expect(output.join("")).toContain("model_unresolved");
+    expect(output.join("")).toContain("confidence: expected number");
+  });
+
   it("strips terminal control sequences from untrusted output", () => {
     const output: string[] = [];
     const renderer = new TerminalRenderer({
@@ -27,7 +49,6 @@ describe("TerminalRenderer", () => {
     });
 
     renderer.render({ type: "session", sessionId: "session-1" });
-    renderer.render({ type: "follow_up", intent: "LOCATION", source: "FILE_CHANGE", files: ["demo_app.html"], llmSkipped: true });
     renderer.render({
       type: "conversation",
       trace: {
@@ -36,8 +57,8 @@ describe("TerminalRenderer", () => {
         estimatedInputTokens: 1200,
         estimatedOutputTokens: 240,
         truncated: false,
-        focusedOnLatestTurn: true,
-        selectionStrategy: "LATEST_REFERENT",
+        focusedOnLatestTurn: false,
+        selectionStrategy: "RECENT_HISTORY",
         matchedAssistantMessages: 0,
         roles: ["user", "assistant"],
       },
@@ -156,9 +177,7 @@ describe("TerminalRenderer", () => {
 
     const text = output.join("");
     expect(text).toContain("[session] session-1");
-    expect(text).toContain("[follow-up] artifact location · source=FILE_CHANGE");
-    expect(text).toContain("demo_app.html · LLM skipped");
-    expect(text).toContain("[conversation] 2/8 messages · ~240 tokens · prioritized latest exchange");
+    expect(text).toContain("[conversation] 2/8 messages · ~240 tokens");
     expect(text).toContain("[context] · selected=600/7.50k tokens");
     expect(text).toContain("[memory:session]");
     expect(text).toContain("strategy=structured-salience-v2");
@@ -187,7 +206,7 @@ describe("TerminalRenderer", () => {
     expect(text).toContain("[summary] Done.");
   });
 
-  it("shows when conversation evidence was selected for a prior-response audit", () => {
+  it("shows when TaskFrame selected matching assistant evidence", () => {
     const output: string[] = [];
     const renderer = new TerminalRenderer({
       contract: createDefaultAgentTaskContract(),
@@ -204,14 +223,14 @@ describe("TerminalRenderer", () => {
         estimatedOutputTokens: 1100,
         truncated: true,
         focusedOnLatestTurn: false,
-        selectionStrategy: "PRIOR_RESPONSE_AUDIT",
+        selectionStrategy: "TASK_FRAME_RETRIEVAL",
         matchedAssistantMessages: 2,
         roles: ["user", "assistant"],
       },
     });
 
     expect(output.join("")).toContain(
-      "prior-response audit · matched 2 prior assistant message(s) · history limited",
+      "TaskFrame semantic retrieval · matched 2 prior assistant message(s) · history limited",
     );
   });
 

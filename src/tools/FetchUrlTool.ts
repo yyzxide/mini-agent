@@ -40,6 +40,7 @@ export interface FetchUrlData {
   status: number;
   statusText: string;
   contentType: string;
+  charset: string;
   text: string;
   bytesRead: number;
   truncated: boolean;
@@ -125,7 +126,8 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
       }
 
       const body = await readBoundedResponseBody(response, input.maxBytes);
-      const rawText = body.bytes.length > 0 ? new TextDecoder("utf-8", { fatal: false }).decode(body.bytes) : "";
+      const decoded = decodeResponseText(body.bytes, contentType);
+      const rawText = decoded.text;
       const normalizedText = input.extractText && contentType.toLowerCase().includes("html")
         ? htmlToText(rawText)
         : normalizeText(rawText);
@@ -149,6 +151,7 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
           status: response.status,
           statusText: response.statusText,
           contentType,
+          charset: decoded.charset,
           text,
           bytesRead: body.bytesRead,
           truncated: body.truncated,
@@ -196,6 +199,46 @@ export class FetchUrlTool implements Tool<FetchUrlInput, FetchUrlData> {
       clearTimeout(timeout);
     }
   }
+}
+
+export function decodeResponseText(
+  bytes: Uint8Array,
+  contentType: string,
+): { text: string; charset: string } {
+  if (bytes.length === 0) return { text: "", charset: "utf-8" };
+  const declared = readCharsetFromContentType(contentType)
+    ?? readCharsetFromHtmlPrefix(bytes)
+    ?? "utf-8";
+  const charset = normalizeCharsetLabel(declared);
+  try {
+    return {
+      text: new TextDecoder(charset, { fatal: false }).decode(bytes),
+      charset: new TextDecoder(charset).encoding,
+    };
+  } catch {
+    return {
+      text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+      charset: "utf-8",
+    };
+  }
+}
+
+function readCharsetFromContentType(contentType: string): string | undefined {
+  return contentType.match(/charset\s*=\s*["']?\s*([^;"'\s]+)/i)?.[1];
+}
+
+function readCharsetFromHtmlPrefix(bytes: Uint8Array): string | undefined {
+  const prefix = new TextDecoder("windows-1252", { fatal: false })
+    .decode(bytes.slice(0, 8_192));
+  return prefix.match(/<meta[^>]+charset\s*=\s*["']?\s*([^"'\s/>;]+)/i)?.[1]
+    ?? prefix.match(/<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([^"'\s;]+)/i)?.[1];
+}
+
+function normalizeCharsetLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "utf8") return "utf-8";
+  if (normalized === "gb2312" || normalized === "gb_2312-80") return "gb18030";
+  return normalized;
 }
 
 async function fetchWithValidatedRedirects(

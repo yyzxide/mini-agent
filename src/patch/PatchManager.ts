@@ -650,7 +650,3 @@ function assertPatchPathAllowed(repoPath: string, patchPath: string): void {
     throw new PatchPathOutsideRepoError(patchPath);
   }
 }
-
-export function previewPatchForTesting(patch: string): PatchPreviewResult {
-  return parseUnifiedDiff(patch);
-}

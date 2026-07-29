@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ReadonlySubAgentCoordinator } from "../../src/agent/ReadonlySubAgentCoordinator.js";
+import { IsolatedSubAgentCoordinator } from "../../src/agent/IsolatedSubAgentCoordinator.js";
 import { DEFAULT_MULTI_AGENT_POLICY, type SubAgentIdentity } from "../../src/agent/SubAgentTypes.js";
 import type { AgentDecision } from "../../src/agent/AgentDecision.js";
 import type { LlmClient } from "../../src/llm/LlmClient.js";
@@ -18,11 +18,11 @@ afterEach(async () => {
   await fs.rm(repoPath, { recursive: true, force: true });
 });
 
-describe("ReadonlySubAgentCoordinator", () => {
+describe("IsolatedSubAgentCoordinator", () => {
   it("runs independent children concurrently while preserving task order", async () => {
     let active = 0;
     let observedConcurrency = 0;
-    const coordinator = new ReadonlySubAgentCoordinator({
+    const coordinator = new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (identity) => {
         let calls = 0;
@@ -109,7 +109,7 @@ describe("ReadonlySubAgentCoordinator", () => {
   it("recovers a bounded child protocol failure instead of aborting immediately", async () => {
     let calls = 0;
     const progress: string[] = [];
-    const coordinator = new ReadonlySubAgentCoordinator({
+    const coordinator = new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (): LlmClient => ({
         chat: async () => {
@@ -168,7 +168,7 @@ describe("ReadonlySubAgentCoordinator", () => {
   });
 
   it("enforces a shared LLM-call budget across concurrent children", async () => {
-    const coordinator = new ReadonlySubAgentCoordinator({
+    const coordinator = new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (): LlmClient => ({
         chat: async () => ({ type: "TOOL_CALL", toolName: "read_file", input: { path: "example.ts" } }),
@@ -189,7 +189,7 @@ describe("ReadonlySubAgentCoordinator", () => {
   it("returns an isolated writer patch and lets a dependent child review it", async () => {
     const calls = new Map<string, number>();
     const progress: string[] = [];
-    const coordinator = new ReadonlySubAgentCoordinator({
+    const coordinator = new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (identity): LlmClient => ({
         chat: async () => {
@@ -267,7 +267,7 @@ describe("ReadonlySubAgentCoordinator", () => {
   it("lets a writer test its isolated changes before returning a proposal", async () => {
     let calls = 0;
     const progress: string[] = [];
-    const coordinator = new ReadonlySubAgentCoordinator({
+    const coordinator = new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (): LlmClient => ({
         chat: async () => {
@@ -328,8 +328,8 @@ describe("ReadonlySubAgentCoordinator", () => {
     await expect(fs.access(path.join(repoPath, "verified.mjs"))).rejects.toBeDefined();
   });
 
-  function coordinatorWithDecision(decision: AgentDecision): ReadonlySubAgentCoordinator {
-    return new ReadonlySubAgentCoordinator({
+  function coordinatorWithDecision(decision: AgentDecision): IsolatedSubAgentCoordinator {
+    return new IsolatedSubAgentCoordinator({
       repoPath,
       createLlmClient: (identity: SubAgentIdentity): LlmClient => {
         let calls = 0;

@@ -332,7 +332,6 @@ export class LongTermMemoryStore implements MemoryRetriever {
     const entries = (await this.readAll()).filter((entry) => (
       entry.metadata.success !== false
         && isMemoryActive(entry, now)
-        && !isTransientDirectAnswer(entry)
         && entry.sessionId !== options.excludeSessionId
         && Boolean(entry.kind && allowedKinds.has(entry.kind))
         && Boolean(entry.scope && allowedScopes.has(entry.scope))
@@ -565,10 +564,6 @@ function isMemoryExpired(entry: LongTermMemoryEntry, now: number): boolean {
 
 function isMemoryActive(entry: LongTermMemoryEntry, now: number): boolean {
   return entry.status === "ACTIVE" && !isMemoryExpired(entry, now);
-}
-
-function isTransientDirectAnswer(entry: LongTermMemoryEntry): boolean {
-  return entry.source === "TASK_SUMMARY" && entry.metadata.mode === "DIRECT_ANSWER";
 }
 
 function clampConfidence(value: number): number {

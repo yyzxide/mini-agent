@@ -2,22 +2,22 @@ import type { AgentDecision } from "../agent/AgentDecision.js";
 import type {
   LlmClient,
   LlmInput,
-  LlmTextCompletionInput,
-  LlmTextCompletionResult,
+  TaskFrameCompletionInput,
+  TaskFrameCompletionResult,
 } from "../llm/LlmClient.js";
 
 export class ScriptedLlmClient implements LlmClient {
   private readonly decisions: AgentDecision[];
-  private readonly textCompletions: LlmTextCompletionResult[];
+  private readonly taskFrameCompletions: TaskFrameCompletionResult[];
   private readonly calls: LlmInput[] = [];
-  private readonly textCalls: LlmTextCompletionInput[] = [];
+  private readonly taskFrameCalls: TaskFrameCompletionInput[] = [];
 
   constructor(
     decisions: AgentDecision[],
-    textCompletions: LlmTextCompletionResult[] = [],
+    taskFrameCompletions: TaskFrameCompletionResult[] = [],
   ) {
     this.decisions = decisions;
-    this.textCompletions = textCompletions;
+    this.taskFrameCompletions = taskFrameCompletions;
   }
 
   async chat(input: LlmInput): Promise<AgentDecision> {
@@ -28,28 +28,33 @@ export class ScriptedLlmClient implements LlmClient {
     };
   }
 
-  async completeText(input: LlmTextCompletionInput): Promise<LlmTextCompletionResult> {
-    this.textCalls.push(input);
-    const scriptedText = this.textCompletions[Math.min(
-      this.textCalls.length - 1,
-      this.textCompletions.length - 1,
+  async compileTaskFrame(
+    input: TaskFrameCompletionInput,
+  ): Promise<TaskFrameCompletionResult> {
+    this.taskFrameCalls.push(input);
+    const scriptedFrame = this.taskFrameCompletions[Math.min(
+      this.taskFrameCalls.length - 1,
+      this.taskFrameCompletions.length - 1,
     )];
-    if (scriptedText) return scriptedText;
-    const decision = this.decisions[Math.min(this.textCalls.length - 1, this.decisions.length - 1)];
+    if (scriptedFrame) return scriptedFrame;
+    const decision = this.decisions[Math.min(
+      this.taskFrameCalls.length - 1,
+      this.decisions.length - 1,
+    )];
     if (decision?.type === "FINAL") {
       return { success: decision.success, text: decision.summary };
     }
     if (decision?.type === "FAILED") {
       return { success: false, error: decision.error };
     }
-    return { success: false, error: "Scripted single-shot completion requires a FINAL or FAILED decision" };
+    return { success: false, error: "No scripted TaskFrame completion configured" };
   }
 
   getCallInputs(): LlmInput[] {
     return [...this.calls];
   }
 
-  getTextCallInputs(): LlmTextCompletionInput[] {
-    return [...this.textCalls];
+  getTaskFrameCallInputs(): TaskFrameCompletionInput[] {
+    return [...this.taskFrameCalls];
   }
 }

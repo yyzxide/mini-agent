@@ -5,10 +5,6 @@ import type { TaskFrame } from "../runtime/TaskFrame.js";
 export type AgentTaskKind = "AGENT_TASK";
 
 export type AgentOutputKind =
-  | "NATURAL_LANGUAGE"
-  | "GROUNDED_WEB_ANSWER"
-  | "CODE_REVIEW"
-  | "REPOSITORY_ANALYSIS"
   | "TASK_RESULT"
   | "IMPLEMENTATION_PLAN";
 
@@ -39,14 +35,14 @@ export interface AgentTaskContract {
   version: 1;
   kind: AgentTaskKind;
   outputKind: AgentOutputKind;
-  executionStrategy: "SINGLE_SHOT" | "ITERATIVE";
+  executionStrategy: "ITERATIVE";
   adaptationPolicy: "ADAPTIVE" | "FIXED_READ_ONLY";
   resultMode: TaskChangeMode;
   capabilities: AgentCapabilities;
   evidence: AgentEvidenceRequirements;
   maxSteps: number;
   instructions: string[];
-  routeReason?: string;
+  controlReason?: string;
   taskFrame?: TaskFrame;
   /** Exact MCP tool names authorized by TaskFrame capability negotiation. */
   mcpToolGrants?: string[];

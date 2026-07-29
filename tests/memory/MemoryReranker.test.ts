@@ -4,15 +4,16 @@ import { rerankMemoryResults } from "../../src/memory/MemoryReranker.js";
 import type { LongTermMemoryEntry, LongTermMemorySearchResult } from "../../src/memory/LongTermMemoryStore.js";
 
 describe("rerankMemoryResults", () => {
-  it("boosts memories whose mode matches the query intent", () => {
+  it("does not use legacy task-mode labels as a reranking signal", () => {
     const query = buildMemoryQuery({ query: "实现数据流中位数算法" });
     const results = rerankMemoryResults([
       result("web", "WEB_ANSWER", "2026-01-31T00:00:00.000Z"),
       result("agent", "AGENT_LOOP", "2026-01-01T00:00:00.000Z"),
     ], query, { now: new Date("2026-01-31T00:00:00.000Z") });
 
-    expect(results[0].entry.id).toBe("agent");
-    expect(results[0].selectionReasons).toContain("mode:AGENT_LOOP");
+    expect(results[0].entry.id).toBe("web");
+    expect(results.flatMap((result) => result.selectionReasons ?? []))
+      .not.toEqual(expect.arrayContaining(["mode:AGENT_LOOP", "mode:WEB_ANSWER"]));
   });
 
   it("boosts same-session memories for follow-up queries", () => {
