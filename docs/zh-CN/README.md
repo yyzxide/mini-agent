@@ -81,10 +81,7 @@ User request
 ```bash
 corepack enable
 pnpm install --frozen-lockfile
-pnpm build
-pnpm typecheck
-pnpm lint:unused
-pnpm test
+pnpm verify
 pnpm bench -- --baseline benchmarks/baselines/core-v1.json
 ```
 

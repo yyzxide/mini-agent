@@ -47,7 +47,7 @@ Direct、Web、Review、Analysis 和 Change 都进入同一个 AgentLoop。它�
 
 ## Q7：模型语义判断错误会不会获得写权限？
 
-不会只凭 TaskFrame 的写入效果获得权限。模型必须实际选择 Patch，Capability Negotiator 授权后还要经过只读约束、Permission、路径沙箱和 Patch 校验；非法 TaskFrame 使用中性 fallback。
+不会只凭 TaskFrame 的写入效果获得权限。模型必须实际选择 Patch，Capability Negotiator 授权后还要经过只读约束、Permission、路径沙箱和 Patch 校验。非法 TaskFrame 会先自修一次；仍无效则 AgentLoop 在任何动作前 fail closed，而不是猜测用户意图。
 
 ## Q8：模型会不会直接操作文件？
 
@@ -82,7 +82,7 @@ Session Memory 使用 structured salience：固定约束、最近对话、执行
 
 ## Q14：多 Agent 是怎么触发的？
 
-仓库任务默认具备受控委派能力。`SubAgentIntent` 区分能力询问、明确要求、自动选择和明确禁用。用户说“用两个 subagent，一个实现一个 review”会把实际委派变成完成条件。`--agents` 只覆盖并发数，不是脚本式功能开关。
+仓库任务默认具备受控委派能力。模型把明确要求、自动选择或禁用协作编译进 `TaskFrame.collaboration` 与 `constraints.noDelegation`，本地 `TaskCollaborationPolicy` 只消费这份结构化记录，不再扫描原始问句。用户说“用两个 subagent，一个实现一个 review”时，TaskFrame 会让实际委派成为完成条件；`--agents` 只覆盖并发数，不是脚本式功能开关。
 
 ## Q15：Writer 子 Agent 为什么需要 worktree？
 

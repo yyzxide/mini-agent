@@ -76,7 +76,7 @@ mini-agent run \
 
 需要讲解：
 
-- 这类复杂否定会进入 Schema 约束的模型语义消歧。
+- 与其他开放式请求一样，这类复杂否定会被模型编译为 Schema 约束的 TaskFrame。
 - 语义候选不能单独授予写权限；`operation` 和 `explicitMutation` 必须一致。
 - 最终 Task Contract 是权限事实源，后续模块不会再用原句关键词重新猜权限。
 
@@ -122,7 +122,7 @@ mini-agent changes --limit 3
 mini-agent sessions
 ```
 
-## 4. 演示三：Artifact 追问与上下文
+## 4. 演示三：跨轮产物指代与执行账本
 
 启动交互模式：
 
@@ -140,8 +140,8 @@ mini-agent
 
 正确观察点：
 
-- 第一轮应创建真实文件并记录 `FILE_CHANGE`/Artifact。
-- “文件在哪里”应解析为最近产物追问。
+- 第一轮应创建真实文件并记录 `FILE_CHANGE` 与运行时执行账本。
+- 下一轮 TaskFrame 应把“文件在哪里”解释为跨轮指代，并用最近对话和账本取证。
 - 回答应优先给出仓库相对路径，而不是介绍 Mini Agent 自己在哪里运行。
 - 第三轮应保持只读，不再修改文件。
 
@@ -205,7 +205,7 @@ mini-agent run "联网确认 TypeScript 当前稳定版本，并引用来源" --
 1. 1 分钟：问题与定位——为什么聊天模型不能直接成为 Coding Agent。
 2. 2 分钟：单 AgentLoop、TaskFrame 和 Task Contract。
 3. 3 分钟：Writer/Reviewer worktree 演示。
-4. 2 分钟：Artifact 追问、Context 与终端时间线。
+4. 2 分钟：跨轮产物指代、执行账本、Context 与终端时间线。
 5. 1 分钟：测试和 AgentBench。
 6. 1 分钟：真实边界——模型质量、搜索提供商和应用层沙箱。
 
@@ -240,7 +240,7 @@ mini-agent config show
 
 确认：
 
-- 当前是仓库任务，而不是 Direct Answer；
+- 当前任务要求仓库变更，而不是仅生成最终答复；
 - 配置中的 `multiAgent.mode` 不是 `off`；
 - 用户表达了明确委派，或任务确实适合自动拆分；
 - 可用并发数大于 1。

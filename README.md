@@ -46,7 +46,7 @@ Configured MCP tools are exposed to TaskFrame as a bounded metadata catalog mark
 
 ### Model-driven task understanding
 
-The model interprets the request and a bounded recent conversation once into a schema-validated `TaskFrame`; local keyword routing does not choose a Direct, Web, or Edit mode first. When older evidence is needed, the frame supplies semantic queries that select a bounded slice from the full session without task-specific question regexes. If TaskFrame parsing fails, the runtime falls back to a neutral adaptive frame. Deterministic code still enforces explicit read-only/no-Web/no-command/no-MCP constraints and never treats a model label as authorization.
+The model interprets the request and a bounded recent conversation once into a schema-validated `TaskFrame`; local keyword routing does not choose a Direct, Web, or Edit mode first. When older evidence is needed, the frame supplies semantic queries that select a bounded slice from the full session without task-specific question regexes. Invalid TaskFrame output gets one bounded schema-repair attempt. If it is still invalid, `AgentLoop` fails before any decision or tool call instead of executing against guessed intent. Programmatic callers may skip compilation only by supplying an already validated Task Contract. Deterministic code still enforces explicit read-only/no-Web/no-command/no-MCP constraints and never treats a model label as authorization.
 
 For example, these requests intentionally receive different permissions:
 
@@ -171,7 +171,7 @@ mini-agent
 > 只解释刚才文件的保存位置，不要继续修改
 ```
 
-The follow-up should resolve to the latest artifact rather than answer a product-capability question about the CLI.
+The next TaskFrame receives the recent exchange plus a read-only execution ledger. It can therefore resolve the referenced artifact while distinguishing “the assistant mentioned a file” from “the previous run actually changed that file”; there is no hard-coded artifact-follow-up responder.
 
 For a presentation-oriented walkthrough, use [`docs/zh-CN/DEMO_SCRIPT.md`](docs/zh-CN/DEMO_SCRIPT.md).
 
@@ -242,6 +242,7 @@ Context compaction uses structured salience rather than retaining only the lates
 ## Development and verification
 
 ```bash
+pnpm verify
 pnpm build
 pnpm typecheck
 pnpm lint:unused
@@ -249,7 +250,7 @@ pnpm test
 pnpm bench -- --baseline benchmarks/baselines/core-v1.json
 ```
 
-The deterministic test suite covers routing and permissions, context selection, follow-up resolution, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
+`pnpm verify` is the canonical gate: it checks that every TypeScript source file is reachable from the CLI entry point, rejects unreferenced exports, validates documentation references, performs a clean build, rejects unused local declarations, and runs the deterministic suite. The tests cover semantic contracts and permissions, conversation provenance, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
 
 CI runs on pushes and pull requests to `main`. Real-model and live-Web behavior remain opt-in because CI must be deterministic and must not require external credentials.
 

@@ -2,6 +2,8 @@
 
 本文不重复描述当前代码，而是保留 `mini-coding-agent` 从 A 到 B 的关键变化：旧设计是什么、暴露了什么问题、如何迁移、保留了哪些兼容层，以及下一步向哪里演进。
 
+> 阅读规则：下面按时间排列的章节是各迁移阶段的历史快照，其中的“现在”“当前”只表示该阶段的 B 状态，不代表 2026-07-29 的源码。`TaskRouter`、`TaskUnderstanding`、`TaskContractBuilder`、专用 Artifact/Follow-up 解析器、`ExternalFactPolicy`、Repo 预扫描器和旧只读委派运行时都已物理删除。当前事实只以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
+
 文档分工如下：
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) 只描述当前可验证的架构事实。
@@ -16,14 +18,14 @@
 | 主题 | A：原设计 | B：当前设计 | 主要收益 |
 |---|---|---|---|
 | 任务执行 | Direct、Web、Review、Repository Analysis、AgentLoop 分开执行 | 单一 `AgentLoop` + `AgentTaskContract` | 生命周期、权限和完成性检查统一 |
-| 审查与分析 | 两套高度相似的执行模块 | 共用 `REPOSITORY_INVESTIGATION`，只区分输出契约 | 消除重复调查逻辑 |
-| 能力回答 | 模型根据当轮工具猜产品能力，局部问句特判 | `CapabilityRegistry` + 组合式意图识别 + `CapabilityTruthGuard` | 不再把“本轮未授权”说成“产品不支持” |
+| 审查与分析 | 两套高度相似的执行模块 | TaskFrame effects + 同一个 `AgentLoop`，答案形态由结构化合同表达 | 消除重复调查逻辑 |
+| 能力回答 | 模型根据当轮工具猜产品能力，局部问句特判 | TaskFrame 标记产品目标，`CapabilityRegistry` + `CapabilityTruthGuard` 校验最终能力陈述 | 不再把“本轮未授权”说成“产品不支持”，也不再重扫原始问句 |
 | 运行展示 | 零散日志、结束后输出大段 diff | `AgentRuntimeEvent` 时间线 + 可激活 Changes 卡片 + 终端 Diff Viewer | 执行可观察，代码改动按需查看 |
-| 产物追问 | “在哪里”再次交给模型解释 | 从紧邻上一轮的 `FILE_CHANGE` 确定性解析 | 避免指代漂移 |
+| 产物追问 | “在哪里”再次交给模型解释 | TaskFrame 语义指代 + Conversation 执行账本 | 既能自主消解指代，也不把旧文件或助手文字冒充为本轮产物 |
 | 文件读取 | 单次固定行数读取 | Token 预算分页 + 行/列续读 + 文件哈希 + EOF 门禁 | 能完整审查大文件和超长单行，又不一次塞满窗口 |
 | 会话压缩 | 字符阈值、关键行比例和最近尾部 | `structured-salience-v2` 分层选择、字符/Token 双预算和来源追踪 | 压缩结果更稳定、可解释、可审计 |
-| 对话一致性 | 指示词命中后只保留最近一轮，质疑旧回答时可能删掉原话 | `PRIOR_RESPONSE_AUDIT` 检索 + 可观察选择策略 + 有界一致性重试 | 能依据会话原文承认和撤回旧说法，避免改写历史 |
-| 外部事实 | Direct 依赖模型记忆，只有显式实时/Web 问法要求证据 | 前置 `ExternalFactPolicy` + Direct 草稿 `EvidenceRiskAssessor` + 动态契约升级 | 路由漏判也不能直接发布高风险事实；无工具或证据不足时不再强行补全 |
+| 对话一致性 | 指示词命中后只保留最近一轮，质疑旧回答时可能删掉原话 | TaskFrame `conversationEvidence.purpose/queries` + 可观察语义选择 + 有界一致性重试 | 能依据会话原文承认和撤回旧说法，避免改写历史 |
+| 外部事实 | Direct 依赖模型记忆，只有显式实时/Web 问法要求证据 | TaskFrame Web evidence policy + 结构化 `evidenceStatus` + 本地来源门禁 | 无工具或证据不足时诚实终止，不靠问句策略切换模式 |
 | 任务 Diff | 读取整个脏工作树 | 任务前后树快照 + 独立 Diff Artifact | 只展示当前任务真正产生的改动 |
 | 运行存储 | 宽松权限、索引无锁、审计错误向业务冒泡 | owner-only 权限 + 文件锁/原子替换 + 尾部恢复 + best-effort 观察者 | 避免泄漏、并发丢计数和副作用重复 |
 | 命令验证 | 根据命令字符串包含关系猜测试 | 结构化 executable/args 分类 | `echo npm test` 不能伪造验证通过 |
@@ -526,7 +528,7 @@ parent review
 
 写入子 Agent 不获得主工作区写权限。它先读取证据，再返回 unified diff；协调器使用现有 `PatchManager.validatePatch` 做路径和 `git apply --check` 校验，仅把补丁提案放入父 Context。审查子 Agent 在依赖成功后读取仓库和提案，给出审查结果。主 Agent 必须显式选择合入，并承担最终验证，因此既支持真正的实现分工，也保留单写者的一致性边界。
 
-默认策略改为可用而非强制使用。普通任务由模型判断是否值得拆分；用户明确要求时成为硬后置条件；`--agents` 只作为并发覆盖和兼容入口，`--agents 1`、配置 `off` 或自然语言禁用仍可以关闭。旧 `DELEGATE_READONLY` 只保留会话恢复兼容。
+默认策略改为可用而非强制使用。普通任务由模型判断是否值得拆分；用户明确要求时成为硬后置条件；`--agents` 只作为并发覆盖和兼容入口，`--agents 1`、配置 `off` 或自然语言禁用仍可以关闭。当前解析边界只会把旧模型输出的 `DELEGATE_READONLY` 归一化成 `DELEGATE` + `READ_ONLY`；运行时没有旧决策分支。
 
 ### 当时边界与下一方向
 
@@ -606,3 +608,44 @@ Git worktree 会覆盖父级当时的 staged、unstaged 和非忽略 untracked �
 - 临时 worktree 复用父级已有 `node_modules`，不允许子级安装依赖；缺失依赖时应返回可解释限制，由父级决定是否授权安装。
 - 当前冲突策略是检测并重新委派，不自动生成三方冲突解决补丁。后续可在保持用户改动优先的前提下增加受审查的三方合并。
 - 模型语义补全只在结构复杂时触发，仍需用跨语言释义、否定、条件和长会话 Eval 衡量额外 Token 成本与误授权率。
+
+## 22. 从混合语义补丁到 TaskFrame 唯一控制面
+
+### A：只有一个循环，但仍有多个“解释用户”的模块
+
+迁移到单一 AgentLoop 后，系统仍残留 TaskUnderstanding、产品能力问句分类、SubAgent 问句分类、Artifact/Follow-up 解析、外部事实策略、完整文件问句识别、Memory 任务模式和 Direct single-shot 分支。它们不一定是第二个完整执行器，却会在不同阶段重新解释原始文本：
+
+- TaskFrame Schema 失败后静默使用中性合同，可能把修改任务当成无需修改；
+- 读取仓库里已经存在的文件后，模型可能把它误报成本轮创建产物；
+- Web、Memory、能力纠错和委派各自维护关键词，修一个句式又可能破坏另一个句式；
+- 旧源码文件与导出接口虽然无人使用，TypeScript 构建仍会成功；
+- `dist/` 未清空时，删除的源码仍可能留下可执行 JavaScript。
+
+### B：模型语义、确定性边界和兼容入口各归一层
+
+最终控制面收敛为：
+
+1. 未显式提供已验证合同的 AgentLoop 每轮都让模型生成 Schema 校验的 TaskFrame，非关键资源偏好先收敛到安全范围；
+2. 结构错误只允许一次带精确错误的有界自修，仍失败则在 AgentDecision 和 Tool 之前返回 `TASK_FRAME_UNRESOLVED`；
+3. TaskFrame 统一表达仓库读写、Web、知识、验证、Conversation 目的、协作和完成条件；
+4. AgentLoop 只保留迭代式 AgentDecision 协议，没有 Direct single-shot 或旧只读委派运行分支；
+5. 产品能力纠错以 TaskFrame 的产品目标触发，协作策略只消费 `TaskFrame.collaboration`，Memory 是否召回也只消费结构化任务事实；
+6. `FINAL.evidenceStatus` 结构化表达证据满足或不足，本地门禁不再从限制性措辞猜状态；
+7. Conversation 同时提供助手原话与只读执行账本，仓库效果只以本轮 Patch、`FILE_CHANGE` 和验证事实为准；
+8. 旧结果标签、旧配置字段和旧模型委派形状只在存储/解析入口迁移，不进入当前运行时 union。
+
+本轮同时物理删除不可达源码、专用问句分类器、旧 single-shot 分支和无人引用导出，并新增四道持续门禁：
+
+- `check:architecture`：所有源码必须从 `src/cli/index.ts` 可达；
+- `check:exports`：导出声明必须被源码或测试引用；
+- `check:docs`：本地文档链接和源码路径必须存在；
+- clean build：每次构建先删除 `dist/`。
+
+因此，原始“写一个新的贪吃蛇，但旧 `snake.html` 已存在”的问题不再依赖新增一句特判：TaskFrame 必须声明 Required 写入；旧文件读取不构成本轮变更证据；提前 `FINAL` 会被 Guardrail 拒绝；TaskFrame 自身若无法解析，AgentLoop 会在零工具调用时失败。
+
+### 当前边界
+
+- fail closed 能防止误执行，不能替代可用且质量足够的模型；
+- 词法规则仍用于路径、Patch、命令、URL 血缘、输出事实冲突和检索特征，这些规则不授予能力或选择执行模式；
+- 兼容入口应保持单向归一化，不能重新扩张成并行运行时；
+- 真实模型成功率仍需要版本化 AgentBench 和重复抽样证明。

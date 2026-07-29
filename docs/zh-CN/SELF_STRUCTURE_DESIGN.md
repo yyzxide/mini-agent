@@ -108,7 +108,7 @@ Skill 仍然是声明式工作流说明，但只能指导已经被 Task Contract
 | 早期表述 | 当前实现 |
 | --- | --- |
 | Prompt 是主要行为边界 | Prompt 指导模型，本地契约和执行层负责权限 |
-| Router 选择聊天或工具执行器 | 所有任务进入 AgentLoop，Router 只映射兼容标签 |
+| Router 选择聊天或工具执行器 | 当前源码没有 Router；所有任务进入 AgentLoop，旧结果标签仅在存储读取边界兼容 |
 | 模型根据可见工具自述产品能力 | Capability Registry 提供产品事实 |
 | 长期记忆是历史摘要注入 | Memory 有类型、范围、证据、TTL、读取/写入策略 |
 | 工具路径负责写文件 | 写入必须通过契约、Patch、验证和完成性门禁 |

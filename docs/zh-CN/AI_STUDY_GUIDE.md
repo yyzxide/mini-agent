@@ -9,7 +9,7 @@
 
 ### 文档基线
 
-本指南已按 2026-07-28 当前工作区实现同步，学习时应以以下事实为准：
+本指南已按 2026-07-29 当前工作区实现同步，学习时应以以下事实为准：
 
 - Direct、Web、Review、Repository Analysis、Change 和混合任务都以 `AGENT_TASK` 共用一个 `AgentLoop`，不存在按模式拆分的任务执行器。
 - CLI 先由模型把请求与 Conversation 编译为 Schema 校验的 `TaskFrame`；源码中已经删除 `TaskRouter`、`TaskUnderstanding`、`TaskContractBuilder` 和公开控制面开关。
@@ -19,9 +19,12 @@
 - `PLAN`、TaskFrame 的显式只读/禁网/禁命令约束是确定性边界；补丁、命令、路径和网络仍由本地安全层检查。
 - `read_file` 会自动收敛过大的分页提示，真正的输入错误会返回具体字段和约束。
 - 修改效果使用 `NONE / CONDITIONAL / REQUIRED` 三态语义；Completion Contract 消费 TaskFrame 和执行证据，不再重新扫描原始问句。
-- 最新/当前 Web 任务的搜索视角、时效、权威来源、抓取和引用要求由 `TaskFrame.webEvidencePolicy` 表达；Guardrail 不再从原始问句正则推断这类证据门槛。
+- 模型通过 `TaskFrame.webEvidencePolicy` 选择普通、多源、当前或高风险证据等级，并判断查询是代表性还是排名范围；本地策略表映射具体门槛，Guardrail 不再从原始问句正则推断证据等级或排名意图。
+- Web 最终综合预留具有确定性降级终止：证据不足时交付部分结论、缺口和已检查来源，不再依赖模型自行退出循环。
+- `fetch_url` 可依据 HTTP 或 HTML meta 解码 GB2312 / GBK / GB18030 中文页面；正式 Search API 与来源页抓取能力是两个独立问题。
 - 架构回归已验证同一个 `AGENT_TASK` 可以依次 Web、读取、Patch、Command 验证并完成，并覆盖仓库内绝对路径读取、过大分页参数自动收敛、模型驱动长会话取证与逐 MCP Tool 授权。
-- 当前确定性基线为 62 个 Vitest 测试文件、510 个测试用例全部通过；旧模式专项测试已随旧实现一起删除。
+- TaskFrame 结构错误会做一次有界自修；仍无效则 AgentLoop 在任何动作前 fail closed，不能让猜测合同把原有文件误报成本轮产物。
+- 当前确定性基线以 `pnpm verify` 当次输出为准；该命令同时检查源码可达性、文档引用、干净构建、未使用声明和完整测试集，不在学习文档中写死易过期的测试数量。
 
 ## 1. 学习优先级
 
@@ -77,7 +80,7 @@
 - JSON Schema 如何向模型描述工具输入。
 - Structured Output 与“Prompt 里要求输出 JSON”的区别。
 - 为什么模型输出必须做运行时校验。
-- parse、repair、retry、fallback 的区别。
+- parse、repair、retry、fail closed 与显式预编译合同的区别。
 - 参数合法、权限允许、执行成功是三个不同层级。
 - Tool Calling 是模型选择能力；真正执行仍由宿主程序完成。
 
@@ -92,7 +95,7 @@
 - `TaskFrameResolver` 的严格语义 Schema 与 `webEvidencePolicy`
 - `AgentDecision`、Tool input 与 SubAgent protocol 的分层校验
 - `CapabilityNegotiator` 的动作到能力映射
-- `TaskConstraints` 的显式只读安全边界
+- `TaskFrame.constraints`、`AgentOperatingMode` 与 `TaskGuardrails` 的显式只读安全边界
 
 ### 典型追问
 
@@ -129,7 +132,7 @@
 - `AgentLoop`
 - `AgentState`
 - `CapabilityNegotiator`
-- `TaskConstraints`
+- `TaskFrame.constraints`
 - `TaskGuardrails`
 - `AgentOperatingMode`
 - `Plan` 模式
@@ -156,7 +159,7 @@
 -> FINAL 或触发终止条件
 ```
 
-Direct、Web、Review、Repository Analysis 与 Change 不是五套循环。它们都使用 `AGENT_TASK`；`TaskFrame` 给出所需效果和完成条件。模型选择 `web_search`、`APPLY_PATCH`、`RUN_COMMAND` 或 `DELEGATE` 本身就是能力申请；Negotiator 可以在同一 State、Session 和事件流内组合授权，任务 kind 不需要切换。`FIXED_READ_ONLY` 则表示 Plan 或明确只读要求的硬边界。
+Direct、Web、Review、Repository Analysis 与 Change 不是五套循环。它们都使用 `AGENT_TASK`；`TaskFrame` 给出所需效果和完成条件。模型选择 `web_search`、`APPLY_PATCH`、`RUN_COMMAND` 或 `DELEGATE` 本身就是能力申请；Negotiator 可以在同一 State、Session 和事件流内组合授权，任务 kind 不需要切换。Plan 使用 `FIXED_READ_ONLY`；普通执行中的显式只读要求由 `TaskFrame.constraints` 形成同样不可突破的动作边界。
 
 多 Agent 也不是循环外脚本：父 Agent 通过 `DELEGATE` 创建依赖任务，Writer 在临时 worktree 迭代，Reviewer 读取物化补丁，父级保留合入权。
 
@@ -164,8 +167,10 @@ Direct、Web、Review、Repository Analysis 与 Change 不是五套循环。它�
 
 - 模型负责结合当前请求、对话和证据解释“用户现在想做什么”，并选择下一步动作。
 - TaskFrame 是模型语义编译结果，不是本地关键词产生的 Direct/Web 模式标签。
+- TaskFrame 的非安全资源偏好先做边界归一化，结构错误执行一次模型自修；修复仍失败会在动作前终止。程序化调用方只能通过显式传入已验证合同跳过编译。
 - Capability Negotiator 根据动作声明组合能力，不按特定问句编写“如果用户说 X 就切到 Y”。
 - 本地确定性规则只承担安全、显式用户约束、输入结构和产品事实，不在多个阶段重复猜测开放式意图；完成条件只消费 TaskFrame 和实际执行证据。
+- 多轮 Conversation 同时携带助手原话和运行时执行账本；旧文件存在或被读取不等于上一轮创建，仓库效果只以成功 Patch / `FILE_CHANGE` 为准。
 - Web、知识库、仓库读取和写入是可组合能力；复合任务可以在一个合同/循环中同时要求检索证据和代码变更，纯查询才固定只读。
 - 多轮追问不继承上一轮 `WEB_ANSWER` 或 `AGENT_LOOP` 模式；当前 TaskFrame 和模型动作决定本轮能力。
 
@@ -329,7 +334,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 
 ### 当前回归重点
 
-- TaskFrame Schema、中性 fallback 和结构化 Web evidence policy。
+- TaskFrame Schema、有界自修、AgentLoop fail-closed 和结构化 Web evidence policy。
 - `read_file` 仓库内绝对路径、大参数自动收敛和完整分页覆盖。
 - 同一 `AGENT_TASK` 的 Web/读取/写入/命令组合。
 - TaskFrame 只读阻断、MCP 精确授权和最终完成证据。
@@ -424,7 +429,7 @@ Function Calling 描述模型如何选择一个宿主提供的函数；MCP 描�
 - `CommandRunner` 的危险命令拦截
 - `FetchUrlTool` 的私网和重定向限制
 - Plan 模式的工具暴露与运行时双重限制
-- `TaskConstraints` 与 `FIXED_READ_ONLY` 的不可升级边界
+- `TaskFrame.constraints`、`TaskGuardrails` 与 `FIXED_READ_ONLY` 的不可升级边界
 - `CapabilityNegotiator` 只授予能力、不代替 Permission 和 Sandbox
 - MCP 远端工具权限映射
 

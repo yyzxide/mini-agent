@@ -26,7 +26,7 @@ TaskFrame 编译器把语义记录转换成：
 
 - Capability：读、写、命令、Web、Knowledge、MCP、Delegation；
 - Evidence：仓库读取、完整文件覆盖、Web 搜索/抓取、引用；
-- Output：自然语言、Web grounded answer、Review、Plan 或 Task Result；
+- Output：普通执行统一为 `TASK_RESULT`，只读规划为 `IMPLEMENTATION_PLAN`；具体回答形态由 TaskFrame 表达；
 - Step Budget 和额外完成指令。
 
 这一步把“模型能做什么”和“产品这一轮允许什么”分开。

@@ -16,17 +16,16 @@
 
 ## 当前验证基线
 
-截至 2026-07-28，本地确定性验证基线为：
+截至 2026-07-29，仓库把 `pnpm verify` 作为唯一确定性验证基线。它依次执行：
 
-- 62 个 Vitest 测试文件；
-- 510 个自动化测试；
-- `npm test -- --run` 实际运行全部通过；
-- TypeScript 构建通过；
-- `noUnusedLocals` / `noUnusedParameters` 检查通过；
-- `git diff --check` 通过；
-- GitHub Actions 在 `main` 的 push 和 pull request 上执行安装、构建与测试。
+- 从 `src/cli/index.ts` 建立 TypeScript import graph，拒绝不可达源码和无法解析的本地 import，并禁止已删除控制面文件或旧模式标识在迁移边界之外重新出现；
+- 检查源码导出是否至少被源码或测试引用，防止“文件可达但旧接口无人使用”；
+- 校验 README 与 `docs/` 中的本地链接和源码路径引用；
+- 清空 `dist/` 后重新执行 TypeScript 构建，避免旧编译产物伪装成当前功能；
+- 开启 `noUnusedLocals` / `noUnusedParameters` 检查；
+- 运行完整 Vitest 测试集。
 
-测试数量相比迁移前减少，是因为删除了旧 Router、TaskUnderstanding、LocalReply 及双控制面专用测试，并把旧 CLI 回归替换为单控制链架构回归。更重要的是覆盖范围包含权限边界、失败路径和端到端 AgentLoop，而不只是工具函数。
+GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm verify`，避免本地与 CI 漂移。测试数量不再写死在长期文档中；它会随删除重复用例或增加结构型回归而变化，实际结果以当次命令输出为准。
 
 ## 已完成的核心闭环
 
@@ -51,11 +50,14 @@
 - 模型负责解释目标和选择下一步动作，本地代码负责授权与执行；
 - 显式只读、禁网、禁命令约束不能被后续模型动作突破；
 - 写入、命令、Web 和委派是可组合效果，不是需要切换的互斥模式；
-- 非法 JSON 或不可用的 TaskFrame 使用中性自适应 fallback，不退回正则自然语言路由；
+- 模型填写的最近消息数、代理数等资源偏好会收敛到本地边界，不会因非关键越界丢弃整份任务语义；
+- 非法 JSON 或 Schema 会先触发一次带精确错误的模型自修；仍不可用时 AgentLoop 会在任何动作或工具之前以 `TASK_FRAME_UNRESOLVED` 失败，不退回正则自然语言路由，也不拿猜测合同继续执行；
 - Completion Contract 消费 TaskFrame 和实际证据，不在结束阶段重新猜测原始问句；
 - 路径沙箱、危险命令、Patch 检查、权限确认和验证时序仍由确定性内核掌控。
 
-旧 `TaskUnderstanding`、`TaskUnderstandingResolver`、`TaskRouter`、`TaskContractBuilder`、`LegacyControlPlane` 和本地固定问句回复器已经从源码物理删除。配置中也不再公开控制面开关；加载旧配置时只会丢弃旧字段。
+旧 Router、TaskUnderstanding、TaskContractBuilder、LocalReply、专用 Follow-up/Artifact 解析器、外部事实问句策略、Repo 预扫描器和只读委派别名已经从源码物理删除。配置中也不再公开控制面开关；加载旧配置时只会丢弃旧字段。`check:architecture` 不仅阻止新的不可达源码，还会拒绝恢复这些旧文件，并限制旧持久化标签只能出现在明确的数据迁移边界。
+
+能力协商接口也不再接收原始 `userGoal`：它只消费已验证 Task Contract、模型的结构化 Decision 和工具元数据。显式 `/compact` 的兼容压缩层不再按中英文“必须/不要/must”等词判断约束；当前约束只来自 TaskFrame 的结构化字段。
 
 ### 3. 可验证的仓库执行
 
@@ -101,22 +103,27 @@ Writer 的命令允许列表是应用层控制，不等同于容器或操作系�
 
 Context 使用字符与 Token 双预算，并记录选中、裁剪和排除原因。运行时先用中性的最近消息窗口构建 TaskFrame；当模型声明需要旧陈述、决策、产物、约束或话题证据时，由 `TaskFrame.conversationEvidence.queries` 从完整 Session 中选择有界语义匹配及其相邻上下文。
 
+历史助手消息与执行事实分开保存：助手消息说明上一轮输出了什么，`AGENT_CHECKPOINT` / `FILE_CHANGE` 说明上一轮是否真的修改仓库以及修改了哪些文件。后续 TaskFrame 和 AgentDecision 会同时看到运行时生成的只读执行账本；若文字与账本冲突，以真实 Patch 证据为准。因此“仓库里原本就有这个文件”或“本轮读取了它”不能被解释成“本轮创建了它”。
+
 ### 6. Web 证据闭环
 
 Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效候选比较、任务相关证据阈值和引用白名单。
 
-搜索视角数、抓取数、独立域名、引用、时效与权威来源要求由模型写入 `TaskFrame.webEvidencePolicy`，Guardrail 只执行结构化策略，不再从原始问句正则推断“最新版任务”。
+模型只向 `TaskFrame.webEvidencePolicy` 写入 `ORDINARY / CORROBORATED / CURRENT / HIGH_STAKES` 语义等级、依据和 `REPRESENTATIVE / SUPERLATIVE` 查询范围。本地策略表统一映射搜索视角、抓取数、独立域名、引用、时效与权威来源要求；模型不能用任意数值放大硬性后置条件，Guardrail 也不从原始问句正则推断“最新版任务”或“排名任务”。
 
 已处理的典型失败包括：
 
 - 搜索传输失败后反复改写同义查询；
 - 猜测可能存在的官方 URL；
 - 搜索成功但抓取证据不足；
+- 普通联网请求被错误升级成严格多域名核验；
 - 搜索排名被误当成时间排序；
 - Guardrail 只拒绝、不告诉 Agent 下一步；
 - 接近步数上限时继续调用工具而没有预留综合回答。
 
-底层搜索服务的召回质量仍然会影响结果。Agent 可以改善查询、证据选择和诚实降级，但无法从未召回的页面中恢复事实。
+最终综合预留现在具有确定性降级终止：普通任务已有公开候选时交付带限制的部分答案，严格任务证据不足时交付 `success=false` 的限制性总结，两者都不会继续消耗步骤。`fetch_url` 同时支持从 HTTP 或 HTML meta 识别旧中文字符集。
+
+底层搜索服务的召回质量仍然会影响结果。正式 Search API 可以提升稳定性，但不能自动绕过来源页 403；Agent 可以改善查询、证据选择和诚实降级，但无法从未召回或不可读取的页面中恢复事实。
 
 ### 7. 可观察性与本地审计
 
@@ -155,14 +162,14 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 
 - 真实模型任务成功率尚未形成足够大的公开 benchmark。
 - 自动化测试主要证明运行时确定性，不代表所有模型都能稳定规划。
-- TaskFrame 和动作选择仍依赖模型质量；中性 fallback 保证架构不倒退到硬编码路由，但不能替代可用模型。
+- TaskFrame 和动作选择仍依赖模型质量；语义编译器不可用时 AgentLoop 会明确失败，因此不会误执行，但也不能在模型服务中断时完成任务。
 - 缺少按模型、任务类别和重复次数长期维护的成功率/成本趋势。
 
 ### 语义与控制边界
 
 - 多 Agent 要求进入 `TaskFrame.collaboration`，长会话取证进入 `TaskFrame.conversationEvidence`，Web 时效要求进入 `TaskFrame.webEvidencePolicy`。
 - 系统使用中性的最近窗口解析 TaskFrame，再根据模型给出的语义查询从完整 Session 有界召回历史消息和相邻上下文；它不是向量检索。
-- 产品元事实校验、危险命令、路径、URL 血缘和 Memory 召回仍有确定性规则，但这些规则不选择 Direct/Web/Edit 执行模式。
+- 产品元事实冲突、危险命令、路径、URL 血缘和 Memory 证据过滤仍有确定性规则；是否属于产品问题、是否召回历史记忆以及需要哪些能力只消费 TaskFrame，不再由这些规则选择 Direct/Web/Edit。
 - 配置中的 MCP Tool 可被模型逐个发现和申请；授权精确到 `<server>__<tool>`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准。
 
 ### 安全与隔离

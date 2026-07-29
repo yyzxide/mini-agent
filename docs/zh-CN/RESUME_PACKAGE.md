@@ -6,7 +6,7 @@
 
 稳妥版本：
 
-> 独立实现一个本地 AI Coding Agent CLI，使用统一 AgentLoop 和任务契约管理自然语言理解、最小权限工具调用、上下文选择、仓库修改、验证、执行审计与隔离式多 Agent 协作。
+> 独立实现一个本地 AI Coding Agent CLI，使用模型 TaskFrame、统一 AgentLoop 和任务契约管理语义理解、最小权限工具调用、上下文选择、仓库修改、验证、执行审计与隔离式多 Agent 协作。
 
 不要使用：
 
@@ -20,7 +20,7 @@
 
 > **mini-coding-agent｜TypeScript / Node.js**
 >
-> 设计并实现本地 AI Coding Agent CLI，以单一 `AgentLoop` 和 `AgentTaskContract` 统一普通回答、Web 研究、仓库分析与代码修改；构建混合语义理解、最小权限工具系统、上下文压缩、证据完成性门禁和 JSONL 审计链路。实现 Writer/Reviewer 子代理在临时 Git worktree 中隔离开发、验证和审查，由主 Agent 基于基线指纹安全合入冲突补丁。
+> 设计并实现本地 AI Coding Agent CLI，以 Schema 约束的模型 `TaskFrame` 和单一 `AgentLoop` 统一普通回答、Web 研究、仓库分析与代码修改；构建最小权限工具系统、上下文压缩、证据完成性门禁和 JSONL 审计链路。实现 Writer/Reviewer 子代理在临时 Git worktree 中隔离开发、验证和审查，由主 Agent 基于基线指纹安全合入冲突补丁。
 
 ### 后端 / 平台 / DevTools 方向
 
@@ -40,9 +40,9 @@
 
    任务差异由能力、证据、输出和步数契约表达，不维护多套重复执行器。
 
-2. **混合语义与权限安全**
+2. **统一语义编译与权限安全**
 
-   简单请求确定性处理，复杂否定/条件/间接动作使用 Schema 约束的模型消歧；本地合并策略阻止模型越过显式只读边界。
+   所有开放式请求都由模型编译为 Schema 校验的 TaskFrame；非法结果有界修复后仍失败则停止执行，本地契约与 Guardrail 阻止模型越过只读、权限和证据边界。
 
 3. **隔离式多 Agent**
 
@@ -73,7 +73,7 @@ RAG、Memory、MCP、Skill 可以作为追问时的扩展能力，不建议在�
 1. 问题：模型输出代码不等于可靠完成仓库任务。
 2. 约束：权限、上下文、外部证据、副作用和失败恢复。
 3. 方案：AI TaskFrame → Task Contract → AgentLoop。
-4. 难点：混合语义、完整文件覆盖、验证时序、多 Agent worktree、冲突处理。
+4. 难点：语义契约、完整文件覆盖、验证时序、多 Agent worktree、冲突处理。
 5. 结果：确定性测试、AgentBench、三组现场演示。
 6. 边界：应用层沙箱、真实模型成功率和搜索提供商质量。
 

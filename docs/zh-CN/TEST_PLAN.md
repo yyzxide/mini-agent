@@ -4,9 +4,10 @@
 
 当前验证基线：
 
+- `pnpm check:architecture` 会拒绝不可达源码、无法解析的本地 import、已删除控制面文件复活，以及旧执行模式标识越过持久化兼容边界。
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- `corepack pnpm test` 全量 Vitest 通过；具体数量和验证日期只在[项目现状](PROJECT_STATUS.md#当前验证基线)维护。
+- `corepack pnpm test` 全量 Vitest 通过；具体数量以当次命令输出为准，不在长期文档中写死。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -77,11 +78,11 @@
 
 覆盖：
 
-- 运行日志写入 `.mini-agent/logs/YYYY-MM-DD.jsonl`，包含代码审查阶段日志，以及补充相关文件加载记录。
+- 运行日志写入 `.mini-agent/logs/YYYY-MM-DD.jsonl`，记录统一 AgentLoop 的结构化事件与诊断。
 - 日志读取和按数量截断。
 - API key、authorization、token、password 等敏感字段脱敏。
 - 任务变更日志写入 `.mini-agent/change-log.jsonl`。
-- 变更日志记录任务、session、执行模式、成功失败、摘要、当前变更文件、diff stat 和测试结果；代码审查任务还要记录 review file、supplementalFiles、findings、rejectedFindings 和 verdict。
+- 新变更日志只写 `AGENT_LOOP / PLAN`，记录任务、session、成功失败、摘要、任务级变更文件、diff stat、测试结果和通用执行 metadata；读取边界仍兼容旧模式与旧 review metadata。
 - `mini-agent logs`、`mini-agent changes`、`mini-agent doctor` 能输出结构化 JSON。
 
 ### 1.4.2 Long-term Memory
@@ -92,13 +93,13 @@
 - 重复索引同一个 session 不产生重复 memory id。
 - 支持中英文关键词抽取。
 - 支持本地向量式相似度 + 关键词混合检索。
-- `MemoryQueryBuilder` 能识别代码任务、联网问题、运行错误和会话记忆问题。
-- `MemoryReranker` 能根据任务模式、同 session、时间新鲜度和实体命中调整排序。
+- `MemoryQueryBuilder` 只规范化 TaskFrame 选择的语义查询并提取通用关键词、实体和最近上下文，不再维护代码/Web/错误等第二套任务分类器。
+- `MemoryReranker` 根据混合召回分数、同 session、时间新鲜度、实体和来源调整排序，不使用旧任务模式标签。
 - `MemoryEvidenceSelector` 能限制单 session 结果过度集中，并标记证据选择原因。
 - `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
 - `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
-- 普通回答不主动召回长期记忆；仓库任务只按策略选择稳定偏好、项目约定和架构决策，显式历史召回才允许检索已验证结果。实时 Web 问题和易过期赛果必须禁用历史事实召回。
+- 普通回答不主动召回长期记忆；TaskFrame 标记的仓库任务只选择稳定偏好、项目约定和架构决策，`target=SESSION` 或结构化历史取证才允许检索已验证结果，`webEvidence=true` 禁用历史事实召回。
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
 - `structured-salience-v2` compaction 同时受字符与 Token 预算控制，分层保留用户硬约束、最近对话和执行证据。
 - 超长工具结果会单条裁剪，重复记录会去重；压缩正文保留来源 id，trace 能解释每条选择的分层、原因和裁剪状态。
@@ -122,13 +123,14 @@
 - 仓库 `skills/` 与本地 `.mini-agent/skills/` 发现、CRLF 解析和同名优先级。
 - metadata 缺失、非法名称、超长或逃逸路径不会进入有效 Skill 列表。
 - `$skill-name` 显式选择、trigger 自动匹配、稳定排序和数量上限。
-- Skill 上下文明确“当前用户指令和仓库事实优先”，且覆盖所有回答/任务模式。
+- Skill 上下文明确“当前用户指令和仓库事实优先”，且覆盖所有 TaskFrame 任务。
 
 ### 1.5 LLM
 
 覆盖：
 
 - OpenAI-compatible 请求格式。
+- 专用 `compileTaskFrame` 语义编译请求与 AgentDecision `chat` 请求相互分工，不存在 Direct/Web 文本完成模式。
 - API key header。
 - baseUrl 拼接。
 - 超时配置。
@@ -142,16 +144,18 @@
 
 覆盖：
 
-- CLI、程序化 `AgentLoop` 和 AgentHarness 都先请求受 Schema 约束的 `TaskFrame`，没有公开控制面开关。
+- CLI 和 AgentHarness 请求受 Schema 约束的 `TaskFrame`；程序化 `AgentLoop` 可传入已验证 Task Contract，也可走相同编译链。没有公开控制面开关。
 - 旧配置中的 `controlPlane` 字段只会被丢弃，不能启用另一条路由或运行时。
 - `TaskFrame` 包含 objective、target、answer、effects、`webEvidencePolicy`、constraints、collaboration、conversation evidence、completion criteria、confidence 和 rationale。
-- 非法 TaskFrame 使用中性自适应 fallback，不能回退到自然语言正则路由。
+- TaskFrame 的模型资源偏好越界时在本地做边界归一化；结构错误先执行一次有界模型自修。仍失败时 AgentLoop 必须在任何 AgentDecision 或 Tool 前返回 `TASK_FRAME_UNRESOLVED`，不能回退到自然语言正则路由或猜测合同。
 - bootstrap 和编译后的合同都保持 `AGENT_TASK`；Web、知识库、仓库读写、命令和委派是可组合效果。
 - `CapabilityNegotiator` 可以在一次 `AGENT_TASK` 中依次授权 Web、读取、Patch、Command 和精确 MCP Tool。
 - TaskFrame 的显式只读、禁网、禁命令、禁委派和禁 MCP 约束必须拒绝相应动作。
-- 最新/当前任务的搜索视角、抓取数、域名、引用、时效与权威来源要求来自 `webEvidencePolicy`；Guardrail 不得重新用原始问句正则决定证据门槛。
+- 模型只选择 `webEvidencePolicy.profile/basis/ranking`；普通、多源、当前和高风险等级由本地策略表映射为搜索、抓取、域名、引用、时效与权威来源门槛，`ranking` 决定搜索查询是否允许排名词。
+- 模型附带的旧版或任意数值字段不能放大普通任务的证据门槛；Guardrail 不得重新用原始问句正则决定证据等级。
 - 多 Agent 的 requirement、writer proposal、review 和 requestedAgents 由 `TaskFrame.collaboration` 表达。
 - 当 `conversationEvidence.requiresHistory` 为真时，模型语义查询从完整 Session 有界选择旧消息和相邻上下文；仓库 Context 不按原句关键词预加载。
+- Conversation 从 `AGENT_CHECKPOINT` / `FILE_CHANGE` 携带上一轮只读执行账本；旧助手文字与真实修改证据冲突时必须以后者为准。
 - MCP metadata 作为不可信数据进入 TaskFrame；每次只授权模型选择的精确 `<server>__<tool>`。
 - 端到端覆盖 TaskFrame -> `web_search` -> `fetch_url` -> `read_file` -> `APPLY_PATCH` -> `RUN_COMMAND` -> `FINAL`。
 - 仓库内绝对路径的 `read_file` 必须成功；超大 `maxLines` / `maxTokens` 自动收敛，负数、错误类型和越界路径返回具体错误。
@@ -160,6 +164,7 @@
 
 - `AnswerQualityPolicy` 消费 TaskFrame 的答案形态和深度。
 - `NONE / CONDITIONAL / REQUIRED` 修改语义由 TaskFrame 表达；无缺陷的条件任务可以只读完成，有 Patch 时必须验证。
+- 已存在或仅被读取的文件不能满足新的创建/写入请求；没有本轮成功 Patch 时，`FINAL` 不得声称文件由本轮创建或修改。
 - 子任务协议覆盖 `READ_ONLY`、`PROPOSE_CHANGES` 和依赖前序 Writer 的 `REVIEW_CHANGES`；Writer 在临时 worktree 修改和验证，但不能直接改变主工作区。
 - 主 Agent 只有在收到完成的 patch proposal 后才能执行 `APPLY_DELEGATED_PATCH`，并且合入后仍必须满足父级验证门禁。
 - 子 Agent 的任务开始、worktree、读工具、Patch、受限验证命令、任务完成、变更文件和依赖关系会进入统一终端事件流。
@@ -176,9 +181,8 @@
 - 说明历史修改、询问使用方式或询问“是否需要修改”不得因为历史动作词产生强制 Patch。
 - 从 Web 动作继续选择 `read_file` 和 `APPLY_PATCH` 时保持同一个 `AGENT_TASK`，不能要求用户重新发起“编辑模式”任务。
 - 服务商 `reasoning_content` 只产生“私有字段可用”的遥测；终端显示 reasoning token、决策理由和工具证据，不显示原始隐藏思维链。
-- 旧 `DELEGATE_READONLY` 会话记录仍可解析和恢复，但新 Prompt 只公开 `DELEGATE`。
-- 英文关键词按词边界匹配，避免 `latest` 被误判成 `test`。
-- 覆盖 `django`/`go`、`websocket`/`web`、项目管理/项目仓库等词汇碰撞，以及 `.txt`、`.mjs` 等普通文件修改，防止子串和有限样例表制造误路由。
+- 解析边界会把旧模型输出的只读委派 Decision 归一化为当前 `DELEGATE` + `READ_ONLY`；运行时和新 Prompt 只有一种委派分支。
+- 对同一目标使用中英文、释义、否定和条件表达生成 TaskFrame 回归，防止重新引入按关键词或子串选择 Direct/Web/Edit 的本地路由。
 
 ### 1.7 Conversation 与 Web 证据
 
@@ -186,13 +190,14 @@
 
 - TaskFrame 使用最近 Conversation，并可通过语义查询选择更早证据。
 - 当前请求始终是权威目标，旧消息只作为上下文或历史证据。
-- 模型否认可见旧原话时触发一次有界修订；再次冲突时使用只判断“说过什么”、不判断外部真伪的安全回退。
+- 仅当 TaskFrame 标记 `PRIOR_RESPONSE_AUDIT` 时检查最终答复；若模型否认可见旧原话，运行时直接使用只判断“说过什么”、不判断外部真伪的记录型安全纠正。
 - Web 行为由 TaskFrame evidence policy 约束：先搜索、再抓取、满足来源和引用要求。
-- 首个搜索查询必须保持用户范围；“知名”不能被改写成未请求的“最知名 / most famous / top / best”排名。
+- 首个搜索查询必须遵守 TaskFrame 范围；`ranking=REPRESENTATIVE` 时不能引入“最知名 / most famous / top / best”，`ranking=SUPERLATIVE` 时允许排名查询。
 - `fetch_url` 只接受用户给出的 URL 或成功搜索返回的精确 URL；搜索失败后猜测来源地址必须在执行前拦截。
-- `fetch_url` 对非 2xx、WAF JSON、CAPTCHA、安全验证和登录壳返回结构化失败，不能让 HTTP 200 的反爬页面满足证据门槛。
+- `fetch_url` 对非 2xx、WAF JSON、CAPTCHA、安全验证和登录壳返回结构化失败，不能让 HTTP 200 的反爬页面满足证据门槛；HTTP / HTML 声明的 GB2312、GBK、GB18030 页面必须正确解码。
 - Web 最终引用必须至少包含一个真正抓取过的页面；只在搜索结果出现的候选 URL 不算已检查来源。
-- 搜索或抓取证据不足时允许明确限制性答复并正常结束，不允许编造实时事实，也不能因“必须成功搜索”陷入连续失败死锁。
+- 搜索或抓取证据不足时必须确定性进入限制性终局，不允许编造实时事实，也不能因模型反复提交 `success=true` 而耗尽最大步数。
+- 证据不足终局必须由结构化 `FINAL.evidenceStatus=INSUFFICIENT` 表达；仅在自然语言里出现“无法核验”不能绕过完成门禁。
 - 重复的相同 Web 工具调用、provider/transport 失败后的等价换词重试由运行时拦截。
 
 ### 1.8 AgentLoop
@@ -222,8 +227,8 @@
 - Harness 能校验成功状态、diff 内容和文件内容。
 - Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
 - stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call。
-- 普通 Web 问题没有可读正文时进入证据不足回答；抓取数量和独立域名门槛由 Task Contract 按声明风险决定，测试不得把固定“双来源”误写成所有实时问题的唯一规则。
-- Web 答案中出现本轮来源列表之外的 URL 时必须触发重写；重写仍引用未知 URL 时由本地拦截。
+- 普通 Web 问题没有可读正文时进入证据不足回答；普通等级映射为单来源，当前等级要求多搜索视角与精确权威来源，明确多源和高风险等级才要求双来源/双域名。最终综合阶段即使模型继续提交不合规成功答案，也必须一次降级结束。
+- Web 答案必须引用本轮真正抓取的 URL；不满足时 Guardrail 把具体缺口反馈给同一 AgentLoop，最终仍不合规则失败或进入证据不足终局。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
 - 后续真实场景可以沉淀成 scenario，不再完全依赖人工 CLI 试用。
 
@@ -231,12 +236,10 @@
 
 覆盖：
 
-- `npm/pnpm/yarn` 找不到 `package.json` 时识别为运行目录错误。
-- `command not found` 识别为命令不存在或 PATH 问题。
-- `Port ... already in use` / `EADDRINUSE` 识别为端口占用。
-- `ECONNREFUSED host:port` 识别为依赖服务未启动或地址错误。
-- `EACCES` / `Permission denied` 识别为权限不足。
-- 普通聊天文本不能误判为错误诊断。
+- `doctor` 检查 Node、Git、ripgrep、包管理器、Git 仓库、配置、Session、日志和变更记录。
+- 配置与 MCP 加载失败保留具体错误并脱敏。
+- AgentLoop 的命令、工具、协议与 Guardrail 错误保持结构化代码和原始上下文。
+- 项目不再维护基于自然语言错误文本的 `ErrorClassifier`；评测失败类别只依据实际运行记录和明确错误代码。
 
 ### 1.10 对话级回归集
 
@@ -249,7 +252,7 @@
 - 当前请求与旧 Session 冲突时以当前请求为准；需要较早原话时由 `conversationEvidence` 语义召回。
 - Tool/Patch/Command decision 不能作为 assistant 自然语言消息污染后续 Conversation。
 - “Kanye West 有哪些知名歌曲”显式联网时，查询不得把“知名”强化为“最知名”。
-- 最新模型 TaskFrame 必须声明 `freshness=CURRENT`、`authority=REQUIRED` 和至少两个搜索视角；Guardrail 据此要求权威检索、精确候选抓取和可见时效证据。
+- 最新模型 TaskFrame 必须选择 `webEvidencePolicy.profile=CURRENT` 和对应语义依据；本地策略解析为 `freshness=CURRENT`、`authority=REQUIRED` 与至少两个搜索视角，Guardrail 据此要求权威检索、精确候选抓取和可见时效证据。
 - 搜索质量能力必须对 provider 无关：候选归一化、跨源 URL 去重、fallback 和时效重排在通用 Pipeline 中完成。
 - 最后 2 次综合预留中模型可见工具为空，运行时拒绝继续搜索、猜 URL、PLAN 或 ASK_USER。
 - 数量答案不能用相邻类别替代用户请求的类别；无稳定总数时说明定义、范围、时间点或披露限制。
@@ -372,6 +375,9 @@ mini-agent
 ## 3. 提交前命令
 
 ```bash
+pnpm check:architecture
+pnpm check:exports
+pnpm check:docs
 pnpm build
 pnpm typecheck
 pnpm lint:unused

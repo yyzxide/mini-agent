@@ -7,10 +7,7 @@
 ```bash
 corepack enable
 pnpm install --frozen-lockfile
-pnpm build
-pnpm typecheck
-pnpm lint:unused
-pnpm test
+pnpm verify
 pnpm bench -- --baseline benchmarks/baselines/core-v1.json
 git diff --check
 ```
@@ -116,7 +113,7 @@ mini-agent run "只分析 src/agent/AgentLoop.ts，不要修改文件" --verbose
 
 预期：
 
-- Repository Investigation；
+- TaskFrame 目标为 `REPOSITORY`，效果保持只读；
 - 允许仓库读取；
 - 禁止 Patch 和命令；
 - 工作区不变。
@@ -129,10 +126,12 @@ mini-agent run "不是让你只分析，发现问题就直接修复并验证" --
 
 预期：
 
-- 触发复杂语义补全；
+- TaskFrame 正确表达复杂否定，且没有本地关键词路由；
 - 结构化语义结果进入事件；
 - 写权限只在最终语义一致时授予；
 - 不依赖固定完整问句。
+
+TaskFrame 的一次有界修复和 fail-closed 使用自动化夹具验证，不能指望一次真实模型手工运行同时覆盖三个互斥分支。
 
 ### 条件修改
 
@@ -305,6 +304,6 @@ git status --short
 
 1. 只读与修改权限差异；
 2. Writer → Reviewer → Parent Merge；
-3. Artifact 追问与 `/compact`。
+3. 跨轮产物指代、执行账本与 `/compact`。
 
 Web、MCP 和真实 Embedding 不作为唯一主演示，避免外部环境决定现场结果。
