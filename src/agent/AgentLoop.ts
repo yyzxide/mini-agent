@@ -49,12 +49,13 @@ import {
   type PriorResponseConsistencyViolation,
 } from "./PriorResponseTruthGuard.js";
 import {
+  createDefaultAgentTaskContract,
   isToolAllowedByTaskContract,
-  selectToolsForTaskContract,
 } from "./AgentTaskContract.js";
-import { buildAgentTaskContract } from "./TaskContractBuilder.js";
-import { routeTask } from "./TaskRouter.js";
-import type { ConversationMessage } from "../session/ConversationHistory.js";
+import {
+  estimateConversationTokens,
+  type ConversationMessage,
+} from "../session/ConversationHistory.js";
 import { redactSecrets } from "../utils/logger.js";
 import type {
   AgentRuntimeEvent,
@@ -63,13 +64,17 @@ import type {
   RuntimeLlmUsage,
 } from "../observability/AgentRuntimeEvent.js";
 import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
-import { assessEvidenceRisk } from "./EvidenceRiskAssessor.js";
-import { classifySubAgentIntent } from "./SubAgentIntent.js";
+import { resolveContractSubAgentIntent } from "./SubAgentIntent.js";
 import { fingerprintWorkingTree } from "./SubAgentWorktree.js";
 import {
-  resolveTaskUnderstanding,
-  shouldUseSemanticRefinement,
-} from "./TaskUnderstandingResolver.js";
+  negotiateCapabilities,
+  selectToolsForCapabilityNegotiation,
+  type CapabilityUpgrade,
+} from "./CapabilityNegotiator.js";
+import { resolveTaskFrame } from "../runtime/TaskFrameResolver.js";
+import { compileTaskFrameContract } from "../runtime/TaskFrameContract.js";
+import { selectTaskFrameConversation } from "../runtime/TaskFrameConversationSelector.js";
+import type { TaskFrame } from "../runtime/TaskFrame.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -98,6 +103,7 @@ export interface AgentRunInput {
   multiAgent?: MultiAgentPolicy;
   taskContract?: AgentTaskContract;
   conversation?: ConversationMessage[];
+  conversationCorpus?: ConversationMessage[];
   conversationTrace?: RuntimeConversationTrace;
   followUpResolution?: ArtifactFollowUpResolution;
 }
@@ -113,6 +119,7 @@ export interface AgentRunResult {
   subAgents?: number;
   taskKind: AgentTaskContract["kind"];
   outputKind: AgentTaskContract["outputKind"];
+  resultMode: AgentTaskContract["resultMode"];
   diffArtifactId?: string;
   diffFileCount?: number;
   diffAdditions?: number;
@@ -132,6 +139,16 @@ interface StepOutcome {
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES = 3;
 const MAX_REPEATED_DECISIONS = 3;
+const MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES = 2;
+
+function taskFrameOperation(frame: TaskFrame): string {
+  if (frame.effects.repositoryWrite !== "NONE") return "CHANGE_REPOSITORY";
+  if (frame.effects.knowledgeEvidence) return "QUERY_KNOWLEDGE";
+  if (frame.effects.webEvidence) return "RESEARCH";
+  if (frame.effects.repositoryRead) return "ANALYZE_REPOSITORY";
+  if (frame.target === "PRODUCT" || frame.target === "SESSION") return "LOCAL_STATE";
+  return "ANSWER";
+}
 
 export class AgentLoop {
   private readonly repoPath: string;
@@ -178,64 +195,89 @@ export class AgentLoop {
     }
 
     const operatingMode = input.operatingMode ?? "EXECUTE";
-    const inferredContract = buildAgentTaskContract({
-      userGoal,
-      route: routeTask(originalUserGoal),
-      operatingMode,
-      multiAgentEnabled: input.multiAgent?.enabled === true,
-    });
-    // Programmatic callers receive the same least-privilege semantic contract
-    // as the CLI. Omitting a contract must never silently grant repository
-    // writes or command execution.
-    let taskContract = input.taskContract ?? inferredContract;
+    // CLI and programmatic callers share the same least-privilege TaskFrame
+    // bootstrap. No natural-language router exists before the model frame.
+    let taskContract = input.taskContract ?? createDefaultAgentTaskContract();
     const sessionId = await this.ensureSession(originalUserGoal, input.sessionId, operatingMode);
     await this.emit({ type: "session", sessionId });
     let understandingMetrics: LlmCallMetrics[] = [];
     let understandingDurationMs = 0;
     let understandingEvent: Extract<AgentRuntimeEvent, { type: "understanding" }> | undefined;
     if (
-      taskContract.deterministicAnswer === undefined
-      && taskContract.understanding
-      && shouldUseSemanticRefinement(originalUserGoal, taskContract.understanding)
+      taskContract.taskFrame === undefined
     ) {
       const startedAt = Date.now();
-      const resolved = await resolveTaskUnderstanding({
+      const resolved = await resolveTaskFrame({
         userGoal,
         llmClient: this.llmClient,
-        deterministic: taskContract.understanding,
+        availableTools: this.availableTools,
         ...(input.conversation ? { conversation: input.conversation } : {}),
       });
       understandingDurationMs = Date.now() - startedAt;
       understandingMetrics = drainLlmCallMetrics(this.llmClient);
-      if (resolved.source === "MODEL_REFINED") {
-        const rebuilt = buildAgentTaskContract({
-          userGoal,
-          route: routeTask(originalUserGoal, resolved.understanding),
-          operatingMode,
-          forceIterative: taskContract.executionStrategy === "ITERATIVE",
-          multiAgentEnabled: input.multiAgent?.enabled === true,
+      taskContract = compileTaskFrameContract({
+        frame: resolved.frame,
+        operatingMode,
+        multiAgentAvailable: input.multiAgent?.enabled === true
+          && this.subAgentCoordinator !== undefined,
+      });
+      if (
+        resolved.frame.collaboration.requestedAgents !== null
+        && input.multiAgent?.enabled === true
+      ) {
+        input = {
+          ...input,
+          multiAgent: {
+            ...input.multiAgent,
+            maxConcurrency: resolved.frame.collaboration.requestedAgents,
+            maxTasksPerRun: Math.max(
+              input.multiAgent.maxTasksPerRun,
+              resolved.frame.collaboration.requestedAgents,
+            ),
+          },
+        };
+      }
+      if (input.conversationCorpus?.length) {
+        const selection = selectTaskFrameConversation({
+          messages: input.conversationCorpus,
+          frame: resolved.frame,
         });
-        taskContract = {
-          ...rebuilt,
-          instructions: [...new Set([...rebuilt.instructions, ...taskContract.instructions])],
+        input = {
+          ...input,
+          conversation: selection.messages,
+          conversationTrace: {
+            totalMessages: input.conversationCorpus.length,
+            selectedMessages: selection.messages.length,
+            estimatedInputTokens: input.conversationTrace?.estimatedInputTokens
+              ?? estimateConversationTokens(input.conversationCorpus),
+            estimatedOutputTokens: estimateConversationTokens(selection.messages),
+            truncated: selection.messages.length < input.conversationCorpus.length,
+            focusedOnLatestTurn: false,
+            selectionStrategy: "TASK_FRAME_RETRIEVAL",
+            matchedAssistantMessages: selection.matchedAssistantMessages,
+            roles: selection.messages.map((message) => message.role),
+          },
         };
       }
       understandingEvent = {
         type: "understanding",
-        source: resolved.source,
-        operation: resolved.understanding.operation,
-        target: resolved.understanding.target,
-        confidence: resolved.understanding.confidence,
+        source: resolved.source === "MODEL" ? "MODEL_TASK_FRAME" : "MODEL_FALLBACK",
+        operation: taskFrameOperation(resolved.frame),
+        target: resolved.frame.target,
+        mutationRequirement: resolved.frame.effects.repositoryWrite,
+        confidence: resolved.frame.confidence,
         reason: resolved.reason,
       };
-    } else if (taskContract.understanding) {
+    } else if (taskContract.taskFrame) {
+      const frame = taskContract.taskFrame;
       understandingEvent = {
         type: "understanding",
-        source: "DETERMINISTIC",
-        operation: taskContract.understanding.operation,
-        target: taskContract.understanding.target,
-        confidence: taskContract.understanding.confidence,
-        reason: "High-confidence deterministic safety interpretation.",
+        source: "MODEL_TASK_FRAME",
+        operation: taskFrameOperation(frame),
+        target: frame.target,
+        mutationRequirement: frame.effects.repositoryWrite,
+        confidence: frame.confidence,
+        reason: frame.rationale,
       };
     }
 
@@ -252,7 +294,6 @@ export class AgentLoop {
       operatingMode,
       ...(recoveredCheckpoint ? { recoveredCheckpoint } : {}),
       multiAgentEnabled: input.multiAgent?.enabled === true
-        && taskContract.capabilities.delegation
         && this.subAgentCoordinator !== undefined,
       taskContract,
     });
@@ -264,11 +305,12 @@ export class AgentLoop {
       outputKind: taskContract.outputKind,
     });
     if (understandingDurationMs > 0) {
-      await this.emit({ type: "llm", phase: "started", mode: "task_understanding" });
+      const understandingMode = "task_frame";
+      await this.emit({ type: "llm", phase: "started", mode: understandingMode });
       await this.recordLlmUsage(
         state,
         understandingMetrics,
-        "task_understanding",
+        understandingMode,
         understandingDurationMs,
       );
     }
@@ -312,7 +354,7 @@ export class AgentLoop {
           intent: resolution.intent,
           source: resolution.source,
           files,
-          llmSkipped: taskContract.deterministicAnswer !== undefined,
+          llmSkipped: false,
         },
       });
       await this.emit({
@@ -320,7 +362,7 @@ export class AgentLoop {
         intent: resolution.intent,
         source: resolution.source,
         files,
-        llmSkipped: taskContract.deterministicAnswer !== undefined,
+        llmSkipped: false,
       });
     }
     await this.recordCheckpoint(state);
@@ -329,52 +371,65 @@ export class AgentLoop {
     let previousGuardrailCode: string | undefined;
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
+    let recoverableLlmProtocolFailures = 0;
 
     while (!state.isStepLimitReached()) {
-      const contractTools = selectToolsForTaskContract(this.availableTools, state.taskContract);
+      const contractTools = selectToolsForCapabilityNegotiation(
+        this.availableTools,
+        state.taskContract,
+      );
       const synthesisReserveActive = isWebSynthesisReserveActive(state);
       const availableTools = synthesisReserveActive
         ? []
         : selectToolsForOperatingMode(contractTools, state.operatingMode);
-      const deterministicDecision = state.step === 0 && state.taskContract.deterministicAnswer
-        ? { type: "FINAL", summary: state.taskContract.deterministicAnswer, success: true } as const
-        : undefined;
-      let context = "";
-      if (!deterministicDecision) {
-        context = await this.contextBuilder.build(state);
-        const contextTrace = this.contextBuilder.getLastTrace();
-        if (contextTrace) {
-          await this.eventStore.appendEvent(state.sessionId, {
-            type: "CONTEXT_BUILT",
-            payload: { trace: toJsonValue(contextTrace) },
-          });
-          await this.emit({ type: "context", trace: contextTrace });
-          if (contextTrace.embeddingCache) {
-            await this.emit({ type: "cache", cache: "embedding", ...contextTrace.embeddingCache });
-          }
+      const context = await this.contextBuilder.build(state);
+      const contextTrace = this.contextBuilder.getLastTrace();
+      if (contextTrace) {
+        await this.eventStore.appendEvent(state.sessionId, {
+          type: "CONTEXT_BUILT",
+          payload: { trace: toJsonValue(contextTrace) },
+        });
+        await this.emit({ type: "context", trace: contextTrace });
+        if (contextTrace.embeddingCache) {
+          await this.emit({ type: "cache", cache: "embedding", ...contextTrace.embeddingCache });
         }
       }
-      const decision = deterministicDecision
-        ?? await this.readDecision(
-          state,
-          userGoal,
-          context,
-          availableTools,
-          input.conversation,
-          originalUserGoal,
-          input.conversationTrace?.truncated === true,
-          synthesisReserveActive,
-        );
-
-      if (await this.maybeEscalateDirectDraft(
+      const decision = await this.readDecision(
         state,
-        decision,
+        userGoal,
+        context,
+        availableTools,
         input.conversation,
-      )) {
+        originalUserGoal,
+        input.conversationTrace?.truncated === true,
+        synthesisReserveActive,
+      );
+
+      if (
+        decision.type === "FAILED"
+        && isRecoverableLlmProtocolFailure(decision.error)
+        && recoverableLlmProtocolFailures < MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES
+      ) {
+        recoverableLlmProtocolFailures += 1;
+        const message = [
+          "RECOVERABLE_LLM_PROTOCOL_ERROR:",
+          decision.error,
+          "The provider response was not a valid AgentDecision.",
+          "Keep the completed work and observations; retry with exactly one short AgentDecision JSON object.",
+        ].join(" ");
+        state.setLastError(message);
+        state.addAssistantMessage(message);
+        await this.recordError(state.sessionId, message);
+        await this.emit({
+          type: "guardrail",
+          code: "RECOVERABLE_LLM_PROTOCOL_ERROR",
+          message,
+        });
         state.incrementStep();
         await this.recordCheckpoint(state);
         continue;
       }
+      recoverableLlmProtocolFailures = 0;
 
       state.addDecision(decision);
       await this.emit({
@@ -464,6 +519,9 @@ export class AgentLoop {
       };
     }
 
+    const negotiation = await this.negotiateDecisionCapabilities(state, decision);
+    if (negotiation) return negotiation;
+
     switch (decision.type) {
       case "PLAN":
         await this.emit({ type: "plan", message: decision.message });
@@ -495,6 +553,22 @@ export class AgentLoop {
             failed: await this.recordCapabilityViolation(
               state,
               `${code}: ${decision.toolName} already succeeded with the same input in this run; use the gathered evidence or choose a materially different source`,
+            ),
+            failureKind: "GUARDRAIL",
+            guardrailCode: code,
+          };
+        }
+        if (isRedundantSuccessfulIdempotentToolCall(
+          state,
+          this.availableTools.find((tool) => tool.name === decision.toolName),
+          decision.toolName,
+          decision.input,
+        )) {
+          const code = "REDUNDANT_IDEMPOTENT_TOOL_CALL";
+          return {
+            failed: await this.recordCapabilityViolation(
+              state,
+              `${code}: ${decision.toolName} already succeeded with the same input and no patch or command has changed the observable state; use the existing result or choose materially different input`,
             ),
             failureKind: "GUARDRAIL",
             guardrailCode: code,
@@ -544,7 +618,9 @@ export class AgentLoop {
           };
         }
         {
-          const collaborationIntent = classifySubAgentIntent(state.userGoal);
+          const collaborationIntent = resolveContractSubAgentIntent(
+            state.taskContract,
+          );
           if (
             collaborationIntent.preference === "REQUIRED"
             && collaborationIntent.requestsChangeProposal
@@ -590,54 +666,72 @@ export class AgentLoop {
     }
   }
 
-  private async maybeEscalateDirectDraft(
+  private async negotiateDecisionCapabilities(
     state: AgentState,
     decision: AgentDecision,
-    conversation: ConversationMessage[] | undefined,
-  ): Promise<boolean> {
-    if (
-      state.taskContract.kind !== "DIRECT_RESPONSE"
-      || state.taskContract.deterministicAnswer !== undefined
-      || decision.type !== "FINAL"
-      || !decision.success
-    ) {
-      return false;
+  ): Promise<StepOutcome | undefined> {
+    const result = negotiateCapabilities({
+      userGoal: state.userGoal,
+      contract: state.taskContract,
+      decision,
+      availableTools: this.availableTools,
+      operatingMode: state.operatingMode,
+      multiAgentAvailable: state.multiAgentEnabled,
+    });
+    if (result.status === "UNCHANGED") return undefined;
+    if (result.status === "DENIED") {
+      const error = `${result.denial.code}: ${result.denial.reason}`;
+      return {
+        failed: await this.recordCapabilityViolation(state, error),
+        failureKind: "GUARDRAIL",
+        guardrailCode: result.denial.code,
+      };
     }
 
-    const risk = assessEvidenceRisk({
-      userGoal: state.userGoal,
-      draft: decision.summary,
-      ...(state.taskContract.understanding ? { understanding: state.taskContract.understanding } : {}),
-      ...(conversation ? { conversation } : {}),
-    });
-    if (!risk.requiresVerification) return false;
+    if (
+      result.upgrade.contract.capabilities.repositoryWrite
+      && !state.taskContract.capabilities.repositoryWrite
+      && !this.activeTaskDiffBaseline
+    ) {
+      this.activeTaskDiffBaseline = await new TaskDiffService({ repoPath: this.repoPath })
+        .captureWorkingTree()
+        .catch(() => undefined);
+    }
+    state.upgradeTaskContract(result.upgrade.contract);
+    await this.recordTaskContractUpgrade(state, result.upgrade);
+    return undefined;
+  }
 
-    // Persist the withheld draft for observability, but do not add it to the
-    // live state: ContextBuilder must not present an unverified FINAL as usable
-    // evidence during the upgraded web-research phase.
-    await this.recordDecision(state.sessionId, decision);
-    const upgradedContract = buildAgentTaskContract({
-      userGoal: state.userGoal,
-      route: {
-        intent: "WEB_ANSWER",
-        reason: `Direct draft evidence escalation (${risk.signals.join(", ")}).`,
+  private async recordTaskContractUpgrade(
+    state: AgentState,
+    upgrade: CapabilityUpgrade,
+  ): Promise<void> {
+    await this.eventStore.appendEvent(state.sessionId, {
+      type: "TASK_CONTRACT_UPGRADED",
+      payload: {
+        previousKind: upgrade.previousKind,
+        kind: state.taskContract.kind,
+        action: upgrade.action,
+        granted: upgrade.granted,
+        ...(upgrade.grantedTools ? { grantedTools: upgrade.grantedTools } : {}),
+        reason: upgrade.reason,
+        repositoryWrite: state.taskContract.capabilities.repositoryWrite,
+        commandExecution: state.taskContract.capabilities.commandExecution,
       },
     });
-    state.upgradeTaskContract(upgradedContract);
-    const message = [
-      "DIRECT_DRAFT_EVIDENCE_ESCALATION:",
-      "The single-shot draft was withheld because its concrete external claims require evidence.",
-      `Signals: ${risk.signals.join(", ") || "(none)"}.`,
-      "The same AgentLoop has upgraded the task to WEB_RESEARCH; search and fetch grounded sources before returning FINAL.",
-    ].join(" ");
-    state.setLastError(message);
-    await this.recordError(state.sessionId, message);
     await this.emit({
-      type: "guardrail",
-      code: "DIRECT_DRAFT_EVIDENCE_ESCALATION",
-      message,
+      type: "capability_upgrade",
+      previousKind: upgrade.previousKind,
+      kind: state.taskContract.kind,
+      action: upgrade.action,
+      granted: upgrade.granted,
+      ...(upgrade.grantedTools ? { grantedTools: upgrade.grantedTools } : {}),
     });
-    return true;
+    await this.emit({
+      type: "task_contract",
+      kind: state.taskContract.kind,
+      outputKind: state.taskContract.outputKind,
+    });
   }
 
   private async recordCapabilityViolation(state: AgentState, error: string): Promise<true> {
@@ -750,7 +844,9 @@ export class AgentLoop {
     if (incomplete) {
       state.setLastError(`MULTI_AGENT_BATCH_FAILED: ${message}`);
       await this.recordError(state.sessionId, state.lastError);
-      const collaborationIntent = classifySubAgentIntent(state.userGoal);
+      const collaborationIntent = resolveContractSubAgentIntent(
+        state.taskContract,
+      );
       const requiredWriterDeadEnd = collaborationIntent.preference === "REQUIRED"
         && collaborationIntent.requestsChangeProposal
         && !hasSuccessfulDelegatedPatchProposal(state)
@@ -836,7 +932,9 @@ export class AgentLoop {
         guardrailCode: code,
       };
     }
-    const collaborationIntent = classifySubAgentIntent(state.userGoal);
+    const collaborationIntent = resolveContractSubAgentIntent(
+      state.taskContract,
+    );
     if (
       collaborationIntent.preference === "REQUIRED"
       && collaborationIntent.requestsReview
@@ -1115,6 +1213,7 @@ export class AgentLoop {
         steps: state.step,
         taskKind: state.taskContract.kind,
         outputKind: state.taskContract.outputKind,
+        resultMode: state.taskContract.resultMode,
         ...collaborationResultMetadata(state),
       };
     }
@@ -1151,6 +1250,7 @@ export class AgentLoop {
         executionEngine: "AGENT_LOOP",
         taskKind: state.taskContract.kind,
         outputKind: state.taskContract.outputKind,
+        resultMode: state.taskContract.resultMode,
         ...taskDiffRecordMetadata(this.activeTaskDiffArtifact),
         steps: state.step,
       },
@@ -1180,6 +1280,7 @@ export class AgentLoop {
       steps: state.step,
       taskKind: state.taskContract.kind,
       outputKind: state.taskContract.outputKind,
+      resultMode: state.taskContract.resultMode,
       ...taskDiffResultMetadata(this.activeTaskDiffArtifact),
       ...collaborationResultMetadata(state),
     };
@@ -1238,6 +1339,7 @@ export class AgentLoop {
       error,
       taskKind: state.taskContract.kind,
       outputKind: state.taskContract.outputKind,
+      resultMode: state.taskContract.resultMode,
       ...taskDiffResultMetadata(this.activeTaskDiffArtifact),
       ...collaborationResultMetadata(state),
     };
@@ -1950,6 +2052,57 @@ function isRedundantSuccessfulWebToolCall(
     && result.result.success
     && JSON.stringify(sortJsonValue(result.input)) === inputKey
   ));
+}
+
+function isRedundantSuccessfulIdempotentToolCall(
+  state: AgentState,
+  tool: ToolSpec | undefined,
+  toolName: string,
+  input: JsonObject,
+): boolean {
+  if (
+    tool?.annotations?.readOnlyHint !== true
+    || tool.annotations.idempotentHint !== true
+    || tool.annotations.openWorldHint === true
+  ) {
+    return false;
+  }
+
+  const inputKey = JSON.stringify(sortJsonValue(input));
+  if (!state.toolResults.some((result) => (
+    result.toolName === toolName
+    && result.result.success
+    && JSON.stringify(sortJsonValue(result.input)) === inputKey
+  ))) {
+    return false;
+  }
+
+  const currentDecisionIndex = state.decisions.length - 1;
+  let previousDecisionIndex = -1;
+  for (let index = currentDecisionIndex - 1; index >= 0; index -= 1) {
+    const decision = state.decisions[index];
+    if (
+      decision?.type === "TOOL_CALL"
+      && decision.toolName === toolName
+      && JSON.stringify(sortJsonValue(decision.input)) === inputKey
+    ) {
+      previousDecisionIndex = index;
+      break;
+    }
+  }
+  if (previousDecisionIndex < 0) return false;
+
+  return !state.decisions
+    .slice(previousDecisionIndex + 1, currentDecisionIndex)
+    .some((decision) => (
+      decision.type === "APPLY_PATCH"
+      || decision.type === "APPLY_DELEGATED_PATCH"
+      || decision.type === "RUN_COMMAND"
+    ));
+}
+
+function isRecoverableLlmProtocolFailure(error: string): boolean {
+  return /(?:invalid json|schema validation failed|did not contain a json object|did not include parsable content|response is empty|missing type|agentdecision schema)/i.test(error);
 }
 
 function taskDiffRecordMetadata(artifact: TaskDiffArtifact | undefined): Record<string, unknown> {

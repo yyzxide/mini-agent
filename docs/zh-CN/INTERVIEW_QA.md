@@ -10,7 +10,7 @@
 
 关键逻辑不在 Prompt 里：
 
-- TaskUnderstanding 和 Task Contract；
+- TaskFrame 和 Task Contract；
 - Tool Registry、Schema 和权限；
 - 路径、Patch、命令和网络边界；
 - Context 选择与压缩；
@@ -27,31 +27,27 @@ Coding Agent 需要直接面对仓库、Git、命令和终端。CLI 能复用开
 ## Q4：一次请求怎么运行？
 
 ```text
-Follow-up resolution
-  -> TaskUnderstanding
-  -> optional semantic refinement
-  -> compatibility route
+User request + Conversation
+  -> AI TaskFrame
   -> AgentTaskContract
   -> AgentLoop
   -> Context / LLM / Decision / Guardrail / Action
   -> evidence / events / checkpoint / final
 ```
 
-Direct、Web、Review、Analysis 和 Change 都进入同一个 AgentLoop。它们只是在能力、证据、输出和步数契约上不同。
+Direct、Web、Review、Analysis 和 Change 都进入同一个 AgentLoop。它们只是不同 TaskFrame effects 和证据要求。
 
-## Q5：为什么还保留 TaskRouter？
+## Q5：为什么删除 TaskRouter？
 
-`TaskRouter` 现在主要把最终 `TaskUnderstanding` 映射成兼容标签，供 Session、CLI 输出和旧数据使用。它不再拥有独立运行时，也不应该成为权限事实源。真正的能力由 Task Contract 决定。
+因为自然语言任务不是有限枚举。先用关键词决定 Direct/Web/Edit 会让早期标签变成能力闸门，例如 Web 搜索后无法写代码，或文件分析没有 `read_file`。现在模型生成 TaskFrame，动作由同一 AgentLoop 自主选择，本地层只负责授权和安全。
 
-## Q6：TaskUnderstanding 为什么还需要模型？
+## Q6：TaskFrame 为什么需要模型？
 
-确定性逻辑适合显式路径、明确写入、产品状态和短追问，但“不是只分析”“如果确认有问题才改”“按刚才方案处理”包含组合语义。系统只对这类复杂表达调用模型，并要求严格 JSON Schema、置信度和本地安全合并。
-
-这样既避免每轮额外调用，也避免继续为完整句子写白名单。
+“不是只分析”“如果确认有问题才改”“按刚才方案处理”包含组合语义、否定和跨轮指代。把这些问句穷举进正则会持续产生边界冲突。系统每轮都让模型生成严格 JSON Schema 的 TaskFrame，再由本地安全层执行不可突破的约束。
 
 ## Q7：模型语义判断错误会不会获得写权限？
 
-不会只凭 `operation=CHANGE_REPOSITORY` 获得权限。合并层要求修改意图字段一致，保留显式只读/Web/本地状态约束；非法或低置信度结果回退。最终 Task Contract 只消费合并后的记录。
+不会只凭 TaskFrame 的写入效果获得权限。模型必须实际选择 Patch，Capability Negotiator 授权后还要经过只读约束、Permission、路径沙箱和 Patch 校验；非法 TaskFrame 使用中性 fallback。
 
 ## Q8：模型会不会直接操作文件？
 

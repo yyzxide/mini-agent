@@ -3,6 +3,8 @@ import { McpServerConfigSchema } from "../../src/mcp/McpTypes.js";
 import { StdioMcpClient } from "../../src/mcp/StdioMcpClient.js";
 import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
+import { McpRemoteTool as McpRemoteToolAdapter } from "../../src/mcp/McpRemoteTool.js";
+import { PermissionManager } from "../../src/permission/PermissionManager.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -40,6 +42,47 @@ describe("MCP tool bridge", () => {
     });
 
     expect(() => McpServerConfigSchema.parse({ name: "broken" })).toThrow();
+  });
+
+  it("requires an exact interactive approval for a mutating MCP tool", async () => {
+    const callTool = vi.fn(async () => ({ structuredContent: { deleted: true } }));
+    const client = {
+      connect: async () => undefined,
+      listTools: async () => [],
+      callTool,
+      close: async () => undefined,
+    };
+    const config = McpServerConfigSchema.parse({
+      name: "calendar",
+      command: "unused-fixture",
+      defaultPermission: "REVIEW",
+    });
+    const tool = new McpRemoteToolAdapter(config, {
+      name: "delete_event",
+      inputSchema: { type: "object" },
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    }, client);
+
+    const denied = await tool.execute({ id: "event-1" }, {
+      repoPath: process.cwd(),
+      permissionManager: new PermissionManager(),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+    expect(denied).toMatchObject({
+      success: false,
+      error: { code: "MCP_PERMISSION_DENIED" },
+    });
+    expect(callTool).not.toHaveBeenCalled();
+
+    const approved = await tool.execute({ id: "event-1" }, {
+      repoPath: process.cwd(),
+      permissionManager: new PermissionManager({ prompt: async () => "yes" }),
+      autoApprove: true,
+      nonInteractive: false,
+    });
+    expect(approved.success).toBe(true);
+    expect(callTool).toHaveBeenCalledWith("delete_event", { id: "event-1" });
   });
 
   it("discovers and calls tools over a real stdio JSON-RPC process", async () => {

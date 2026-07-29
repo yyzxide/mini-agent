@@ -9,7 +9,10 @@ import { AgentLoop } from "../agent/AgentLoop.js";
 import type { AgentRunResult } from "../agent/AgentLoop.js";
 import type { AgentProgressEvent } from "../agent/AgentLoop.js";
 import { CommandRunner } from "../command/CommandRunner.js";
-import { isVerificationCommand } from "../command/CommandClassification.js";
+import {
+  classifyVerificationCommandInput,
+  isVerificationCommand,
+} from "../command/CommandClassification.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
@@ -25,8 +28,7 @@ import type {
 import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 import { ScriptedLlmClient } from "./ScriptedLlmClient.js";
 import type { MultiAgentPolicy, SubAgentCoordinator } from "../agent/SubAgentTypes.js";
-import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
-import { routeTask } from "../agent/TaskRouter.js";
+import type { TaskFrame } from "../runtime/TaskFrame.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -115,7 +117,16 @@ export class AgentHarness {
     if (!options.llmClient && (!scenario.decisions || scenario.decisions.length === 0)) {
       throw new Error(`Scenario ${scenario.name} requires scripted decisions or an injected LLM client`);
     }
-    const llmClient = new InstrumentedLlmClient(options.llmClient ?? new ScriptedLlmClient(scenario.decisions ?? []));
+    const llmClient = new InstrumentedLlmClient(
+      options.llmClient
+        ?? new ScriptedLlmClient(
+          scenario.decisions ?? [],
+          [{
+            success: true,
+            text: JSON.stringify(createScriptedScenarioTaskFrame(scenario)),
+          }],
+        ),
+    );
     const sessionStore = new SessionStore({ repoPath });
     const eventStore = new EventStore({ repoPath });
     const progress: AgentProgressEvent[] = [];
@@ -135,18 +146,11 @@ export class AgentHarness {
 
     const startedAt = Date.now();
     const operatingMode = scenario.operatingMode ?? "EXECUTE";
-    const taskContract = buildAgentTaskContract({
-      userGoal: scenario.userGoal,
-      route: routeTask(scenario.userGoal),
-      operatingMode,
-      multiAgentEnabled: options.multiAgent?.enabled === true,
-    });
     const run = await loop.run({
       userGoal: scenario.userGoal,
       autoApprove: true,
       nonInteractive: true,
       operatingMode,
-      taskContract,
       ...(scenario.maxSteps === undefined ? {} : { maxSteps: scenario.maxSteps }),
       ...(options.multiAgent ? { multiAgent: options.multiAgent } : {}),
     });
@@ -222,6 +226,108 @@ export class AgentHarness {
       failuresByCategory,
     };
   }
+}
+
+function createScriptedScenarioTaskFrame(scenario: AgentHarnessScenario): TaskFrame {
+  const decisions = scenario.decisions ?? [];
+  const repositoryWrite = decisions.some((decision) =>
+    decision.type === "APPLY_PATCH" || decision.type === "APPLY_DELEGATED_PATCH",
+  );
+  const repositoryRead = decisions.some((decision) =>
+    decision.type === "TOOL_CALL"
+    && ["read_file", "list_files", "search_code"].includes(decision.toolName),
+  );
+  const verification = strongestVerification(decisions);
+  const planMode = scenario.operatingMode === "PLAN";
+  return {
+    version: 1,
+    objective: scenario.userGoal,
+    target: repositoryWrite || repositoryRead ? "REPOSITORY" : "DERIVATION",
+    answer: {
+      shape: "FREEFORM",
+      depth: "BALANCED",
+    },
+    effects: {
+      answer: true,
+      repositoryRead,
+      repositoryWrite: repositoryWrite ? "REQUIRED" : "NONE",
+      webEvidence: decisions.some((decision) =>
+        decision.type === "TOOL_CALL"
+        && (decision.toolName === "web_search" || decision.toolName === "fetch_url"),
+      ),
+      knowledgeEvidence: decisions.some((decision) =>
+        decision.type === "TOOL_CALL" && decision.toolName === "knowledge_search",
+      ),
+      commandExecution: decisions.some((decision) => decision.type === "RUN_COMMAND"),
+      verification,
+      delegation: decisions.some((decision) =>
+        decision.type === "DELEGATE" || decision.type === "DELEGATE_READONLY",
+      ),
+      mcp: false,
+    },
+    webEvidencePolicy: {
+      searchViews: 1,
+      fetchedSources: 1,
+      independentDomains: 1,
+      citation: true,
+      freshness: "NONE",
+      authority: "NONE",
+    },
+    constraints: {
+      readOnly: planMode,
+      noWeb: false,
+      noCommands: planMode,
+      noDelegation: false,
+      noMcp: false,
+      requireCompleteFileRead: false,
+    },
+    collaboration: {
+      requirement: "NONE",
+      changeProposal: false,
+      review: false,
+      requestedAgents: null,
+    },
+    conversationEvidence: {
+      requiresHistory: false,
+      queries: [],
+      includeRecentMessages: 8,
+    },
+    completionCriteria: [
+      repositoryWrite
+        ? "The scripted repository change is applied and verified at the declared level."
+        : "The scripted scenario reaches its expected final result.",
+    ],
+    confidence: 1,
+    ambiguities: [],
+    rationale: "Deterministic TaskFrame fixture compiled from the versioned benchmark scenario.",
+  };
+}
+
+function strongestVerification(
+  decisions: AgentDecision[],
+): TaskFrame["effects"]["verification"] {
+  type TaskFrameVerification = TaskFrame["effects"]["verification"];
+  const rank: Record<TaskFrameVerification, number> = {
+    NONE: 0,
+    SYNTAX: 1,
+    STATIC: 2,
+    TEST: 3,
+  };
+  return decisions
+    .filter((decision): decision is Extract<AgentDecision, { type: "RUN_COMMAND" }> =>
+      decision.type === "RUN_COMMAND",
+    )
+    .map((decision): TaskFrameVerification => {
+      const level = classifyVerificationCommandInput({
+        executable: decision.executable ?? "",
+        args: decision.args,
+        shell: decision.shell,
+      }).level;
+      return level === "DIFF_HYGIENE" ? "SYNTAX" : level;
+    })
+    .reduce<TaskFrameVerification>((strongest, current) =>
+      rank[current] > rank[strongest] ? current : strongest,
+    "NONE");
 }
 
 function countRecordedSubAgentLlmCalls(records: Awaited<ReturnType<SessionStore["readRecords"]>>): number {

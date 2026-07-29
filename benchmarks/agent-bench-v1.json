@@ -60,7 +60,7 @@
         },
         "diffContains": ["+export function subtract"],
         "maxSteps": 4,
-        "maxLlmCalls": 4
+        "maxLlmCalls": 5
       }
     },
     {
@@ -252,7 +252,7 @@
           "src/counter.js": "module.exports = 2"
         },
         "maxSteps": 5,
-        "maxLlmCalls": 5
+        "maxLlmCalls": 6
       }
     },
     {

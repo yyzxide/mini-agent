@@ -122,7 +122,7 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages.at(-1)?.content).toContain("Do not call tools");
   });
 
-  it("uses a dedicated JSON-only prompt for task understanding", async () => {
+  it("uses a dedicated JSON-only prompt for TaskFrame", async () => {
     const calls: RequestInit[] = [];
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
@@ -133,7 +133,7 @@ describe("OpenAICompatibleClient", () => {
         return new Response(JSON.stringify({
           choices: [{
             finish_reason: "stop",
-            message: { content: "{\"operation\":\"ANSWER\"}" },
+            message: { content: "{\"version\":1}" },
           }],
         }), { status: 200 });
       }) as typeof fetch,
@@ -141,15 +141,14 @@ describe("OpenAICompatibleClient", () => {
 
     const result = await client.completeText({
       userGoal: "Handle it",
-      context: "Deterministic interpretation: ANSWER",
-      mode: "task_understanding",
+      mode: "task_frame",
     });
 
     expect(result.success).toBe(true);
     const body = JSON.parse(String(calls[0]?.body)) as {
       messages: Array<{ role: string; content: string }>;
     };
-    expect(body.messages[0]?.content).toContain("semantic task-understanding layer");
+    expect(body.messages[0]?.content).toContain("semantic TaskFrame compiler");
     expect(body.messages[0]?.content).toContain("Return one JSON object only");
   });
 

@@ -132,7 +132,16 @@ export class ToolRegistry {
       result = await tool.execute(parsedInput, context);
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const inputError = new ToolInputError("Tool input validation failed", z.treeifyError(error));
+        const issueSummary = error.issues
+          .map((issue) => {
+            const field = issue.path.length > 0 ? issue.path.join(".") : "input";
+            return `${field}: ${issue.message}`;
+          })
+          .join("; ");
+        const inputError = new ToolInputError(
+          `Tool input validation failed${issueSummary ? ` (${issueSummary})` : ""}`,
+          z.treeifyError(error),
+        );
         result = toolFailure(inputError.code, inputError.message, inputError.details);
       } else {
         result = toolFailure(errorToCode(error, "TOOL_EXECUTION_FAILED"), errorToMessage(error), errorToDetails(error));

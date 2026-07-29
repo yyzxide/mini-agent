@@ -22,7 +22,7 @@ export interface LlmTextInput {
   userGoal: string;
   context?: string | undefined;
   conversation?: ConversationMessage[] | undefined;
-  mode?: "direct" | "web" | "web_rewrite" | "task_understanding" | undefined;
+  mode?: "direct" | "web" | "web_rewrite" | "task_frame" | undefined;
 }
 
 export interface LlmTextResult {
@@ -544,17 +544,23 @@ function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
   return `LLM response did not include parsable content${details ? ` (${details})` : ""}. Try a non-reasoning chat model or increase llm.maxTokens if this keeps happening.`;
 }
 
-function buildTextCompletionSystemPrompt(mode: "direct" | "web" | "web_rewrite" | "task_understanding"): string {
-  if (mode === "task_understanding") {
+function buildTextCompletionSystemPrompt(
+  mode: "direct" | "web" | "web_rewrite" | "task_frame",
+): string {
+  if (mode === "task_frame") {
     return [
-      "You are the semantic task-understanding layer for a local coding agent.",
-      "Infer the user's intended operation, target, answer form, constraints, conditionals, negations, and repository mutation intent.",
-      "Use the supplied deterministic interpretation as evidence, but correct it when indirect or compound language clearly means something else.",
-      "Never ignore an explicit prohibition such as do not edit files, do not use the web, or do not run commands.",
-      "Do not answer the task and do not emit an AgentDecision.",
+      "You are the semantic TaskFrame compiler for a local coding agent.",
+      "Interpret the current user request together with recent conversation. Do not answer the request and do not choose a tool yet.",
+      "Describe the objective, requested effects, explicit constraints, and evidence-based completion criteria without assigning a runtime mode.",
+      "An action mentioned as history, documentation, a quotation, or the object of a question is not necessarily an action requested now.",
+      "repositoryWrite is NONE when no edit is requested, CONDITIONAL when edits are allowed only if investigation establishes a need, and REQUIRED when a repository change is itself the requested outcome.",
+      "Set collaboration.requirement to REQUIRED only when the user explicitly requires subagent work, OPTIONAL when delegation is requested as a preference, and NONE otherwise. Record required writer/reviewer outcomes separately.",
+      "Set conversationEvidence.requiresHistory when the task depends on an older statement, decision, artifact, constraint, or topic beyond the recent exchange. Provide concise semantic queries for retrieving that evidence; do not guess the answer.",
+      "When webEvidence is true, set webEvidencePolicy from the claim: ordinary research usually needs one search view and one fetched cited source; latest/current product, model, version, API, SDK, or release claims need freshness=CURRENT, authority=REQUIRED, and at least two non-equivalent search views.",
+      "Set readOnly only when the user actually prohibits changes. Set noWeb, noCommands, noDelegation, or noMcp only for explicit prohibitions.",
       "Return one JSON object only with this exact shape:",
-      "{\"operation\":\"ANSWER|RESEARCH|REVIEW_REPOSITORY|ANALYZE_REPOSITORY|CHANGE_REPOSITORY|QUERY_KNOWLEDGE|LOCAL_STATE\",\"target\":\"WORLD|REPOSITORY|PRODUCT|SESSION|DERIVATION\",\"answerShape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"answerDepth\":\"BRIEF|BALANCED|DETAILED\",\"externalFactPolicy\":\"GENERAL_KNOWLEDGE|VERIFICATION_REQUIRED|NOT_EXTERNAL_FACT\",\"explicitWeb\":boolean,\"explicitRepositoryTarget\":boolean,\"explicitMutation\":boolean,\"completeFileRead\":boolean,\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
-      "confidence must be between 0 and 1. Use lower confidence when the request depends on missing conversation context.",
+      "{\"version\":1,\"objective\":\"string\",\"target\":\"REPOSITORY|WORLD|PRODUCT|SESSION|DERIVATION|MIXED\",\"answer\":{\"shape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"depth\":\"BRIEF|BALANCED|DETAILED\"},\"effects\":{\"answer\":boolean,\"repositoryRead\":boolean,\"repositoryWrite\":\"NONE|CONDITIONAL|REQUIRED\",\"webEvidence\":boolean,\"knowledgeEvidence\":boolean,\"commandExecution\":boolean,\"verification\":\"NONE|SYNTAX|STATIC|TEST\",\"delegation\":boolean,\"mcp\":boolean},\"webEvidencePolicy\":{\"searchViews\":number,\"fetchedSources\":number,\"independentDomains\":number,\"citation\":boolean,\"freshness\":\"NONE|CURRENT\",\"authority\":\"NONE|REQUIRED\"},\"constraints\":{\"readOnly\":boolean,\"noWeb\":boolean,\"noCommands\":boolean,\"noDelegation\":boolean,\"noMcp\":boolean,\"requireCompleteFileRead\":boolean},\"collaboration\":{\"requirement\":\"NONE|OPTIONAL|REQUIRED\",\"changeProposal\":boolean,\"review\":boolean,\"requestedAgents\":number|null},\"conversationEvidence\":{\"requiresHistory\":boolean,\"queries\":[\"string\"],\"includeRecentMessages\":number},\"completionCriteria\":[\"string\"],\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
+      "Completion criteria describe observable outcomes, not internal labels. confidence must be between 0 and 1.",
     ].join("\n");
   }
   const commonRules = [

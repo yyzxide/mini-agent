@@ -35,9 +35,7 @@
 
 ```text
 用户请求
-  -> Follow-up Resolver
-  -> TaskUnderstanding
-  -> TaskRouter 兼容标签
+  -> AI TaskFrame
   -> AgentTaskContract
   -> AgentLoop
      -> ContextBuilder
@@ -60,19 +58,19 @@ Prompt 用于告诉模型：
 
 Prompt 不是最终权限边界。即使模型违反指令，本地执行层仍会校验 Decision、能力、参数和完成条件。
 
-### TaskUnderstanding 的角色
+### TaskFrame 的角色
 
 语义控制面记录：
 
-- operation；
-- target；
+- objective 与 target；
 - answer shape/depth；
-- external fact policy；
-- explicit Web/repository/mutation；
-- complete-file requirement；
-- confidence 和 signals。
+- 可组合 effects；
+- Web evidence policy；
+- 显式 constraints；
+- collaboration 与 conversation evidence；
+- completion criteria、confidence 和 ambiguities。
 
-简单请求确定性处理，复杂组合语义可请求 Schema 约束的模型补全，再由本地安全策略合并。
+所有开放式请求都由模型生成 Schema 约束的 TaskFrame。本地代码不再用关键词选择 Direct/Web/Edit，但仍强制执行权限和安全边界。
 
 ### Task Contract 的角色
 

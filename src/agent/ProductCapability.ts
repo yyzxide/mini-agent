@@ -122,8 +122,11 @@ export function detectResponseCapabilityDenials(text: string): ProductCapability
 
 export function looksLikeExplicitWebAction(value: string): boolean {
   const text = value.trim().toLowerCase();
-  return /(?:请|帮我|麻烦|直接|现在)?(?:联网|上网|网上|用网页|web)?(?:查|查询|查找|搜|搜索|检索|浏览)(?:一下|一查|看看|找找)?/i.test(text)
-    || /(?:联网|上网|网上|用网页|\bweb\b).{0,10}(?:核实|核验|查证|验证|事实核查)/i.test(text)
+  // "Explicit Web" is a hard semantic constraint, so keep this recognizer
+  // deliberately high precision. Bare 查/检查/搜索 wording is left to the
+  // semantic model instead of being treated as an irrevocable Web request.
+  return /(?:联网|上网|网上|网页|互联网|\bweb\b|\bonline\b|\binternet\b).{0,16}(?:查|查询|查找|搜|搜索|检索|浏览|核实|核验|查证|验证|事实核查|search|browse|look\s*up|find|verify)/i.test(text)
+    || /(?:查|查询|查找|搜|搜索|检索|浏览|核实|核验|查证|验证|search|browse|look\s*up|find|verify).{0,16}(?:联网|上网|网上|网页|互联网|\bweb\b|\bonline\b|\binternet\b)/i.test(text)
     || /(?:search|browse|look\s*up|find).{0,12}(?:web|online|internet)/i.test(text)
     || /(?:search|browse)(?:\s+the)?\s+web/i.test(text);
 }
@@ -136,19 +139,19 @@ function renderInventory(locale: "zh" | "en"): string {
   const entries = listProductCapabilities();
   if (locale === "en") {
     return [
-      "Mini Coding Agent uses one runtime and selects a least-privilege task contract automatically for each request.",
+      "Mini Coding Agent uses one AgentLoop and compiles each request into a least-privilege TaskFrame.",
       "",
       ...entries.map((entry) => `- ${entry.en.name}: ${entry.en.description}${entry.tools.length > 0 ? ` Tools: ${entry.tools.map((tool) => `\`${tool}\``).join(", ")}.` : ""}`),
       "",
-      "A capability disabled in one direct-response request is only unavailable to that request; it is not missing from the overall product.",
+      "A capability disabled for one request is only unavailable to that request; it is not missing from the overall product.",
     ].join("\n");
   }
   return [
-    "Mini Coding Agent 使用一个统一运行时，并会为每条请求自动选择最小权限的任务契约，不需要手动切换模式。",
+    "Mini Coding Agent 使用一个 AgentLoop，并把每条请求编译为最小权限 TaskFrame，不需要手动切换模式。",
     "",
     ...entries.map((entry) => `- ${entry.zh.name}：${entry.zh.description}${entry.tools.length > 0 ? ` 工具：${entry.tools.map((tool) => `\`${tool}\``).join("、")}。` : ""}`),
     "",
-    "某条直接回答没有开放某项工具，只表示该请求不需要这项能力，不代表整个产品缺少它。",
+    "某条请求没有开放某项工具，只表示该请求不需要这项能力，不代表整个产品缺少它。",
   ].join("\n");
 }
 
@@ -156,16 +159,16 @@ function renderFocusedCapability(entry: ProductCapabilityDefinition, locale: "zh
   if (locale === "en") {
     return [
       `Yes. ${entry.en.name} is supported. ${entry.en.description}`,
-      entry.tools.length > 0 ? `It is provided through ${entry.tools.map((tool) => `\`${tool}\``).join(" and ")} under the ${entry.contracts.map((contract) => `\`${contract}\``).join(" / ")} task contract.` : "",
+      entry.tools.length > 0 ? `It is provided through ${entry.tools.map((tool) => `\`${tool}\``).join(" and ")} when TaskFrame enables ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")}.` : "",
       entry.en.limitation ?? "",
-      "Task contracts are selected automatically from the user's goal; a direct-answer request does not define the product's global capabilities.",
+      "TaskFrame effects are selected from the user's goal; one request's grants do not define the product's global capabilities.",
     ].filter(Boolean).join("\n\n");
   }
   return [
     `支持${entry.zh.name}。${entry.zh.description}`,
-    entry.tools.length > 0 ? `该能力通过 ${entry.tools.map((tool) => `\`${tool}\``).join("、")} 提供，对应 ${entry.contracts.map((contract) => `\`${contract}\``).join(" / ")} 任务契约。` : "",
+    entry.tools.length > 0 ? `该能力通过 ${entry.tools.map((tool) => `\`${tool}\``).join("、")} 提供，由 TaskFrame 的 ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")} 效果授权。` : "",
     entry.zh.limitation ?? "",
-    "任务契约会根据用户目标自动选择；某条直接回答没有开放工具，并不代表产品没有该能力。",
+    "TaskFrame 会根据用户目标生成；某条请求没有开放工具，并不代表产品没有该能力。",
   ].filter(Boolean).join("\n\n");
 }
 

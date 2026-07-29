@@ -58,6 +58,7 @@ describe("AgentHarness", () => {
     });
     createdRepos.push(result.repoPath);
 
+    expect(result.run.error).toBeUndefined();
     expect(result.run.success).toBe(true);
     expect(result.passed).toBe(true);
     expect(result.metrics.toolCalls).toContain("git_diff");
@@ -122,15 +123,16 @@ describe("AgentHarness", () => {
         },
         { type: "FINAL", success: true, summary: "Analysis complete." },
       ],
-      expected: { success: true, maxLlmCalls: 4, toolsCalled: ["list_files"] },
+      expected: { success: true, maxLlmCalls: 5, toolsCalled: ["list_files"] },
     }, {
       subAgentCoordinator: coordinator,
       multiAgent: { ...DEFAULT_MULTI_AGENT_POLICY, enabled: true },
     });
     createdRepos.push(result.repoPath);
 
+    expect(result.expectationFailures).toEqual([]);
     expect(result.passed).toBe(true);
-    expect(result.metrics.llmCalls).toBe(4);
+    expect(result.metrics.llmCalls).toBe(5);
     expect(result.metrics.toolCalls).toContain("list_files");
     expect(result.run).toMatchObject({ delegationBatches: 1, subAgents: 2 });
   });

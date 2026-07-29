@@ -3,36 +3,15 @@ import { AgentState } from "../../src/agent/AgentState.js";
 import {
   createDefaultAgentTaskContract,
   selectToolsForTaskContract,
-  type AgentTaskContract,
 } from "../../src/agent/AgentTaskContract.js";
-import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
 import { validateAgentDecisionGuardrails } from "../../src/agent/TaskGuardrails.js";
-import { routeTask } from "../../src/agent/TaskRouter.js";
-import { understandTask } from "../../src/agent/TaskUnderstanding.js";
 import type { ToolSpec } from "../../src/llm/LlmClient.js";
+import { createTestTaskContract } from "../helpers/TaskFrameContract.js";
 
 describe("AgentTaskContract", () => {
-  it("defaults to a deny-by-default direct contract", () => {
-    const contract = createDefaultAgentTaskContract();
-    expect(contract).toMatchObject({
-      kind: "DIRECT_RESPONSE",
-      executionStrategy: "SINGLE_SHOT",
-      capabilities: {
-        repositoryRead: false,
-        repositoryWrite: false,
-        commandExecution: false,
-        webAccess: false,
-      },
-    });
-  });
-
-  it("models code review and repository analysis as one investigation runtime profile", () => {
-    const review = contractFor("帮我检查 src/agent/AgentLoop.ts 有没有 bug");
-    const analysis = contractFor("分析当前仓库的设计架构");
-
-    expect(review).toMatchObject({
-      kind: "REPOSITORY_INVESTIGATION",
-      outputKind: "CODE_REVIEW",
+  it("defaults to one iterative AGENT_TASK with safe repository reads only", () => {
+    expect(createDefaultAgentTaskContract()).toMatchObject({
+      kind: "AGENT_TASK",
       executionStrategy: "ITERATIVE",
       capabilities: {
         repositoryRead: true,
@@ -40,115 +19,68 @@ describe("AgentTaskContract", () => {
         commandExecution: false,
         webAccess: false,
       },
-      evidence: {
-        repositoryRead: true,
-        completeFileRead: true,
-      },
-    });
-    expect(analysis).toMatchObject({
-      kind: "REPOSITORY_INVESTIGATION",
-      outputKind: "REPOSITORY_ANALYSIS",
-      capabilities: review.capabilities,
     });
   });
 
-  it("uses the resolved semantic operation as the permission source of truth", () => {
-    const userGoal = "如果发现问题就告诉我具体在哪里";
-    const understanding = {
-      ...understandTask(userGoal),
-      operation: "ANALYZE_REPOSITORY" as const,
-      target: "REPOSITORY" as const,
-      explicitRepositoryTarget: true,
-      explicitMutation: false,
-      signals: ["model-semantic-refinement"],
-    };
-    const contract = buildAgentTaskContract({
-      userGoal,
-      route: routeTask(userGoal, understanding),
+  it("keeps requested effects composable without changing task kind", () => {
+    const contract = createTestTaskContract({
+      objective: "Research evidence and update the repository.",
+      target: "MIXED",
+      effects: {
+        repositoryRead: true,
+        repositoryWrite: "REQUIRED",
+        webEvidence: true,
+        commandExecution: true,
+        verification: "TEST",
+      },
     });
 
     expect(contract).toMatchObject({
-      kind: "REPOSITORY_INVESTIGATION",
-      outputKind: "REPOSITORY_ANALYSIS",
-      capabilities: {
-        repositoryRead: true,
-        repositoryWrite: false,
-        commandExecution: false,
+      kind: "AGENT_TASK",
+      evidence: { repositoryRead: true, webSearch: true, webCitation: true },
+      taskFrame: {
+        effects: {
+          repositoryWrite: "REQUIRED",
+          webEvidence: true,
+          commandExecution: true,
+        },
       },
     });
   });
 
-  it("turns direct and web answers into bounded AgentLoop contracts", () => {
-    const direct = contractFor("你好，你是谁");
-    const web = contractFor("查询今天 TypeScript 的最新版本");
-
-    expect(direct).toMatchObject({
-      kind: "DIRECT_RESPONSE",
-      executionStrategy: "SINGLE_SHOT",
-      maxSteps: 1,
-    });
-    expect(Object.values(direct.capabilities).every((enabled) => !enabled)).toBe(true);
-
-    expect(web).toMatchObject({
-      kind: "WEB_RESEARCH",
-      executionStrategy: "ITERATIVE",
-      maxSteps: 14,
-      capabilities: { webAccess: true, repositoryRead: false, repositoryWrite: false },
-      evidence: { webSearch: true, fetchedWebSourceCount: 1, independentWebDomainCount: 1 },
-    });
-    expect(contractFor("查询今天世界杯比分")).toMatchObject({
-      evidence: { webSearch: true, fetchedWebSourceCount: 2, independentWebDomainCount: 2 },
-    });
-    expect(contractFor("腾讯有多少子公司")).toMatchObject({
-      evidence: { webSearch: true, fetchedWebSourceCount: 2, independentWebDomainCount: 2 },
-    });
-    expect(web.instructions).toContainEqual(expect.stringContaining("Evidence sufficiency is only a minimum"));
-  });
-
-  it("does not expand task capabilities when iterative execution is forced", () => {
-    const contract = buildAgentTaskContract({
-      userGoal: "你好，你是谁",
-      route: routeTask("你好，你是谁"),
-      forceIterative: true,
-      multiAgentEnabled: true,
-    });
-
-    expect(contract).toMatchObject({
-      kind: "DIRECT_RESPONSE",
-      executionStrategy: "ITERATIVE",
-      capabilities: {
-        repositoryRead: false,
-        repositoryWrite: false,
-        commandExecution: false,
-        delegation: false,
-      },
-    });
-  });
-
-  it("filters the model-visible tools using task capabilities", () => {
+  it("filters model-visible tools using current exact grants", () => {
     const tools: ToolSpec[] = [
-      spec("read_file", false),
-      spec("apply_patch", false),
-      spec("web_search", true),
-      spec("fetch_url", true),
-      spec("knowledge_search", false),
+      spec("read_file", "local"),
+      spec("apply_patch", "local"),
+      spec("web_search", "local"),
+      spec("server__read", "mcp"),
+      spec("server__other", "mcp"),
     ];
+    const contract = {
+      ...createTestTaskContract({ objective: "Use one MCP tool." }),
+      capabilities: {
+        ...createDefaultAgentTaskContract().capabilities,
+        mcpAccess: true,
+      },
+      mcpToolGrants: ["server__read"],
+    };
 
-    expect(selectToolsForTaskContract(tools, contractFor("你好"))).toEqual([]);
-    expect(selectToolsForTaskContract(tools, contractFor("查询今天 TypeScript 的最新版本"))
-      .map((tool) => tool.name)).toEqual(["web_search", "fetch_url"]);
-    expect(selectToolsForTaskContract(tools, contractFor("分析当前仓库的设计架构"))
-      .map((tool) => tool.name)).toEqual(["read_file"]);
+    expect(selectToolsForTaskContract(tools, contract).map((tool) => tool.name))
+      .toEqual(["read_file", "server__read"]);
   });
 
-  it("enforces repository evidence before an investigation can finish", () => {
-    const contract = contractFor("分析当前仓库的设计架构");
-    const state = stateFor(contract, "分析当前仓库的设计架构");
+  it("enforces repository evidence selected by TaskFrame", () => {
+    const contract = createTestTaskContract({
+      objective: "Analyze the repository.",
+      target: "REPOSITORY",
+      effects: { repositoryRead: true },
+    });
+    const state = stateFor(contract, "Analyze the repository.");
 
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
-      summary: "这是仓库分析。",
+      summary: "This is a repository analysis.",
     })).toMatchObject({ code: "FINAL_WITHOUT_REPOSITORY_EVIDENCE" });
 
     state.addToolResult({
@@ -156,19 +88,30 @@ describe("AgentTaskContract", () => {
       input: { path: "src/agent/AgentLoop.ts" },
       result: {
         success: true,
-        data: { path: "src/agent/AgentLoop.ts", startLine: 1, endLine: 10, totalLines: 10, content: "code" },
+        data: {
+          path: "src/agent/AgentLoop.ts",
+          startLine: 1,
+          endLine: 10,
+          totalLines: 10,
+          content: "code",
+        },
       },
     });
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
-      summary: "分析依据来自 src/agent/AgentLoop.ts。",
+      summary: "Analysis is grounded in src/agent/AgentLoop.ts.",
     })).toBeUndefined();
   });
 
-  it("rejects a complete-file review until every target line is covered", () => {
-    const contract = contractFor("完整检查 src/agent/AgentLoop.ts 有没有问题");
-    const state = stateFor(contract, "完整检查 src/agent/AgentLoop.ts 有没有问题");
+  it("requires complete-file coverage when TaskFrame requests it", () => {
+    const contract = createTestTaskContract({
+      objective: "Review all of src/agent/AgentLoop.ts.",
+      target: "REPOSITORY",
+      effects: { repositoryRead: true },
+      constraints: { readOnly: true, requireCompleteFileRead: true },
+    });
+    const state = stateFor(contract, "Review src/agent/AgentLoop.ts.");
     state.addToolResult({
       toolName: "read_file",
       input: { path: "src/agent/AgentLoop.ts", startLine: 1 },
@@ -190,86 +133,35 @@ describe("AgentTaskContract", () => {
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
-      summary: "完整检查完成。",
-    })).toMatchObject({
-      code: "FINAL_WITH_INCOMPLETE_FILE_READ",
-      message: expect.stringContaining("startLine=501"),
-    });
-
-    state.addToolResult({
-      toolName: "read_file",
-      input: { path: "src/agent/AgentLoop.ts", startLine: 501 },
-      result: {
-        success: true,
-        data: {
-          path: "src/agent/AgentLoop.ts",
-          startLine: 501,
-          endLine: 900,
-          totalLines: 900,
-          content: "last chunk",
-          hasMore: false,
-          sourceVersion: "v1",
-        },
-      },
-    });
-    expect(validateAgentDecisionGuardrails(state, {
-      type: "FINAL",
-      success: true,
-      summary: "完整检查完成。",
-    })).toBeUndefined();
-  });
-
-  it("allows a web task to finish only with gathered citations or an explicit evidence limitation", () => {
-    const contract = contractFor("查询今天 TypeScript 的最新版本");
-    const state = stateFor(contract, "查询今天 TypeScript 的最新版本");
-    state.addToolResult({
-      toolName: "web_search",
-      input: { query: "TypeScript latest" },
-      result: {
-        success: true,
-        data: { results: [{ title: "Release", url: "https://example.com/release", snippet: "release" }] },
-      },
-    });
-
-    expect(validateAgentDecisionGuardrails(state, {
-      type: "FINAL",
-      success: true,
-      summary: "最新版本已经发布。",
-    })).toMatchObject({ code: "FINAL_WITHOUT_FRESHNESS_COMPARISON" });
-
-    expect(validateAgentDecisionGuardrails(state, {
-      type: "FINAL",
-      success: true,
-      summary: "当前来源和证据不足，无法核验最新版本。",
-    })).toBeUndefined();
+      summary: "Review complete.",
+    })).toMatchObject({ code: "FINAL_WITH_INCOMPLETE_FILE_READ" });
   });
 });
 
-function contractFor(userGoal: string): AgentTaskContract {
-  return buildAgentTaskContract({ userGoal, route: routeTask(userGoal) });
-}
-
-function stateFor(contract: AgentTaskContract, userGoal: string): AgentState {
+function stateFor(
+  taskContract: ReturnType<typeof createTestTaskContract>,
+  userGoal: string,
+): AgentState {
   return new AgentState({
     sessionId: "test-session",
     repoPath: process.cwd(),
     userGoal,
-    taskContract: contract,
+    taskContract,
   });
 }
 
-function spec(name: string, openWorld: boolean): ToolSpec {
+function spec(name: string, source: "local" | "mcp"): ToolSpec {
   return {
     name,
     description: name,
     inputSchema: {},
     permissionLevel: "SAFE",
-    source: "local",
+    source,
     annotations: {
       readOnlyHint: name !== "apply_patch",
       destructiveHint: name === "apply_patch",
       idempotentHint: true,
-      openWorldHint: openWorld,
+      openWorldHint: name === "web_search",
     },
   };
 }

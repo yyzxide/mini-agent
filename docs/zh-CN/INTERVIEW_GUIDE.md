@@ -4,11 +4,11 @@
 
 ## 一分钟介绍
 
-> `mini-coding-agent` 是一个本地 AI Coding Agent CLI。用户请求先经过追问解析和 TaskUnderstanding，再编译成带权限、证据、输出与步数要求的 Task Contract，最后统一进入 AgentLoop。模型只返回结构化 Decision，本地 TypeScript 运行时负责 Context、工具、Patch、命令、Guardrail 和 Session 审计。复杂仓库任务可以让 Writer 和 Reviewer 在隔离 Git worktree 中协作，但只有主 Agent 能合入父工作区。
+> `mini-coding-agent` 是一个本地 AI Coding Agent CLI。模型先把用户请求和 Conversation 编译为 Schema 校验的 TaskFrame，再进入同一个 AgentLoop。模型每轮返回结构化 Decision，本地 TypeScript 运行时负责能力授权、Context、工具、Patch、命令、Guardrail 和 Session 审计。复杂仓库任务可以让 Writer 和 Reviewer 在隔离 Git worktree 中协作，但只有主 Agent 能合入父工作区。
 
 ## 三分钟架构讲法
 
-### 第一层：TaskUnderstanding
+### 第一层：TaskFrame
 
 系统需要先回答：
 
@@ -18,11 +18,11 @@
 - 回答形态与深度是什么；
 - 外部事实需要什么证据。
 
-高置信度简单请求使用确定性解析。条件、复杂否定和间接动作可以使用模型语义补全，但结果必须通过 Schema、置信度和本地安全合并。
+所有开放式请求由模型统一解释，结果必须通过 Schema。TaskFrame 还记录 Web 证据策略、Conversation 取证、协作要求和完成条件。
 
 ### 第二层：Task Contract
 
-`TaskContractBuilder` 把语义记录编译成：
+TaskFrame 编译器把语义记录转换成：
 
 - Capability：读、写、命令、Web、Knowledge、MCP、Delegation；
 - Evidence：仓库读取、完整文件覆盖、Web 搜索/抓取、引用；
@@ -45,7 +45,7 @@ build context
   -> continue or finish
 ```
 
-Direct Answer 也进入 AgentLoop，只是契约为单步、无工具。Review 和 Repository Analysis 共用只读调查契约。仓库修改才开放 Patch 和受控命令。
+普通回答也进入 AgentLoop，只是在第一次决策直接 `FINAL`。Web、读文件、Patch 和命令是可组合动作，不需要切换执行模式。
 
 ### 第四层：证据与完成性
 
@@ -77,7 +77,7 @@ Writer 在 disposable worktree 中修改和验证；Reviewer 读取包含 Writer
 
 ### 语义层不是问句白名单
 
-项目曾经在不同模块堆积关键词和特殊句式，导致修复一个问题又产生另一个误路由。现在统一为 TaskUnderstanding，并只对真正复杂的表达调用模型消歧。
+项目曾经在不同模块堆积关键词和特殊句式，导致修复一个问题又产生另一个误路由。现在每轮统一生成 TaskFrame，不再让确定性问句分类决定能力。
 
 ### 完成不是生成一段总结
 

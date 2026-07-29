@@ -2,39 +2,56 @@ import { describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
 import { createAgentCheckpoint } from "../../src/agent/AgentCheckpoint.js";
 import { buildTaskCompletionContract } from "../../src/agent/TaskCompletionContract.js";
-import {
-  requiresRepositoryFileChange,
-  validateAgentDecisionGuardrails,
-} from "../../src/agent/TaskGuardrails.js";
-import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
-import { routeTask } from "../../src/agent/TaskRouter.js";
+import { validateAgentDecisionGuardrails } from "../../src/agent/TaskGuardrails.js";
+import { createTestTaskContract } from "../helpers/TaskFrameContract.js";
 
 describe("TaskGuardrails", () => {
-  it("requires a repository change for common configuration and text artifacts", () => {
-    expect(requiresRepositoryFileChange("Create notes.txt containing hello.")).toBe(true);
-    expect(requiresRepositoryFileChange("Update config.yaml to enable caching.")).toBe(true);
-    expect(requiresRepositoryFileChange("修改 package.json 里的 test 脚本")).toBe(true);
+  it("derives required repository changes from structured task semantics", () => {
+    expect(buildTaskCompletionContract(stateFor("Create notes.txt containing hello.")))
+      .toMatchObject({ requiresRepositoryChange: true });
+    expect(buildTaskCompletionContract(stateFor("Update config.yaml to enable caching.")))
+      .toMatchObject({ requiresRepositoryChange: true });
+    expect(buildTaskCompletionContract(stateFor("修改 package.json 里的 test 脚本")))
+      .toMatchObject({ requiresRepositoryChange: true });
   });
 
-  it("does not treat an explanation request as a required file mutation", () => {
-    expect(requiresRepositoryFileChange("Explain what package.json is used for.")).toBe(false);
+  it("does not reinterpret historical mutation wording as a current write requirement", () => {
+    expect(buildTaskCompletionContract(stateFor("Explain what package.json is used for.")))
+      .toMatchObject({ requiresRepositoryChange: false });
+    expect(buildTaskCompletionContract(stateFor("你创建的这个文件，具体使用方法是什么？")))
+      .toMatchObject({ requiresRepositoryChange: false });
   });
 
-  it("does not reject authoritative local replies because of surface wording", () => {
+  it("requires a patch for conditional mutation only after a patch actually occurs", () => {
+    const state = stateFor("请检查 src/core.ts，如果发现问题就修复，否则告诉我没有问题");
+    expect(buildTaskCompletionContract(state)).toMatchObject({
+      requiresRepositoryChange: false,
+      requiresVerification: false,
+    });
+
+    addSuccessfulPatch(state, "src/core.ts");
+    expect(buildTaskCompletionContract(state)).toMatchObject({
+      requiresRepositoryChange: true,
+      requiresVerification: true,
+    });
+  });
+
+  it("does not reject a TaskFrame-grounded product reply because of surface wording", () => {
     const userGoal = "你是什么模型";
     const state = new AgentState({
       sessionId: "session",
       repoPath: "/repo",
       userGoal,
-      taskContract: {
-        ...buildAgentTaskContract({ userGoal, route: routeTask(userGoal) }),
-        deterministicAnswer: "我是 Mini Coding Agent，当前配置的模型标识是 test-model。",
-      },
+      taskContract: createTestTaskContract({
+        objective: userGoal,
+        target: "PRODUCT",
+      }),
     });
+    const summary = "我是 Mini Coding Agent，当前配置的模型标识是 test-model。";
     expect(validateAgentDecisionGuardrails(state, {
       type: "FINAL",
       success: true,
-      summary: state.taskContract.deterministicAnswer!,
+      summary,
     })).toBeUndefined();
   });
 
@@ -564,11 +581,24 @@ describe("TaskGuardrails", () => {
 });
 
 function stateFor(userGoal: string): AgentState {
+  const explanatory = /^Explain|具体使用方法/.test(userGoal);
+  const conditional = /如果发现问题/.test(userGoal);
+  const verification = /regression|verify the tests|修复/.test(userGoal)
+    ? "TEST"
+    : /\.(?:ts|yaml|json)\b/.test(userGoal) && !explanatory ? "STATIC" : "NONE";
   return new AgentState({
     sessionId: "session",
     repoPath: "/repo",
     userGoal,
-    taskContract: buildAgentTaskContract({ userGoal, route: routeTask(userGoal) }),
+    taskContract: createTestTaskContract({
+      objective: userGoal,
+      target: explanatory ? "DERIVATION" : "REPOSITORY",
+      effects: {
+        repositoryRead: conditional,
+        repositoryWrite: explanatory ? "NONE" : conditional ? "CONDITIONAL" : "REQUIRED",
+        verification: conditional ? "NONE" : verification,
+      },
+    }),
   });
 }
 
@@ -577,9 +607,18 @@ function webStateFor(userGoal: string): AgentState {
     sessionId: "session",
     repoPath: "/repo",
     userGoal,
-    taskContract: buildAgentTaskContract({
-      userGoal,
-      route: { intent: "WEB_ANSWER", reason: "test" },
+    taskContract: createTestTaskContract({
+      objective: userGoal,
+      target: "WORLD",
+      answer: { shape: /多少/.test(userGoal) ? "COUNT" : "FREEFORM" },
+      effects: { webEvidence: true },
+      webEvidencePolicy: /最新/.test(userGoal)
+        ? {
+          searchViews: 2,
+          freshness: "CURRENT",
+          authority: "REQUIRED",
+        }
+        : undefined,
     }),
   });
 }

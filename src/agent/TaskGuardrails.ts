@@ -1,38 +1,23 @@
 import type { AgentDecision } from "./AgentDecision.js";
 import type { AgentState } from "./AgentState.js";
-import { looksLikeIndexedKnowledgeRequest } from "./TaskRouter.js";
-import {
-  buildTaskCompletionContract,
-  hasEnoughContextForFileWrite,
-  requiresRepositoryFileChange,
-} from "./TaskCompletionContract.js";
+import { buildTaskCompletionContract } from "./TaskCompletionContract.js";
 import { isVerificationRelevant, verificationLevelAtLeast } from "../command/CommandClassification.js";
 import { extractLikelyReviewFilePath } from "./RepositoryInvestigation.js";
 import { normalizeReadPath } from "./FileReadCoverage.js";
 import {
   findHigherNamedVersionCandidate,
   looksLikeAuthoritativeFreshnessQuery,
-  looksLikeTemporalSuperlativeRequest,
   validateWebSearchQueryScope,
 } from "./WebResearchPolicy.js";
 import { assessAuthoritativeFreshnessEvidence } from "./WebResearchEvidence.js";
 import { isWebSynthesisReserveActive } from "./WebResearchProgress.js";
 import { validateAnswerQuality } from "./AnswerQualityPolicy.js";
-import { classifySubAgentIntent } from "./SubAgentIntent.js";
-
-export { requiresRepositoryFileChange } from "./TaskCompletionContract.js";
+import { resolveContractSubAgentIntent } from "./SubAgentIntent.js";
 
 export interface AgentDecisionGuardrailViolation {
   code: string;
   message: string;
 }
-
-const REDUNDANT_FILE_WRITE_QUESTION_PATTERNS = [
-  /(写入|保存|创建|新建).*(什么|哪个|哪里|路径|文件|内容)/i,
-  /(请|麻烦)?.*(提供|告诉).*(文件|路径|内容|代码)/i,
-  /(what|which).*(file|path|content|code)/i,
-  /(provide|tell me).*(file|path|content|code)/i,
-];
 
 export function validateAgentDecisionGuardrails(
   state: AgentState,
@@ -62,10 +47,6 @@ export function validateAgentDecisionGuardrails(
     return validateToolCallDecision(state, decision);
   }
 
-  if (decision.type === "ASK_USER") {
-    return validateAskUserDecision(state, decision);
-  }
-
   return undefined;
 }
 
@@ -87,12 +68,13 @@ function validateFinalDecision(
   ));
   const latestSufficientVerification = sufficientVerification.at(-1);
   const verificationSatisfied = latestSufficientVerification?.success === true;
-  const collaborationIntent = classifySubAgentIntent(state.userGoal);
+  const collaborationIntent = resolveContractSubAgentIntent(
+    state.taskContract,
+  );
   const delegatedResults = state.delegationBatches.flatMap((batch) => batch.results);
 
   if (
     collaborationIntent.preference === "REQUIRED"
-    && state.taskContract.capabilities.delegation
     && state.delegationBatches.length === 0
   ) {
     return {
@@ -126,14 +108,11 @@ function validateFinalDecision(
   if (taskContractViolation) {
     return taskContractViolation;
   }
-  if (
-    state.taskContract.deterministicAnswer === undefined
-    && (
-      state.taskContract.outputKind === "NATURAL_LANGUAGE"
-      || state.taskContract.outputKind === "GROUNDED_WEB_ANSWER"
-    )
-  ) {
-    const answerQualityViolation = validateAnswerQuality(state.userGoal, decision.summary);
+  if (state.taskContract.taskFrame?.effects.answer !== false) {
+    const answerQualityViolation = validateAnswerQuality(
+      decision.summary,
+      state.taskContract.taskFrame,
+    );
     if (answerQualityViolation) return answerQualityViolation;
   }
   if (isKnowledgeTask(state) && !hasSuccessfulKnowledgeSearch(state)) {
@@ -315,20 +294,22 @@ function validateTaskContractEvidence(
     };
   }
 
-  if (looksLikeTemporalSuperlativeRequest(state.userGoal) && !reportsInsufficientWebEvidence(summary)) {
+  if (requirements.webFreshnessRequired && !reportsInsufficientWebEvidence(summary)) {
     const searchQueries = successfulSearchQueries(state);
-    if (searchQueries.length < 2) {
+    if (searchQueries.length < requirements.webSearchViewCount) {
       return {
         code: "FINAL_WITHOUT_FRESHNESS_COMPARISON",
         message: [
           "Postcondition failed: a latest/current model, version, release, or product claim requires more than one non-equivalent search view.",
-          "Run a second freshness search with different retrieval wording or scope; one search-engine result page cannot establish that no newer release exists.",
+          `Run ${String(requirements.webSearchViewCount)} freshness search views with different retrieval wording or scope; one search-engine result page cannot establish that no newer release exists.`,
         ].join(" "),
       };
     }
 
-    const authorityEvidence = assessAuthoritativeFreshnessEvidence(state);
-    if (authorityEvidence.status === "NO_AUTHORITY_FRESHNESS_SEARCH") {
+    const authorityEvidence = requirements.webAuthorityRequired
+      ? assessAuthoritativeFreshnessEvidence(state)
+      : undefined;
+    if (authorityEvidence?.status === "NO_AUTHORITY_FRESHNESS_SEARCH") {
       return {
         code: "FINAL_WITHOUT_AUTHORITATIVE_FRESHNESS_SEARCH",
         message: [
@@ -339,7 +320,7 @@ function validateTaskContractEvidence(
         ].join(" "),
       };
     }
-    if (authorityEvidence.status === "AUTHORITY_RESULT_NOT_FETCHED") {
+    if (authorityEvidence?.status === "AUTHORITY_RESULT_NOT_FETCHED") {
       return {
         code: "FINAL_WITHOUT_AUTHORITATIVE_SOURCE_INSPECTION",
         message: [
@@ -349,7 +330,7 @@ function validateTaskContractEvidence(
         ].join(" "),
       };
     }
-    if (authorityEvidence.status === "FETCHED_SOURCE_LACKS_TEMPORAL_EVIDENCE") {
+    if (authorityEvidence?.status === "FETCHED_SOURCE_LACKS_TEMPORAL_EVIDENCE") {
       return {
         code: "FINAL_WITHOUT_VISIBLE_FRESHNESS_EVIDENCE",
         message: [
@@ -522,7 +503,7 @@ function validateToolCallDecision(
     const query = readObjectString(decision.input, "query");
     if (
       query
-      && looksLikeTemporalSuperlativeRequest(state.userGoal)
+      && state.taskContract.evidence.webAuthorityRequired
       && successfulSearchQueries(state).length >= 1
       && assessAuthoritativeFreshnessEvidence(state).status === "NO_AUTHORITY_FRESHNESS_SEARCH"
       && !looksLikeAuthoritativeFreshnessQuery(query)
@@ -605,32 +586,6 @@ function reportsInsufficientWebEvidence(summary: string): boolean {
     || /\b(?:insufficient|not enough|unable to verify|cannot verify|could not verify)\b/i.test(summary);
 }
 
-function validateAskUserDecision(
-  state: AgentState,
-  decision: Extract<AgentDecision, { type: "ASK_USER" }>,
-): AgentDecisionGuardrailViolation | undefined {
-  if (!requiresRepositoryFileChange(state.userGoal)) {
-    return undefined;
-  }
-
-  if (!hasEnoughContextForFileWrite(state.userGoal)) {
-    return undefined;
-  }
-
-  if (!REDUNDANT_FILE_WRITE_QUESTION_PATTERNS.some((pattern) => pattern.test(decision.message))) {
-    return undefined;
-  }
-
-  return {
-    code: "REDUNDANT_FILE_WRITE_QUESTION",
-    message: [
-      "Guardrail blocked a redundant clarification question.",
-      "The current task already contains enough context to choose a sensible file path",
-      "and write code through APPLY_PATCH. Do not ask the user to repeat the code or target file.",
-    ].join(" "),
-  };
-}
-
 function hasSuccessfulKnowledgeSearch(state: AgentState): boolean {
   return readLatestKnowledgeSearchOutcome(state) !== undefined;
 }
@@ -670,8 +625,8 @@ function reportsInsufficientKnowledgeEvidence(summary: string): boolean {
 }
 
 function isKnowledgeTask(state: AgentState): boolean {
-  return state.taskContract.understanding?.operation === "QUERY_KNOWLEDGE"
-    || (!state.taskContract.understanding && looksLikeIndexedKnowledgeRequest(state.userGoal));
+  return state.taskContract.taskFrame?.effects.knowledgeEvidence === true
+    || state.taskContract.evidence.knowledgeSearch;
 }
 
 function hasUnresolvedVerificationFailure(state: AgentState): boolean {

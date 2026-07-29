@@ -2,12 +2,12 @@
 
 [![CI](https://github.com/yyzxide/mini-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/yyzxide/mini-agent/actions/workflows/ci.yml)
 
-A local, auditable AI coding-agent CLI built with TypeScript. It turns natural-language requests into least-privilege task contracts, executes them through one AgentLoop, and keeps repository changes, commands, evidence, context, and child-agent work visible.
+A local, auditable AI coding-agent CLI built with TypeScript. The model compiles every request into a structured `TaskFrame`, executes it through one adaptive `AgentLoop`, and keeps repository changes, commands, evidence, context, and child-agent work visible.
 
 The project focuses on the engineering problems behind a coding agent—not on wrapping an LLM in a chat interface:
 
-- one runtime for direct answers, Web research, repository investigation, and code changes;
-- hybrid task understanding with local safety constraints;
+- one runtime for direct answers, Web research, repository investigation, code changes, and mixed tasks;
+- model-driven task understanding with deterministic local safety constraints;
 - evidence-backed completion instead of trusting the model's final claim;
 - isolated writer/reviewer subagents with parent-controlled merge;
 - bounded context, recoverable sessions, and an auditable terminal timeline.
@@ -18,35 +18,35 @@ The current product is intentionally CLI-only. It has no bundled backend service
 
 ```mermaid
 flowchart LR
-    U["User request"] --> F["Follow-up resolution"]
-    F --> TU["TaskUnderstanding"]
-    TU --> TC["AgentTaskContract"]
-    TC --> AL["AgentLoop"]
+    U["User request + conversation"] --> TF["AI TaskFrame"]
+    TF --> TC["AGENT_TASK contract"]
+    TC --> AL["One adaptive AgentLoop"]
     AL --> CB["ContextBuilder"]
     CB --> LLM["OpenAI-compatible LLM"]
     LLM --> D["Structured AgentDecision"]
-    D --> G["Guardrails"]
-    G --> T["Tools / patch / command / delegation"]
+    D --> N["Capability negotiation"]
+    N --> G["Permission / sandbox / completion guardrails"]
+    G --> T["Web / read / patch / command / delegation"]
     T --> AL
     AL --> S["Session, events, checkpoint, diff"]
 
-    TU -. "complex condition / negation / indirect action" .-> SR["Schema-validated semantic refinement"]
-    SR --> TU
     T --> SA["Isolated subagent worktrees"]
     SA --> T
 ```
 
-Every request enters `AgentLoop`. `TaskUnderstanding` produces one shared semantic record, and `TaskContractBuilder` compiles it into capabilities, evidence requirements, output shape, and a step budget. Compatibility labels such as `DIRECT_ANSWER` and `WEB_ANSWER` remain in stored metadata, but they are not separate runtimes.
+Every CLI request and every programmatic `AgentLoop` call enters the same loop as an `AGENT_TASK`. `TaskFrame` records the objective, answer form, required effects, Web evidence policy, explicit constraints, collaboration policy, conversation-evidence request, verification level, and completion criteria. Web access, repository reads, writes, commands, delegation, and individual MCP tools are composable effects requested by model actions; they are not mutually exclusive modes. There is no Direct/Web/Edit runtime switch or natural-language router.
 
 ## What makes it different
 
-### Contract-driven execution
+### TaskFrame-driven execution
 
-Task contracts are deny-by-default. A direct answer receives no tools; repository investigation is read-only; Web research receives only public-Web tools; repository changes receive patch and controlled-command capabilities. Successful completion is checked locally against the contract.
+Execution starts from a least-privilege bootstrap contract. Safe tools can be discovered, while Web, write, command, and delegation effects are granted or denied as the model proposes concrete actions. Successful completion is checked locally against the TaskFrame, accumulated evidence, permissions, sandbox rules, and post-change verification.
 
-### Hybrid task understanding
+Configured MCP tools are exposed to TaskFrame as a bounded metadata catalog marked as untrusted data. The runtime grants only the exact MCP tool selected by the model, never an entire server or a neighboring repository/command capability. Read-only tools remain usable in Plan mode; mutating external calls still require explicit per-call approval.
 
-Simple requests stay deterministic. Conditions, complex negation, and indirect actions can use a conversation-aware, schema-validated model refinement. The merge layer preserves explicit local constraints and does not grant repository writes from a model label alone.
+### Model-driven task understanding
+
+The model interprets the request and a bounded recent conversation once into a schema-validated `TaskFrame`; local keyword routing does not choose a Direct, Web, or Edit mode first. When older evidence is needed, the frame supplies semantic queries that select a bounded slice from the full session without task-specific question regexes. If TaskFrame parsing fails, the runtime falls back to a neutral adaptive frame. Deterministic code still enforces explicit read-only/no-Web/no-command/no-MCP constraints and never treats a model label as authorization.
 
 For example, these requests intentionally receive different permissions:
 
@@ -141,7 +141,7 @@ Minimal configuration:
 }
 ```
 
-Environment variables and command-line overrides are also supported. See [`mini-agent.config.example.json`](mini-agent.config.example.json) for RAG, embeddings, memory, Web, and MCP options.
+Environment variables and command-line overrides are also supported. See [`mini-agent.config.example.json`](mini-agent.config.example.json) for LLM, RAG, multi-agent, and MCP options. Embedding environment variables and cache behavior are documented in [`docs/zh-CN/RAG_GUIDE.md`](docs/zh-CN/RAG_GUIDE.md); Memory and Web are runtime capabilities rather than sections in the example JSON.
 
 ## Three useful demos
 

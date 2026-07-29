@@ -1,3 +1,5 @@
+import type { TaskFrame } from "../runtime/TaskFrame.js";
+
 export type AnswerIntent =
   | "DEFINITION"
   | "COUNT"
@@ -27,11 +29,10 @@ export interface AnswerQualityViolation {
  * shortest possible summary.
  */
 export function buildAnswerQualityProfile(
-  userGoal: string,
-  understanding: TaskUnderstanding = understandTask(userGoal),
+  frame?: TaskFrame,
 ): AnswerQualityProfile {
-  const depth = understanding.answerDepth;
-  const intent = mapAnswerIntent(understanding.answerShape);
+  const depth = frame?.answer?.depth ?? "BALANCED";
+  const intent = mapAnswerIntent(frame?.answer?.shape ?? "FREEFORM");
   const instructions = [
     "Evidence sufficiency is only a minimum completion condition. Give a complete, useful answer to the current request rather than the shortest summary that passes source checks.",
     depth === "BRIEF"
@@ -45,11 +46,11 @@ export function buildAnswerQualityProfile(
 }
 
 export function validateAnswerQuality(
-  userGoal: string,
   summary: string,
+  frame?: TaskFrame,
 ): AnswerQualityViolation | undefined {
   if (reportsEvidenceLimitation(summary)) return undefined;
-  const profile = buildAnswerQualityProfile(userGoal);
+  const profile = buildAnswerQualityProfile(frame);
   const normalized = normalize(summary);
 
   if (isSourceOnlyAnswer(normalized)) {
@@ -122,7 +123,7 @@ function intentInstructions(intent: AnswerIntent): string[] {
   }
 }
 
-function mapAnswerIntent(shape: TaskUnderstanding["answerShape"]): AnswerIntent {
+function mapAnswerIntent(shape: TaskFrame["answer"]["shape"]): AnswerIntent {
   switch (shape) {
     case "DEFINITION":
     case "COUNT":
@@ -154,4 +155,3 @@ function reportsEvidenceLimitation(value: string): boolean {
 function normalize(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
 }
-import { understandTask, type TaskUnderstanding } from "./TaskUnderstanding.js";

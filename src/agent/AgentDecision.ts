@@ -78,7 +78,7 @@ export const DelegateDecisionSchema = z.object({
   });
 });
 
-/** @deprecated Persisted sessions may still contain the pre-v2 read-only decision. */
+/** @deprecated Persisted sessions may still contain the legacy read-only decision. */
 export const DelegateReadonlyDecisionSchema = z.object({
   type: z.literal("DELEGATE_READONLY"),
   reason: z.string().trim().min(1).max(1_000),

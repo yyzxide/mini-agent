@@ -14,6 +14,7 @@ describe("AgentBench", () => {
     const baseline = await loadAgentBenchReport(path.resolve("benchmarks/baselines/core-v1.json"));
     const report = await new AgentBench().run(dataset, { mode: "scripted", baseline });
 
+    expect(report.runs.filter((run) => !run.passed)).toEqual([]);
     expect(report.summary).toMatchObject({
       scenarios: 7,
       totalRuns: 7,
@@ -47,13 +48,18 @@ describe("AgentBench", () => {
   });
 
   it("runs an injected real client and records provider token telemetry", async () => {
+    const callMetric = {
+      model: "fixture-model",
+      usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, cachedPromptTokens: 3 },
+    };
+    let metricDrains = 0;
     const client: LlmClient & { drainCallMetrics: () => unknown[] } = {
       chat: async () => ({ type: "FINAL", success: true, summary: "done" }),
       completeText: async () => ({ success: true, text: "done" }),
-      drainCallMetrics: () => [{
-        model: "fixture-model",
-        usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, cachedPromptTokens: 3 },
-      }],
+      drainCallMetrics: () => {
+        metricDrains += 1;
+        return metricDrains === 1 ? [] : [callMetric];
+      },
     };
     const dataset: AgentBenchDataset = {
       version: 1,

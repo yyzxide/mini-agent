@@ -66,13 +66,13 @@ RAG、Memory、MCP、Skill 可以作为追问时的扩展能力，不建议在�
 
 ### 1 分钟
 
-> 项目的出发点是：聊天模型可以生成代码，但不能直接被信任去决定权限、执行副作用或宣布任务成功。我把 Direct、Web、Review、Repository Analysis 和 Change 统一到一个 AgentLoop，用 TaskUnderstanding 表达语义，用 Task Contract 控制能力和完成条件。模型每轮只返回结构化 Decision，本地运行时执行工具、检查 Patch、运行命令并验证证据。多 Agent 场景下，Writer 在临时 worktree 开发和测试，Reviewer 审查修改后的真实文件，父 Agent 比较基线后再合入。所有过程进入终端时间线和本地 Session，方便回归和排障。
+> 项目的出发点是：聊天模型可以生成代码，但不能直接被信任去决定权限、执行副作用或宣布任务成功。我把回答、Web、Review、Repository Analysis 和 Change 统一到一个 AgentLoop，用 AI TaskFrame 表达语义，用 Task Contract 控制能力和完成条件。模型每轮只返回结构化 Decision，本地运行时执行工具、检查 Patch、运行命令并验证证据。多 Agent 场景下，Writer 在临时 worktree 开发和测试，Reviewer 审查修改后的真实文件，父 Agent 比较基线后再合入。所有过程进入终端时间线和本地 Session，方便回归和排障。
 
 ### 3 分钟结构
 
 1. 问题：模型输出代码不等于可靠完成仓库任务。
 2. 约束：权限、上下文、外部证据、副作用和失败恢复。
-3. 方案：TaskUnderstanding → Task Contract → AgentLoop。
+3. 方案：AI TaskFrame → Task Contract → AgentLoop。
 4. 难点：混合语义、完整文件覆盖、验证时序、多 Agent worktree、冲突处理。
 5. 结果：确定性测试、AgentBench、三组现场演示。
 6. 边界：应用层沙箱、真实模型成功率和搜索提供商质量。

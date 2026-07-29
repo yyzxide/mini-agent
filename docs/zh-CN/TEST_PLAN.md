@@ -2,11 +2,11 @@
 
 当前项目只保留本地 CLI Agent，因此测试目标是保证 CLI、统一语义与契约、工具系统、AgentLoop、LLM 客户端、Patch、命令、上下文、多 Agent 和 Session 审计稳定。
 
-截至本轮修复，已验证：
+当前验证基线：
 
 - `tsc -p tsconfig.json --noEmit` 通过。
 - `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` 通过。
-- 正常环境全量 Vitest 通过；具体数量和验证日期只在[项目现状](PROJECT_STATUS.md#当前验证基线)维护。
+- `corepack pnpm test` 全量 Vitest 通过；具体数量和验证日期只在[项目现状](PROJECT_STATUS.md#当前验证基线)维护。
 - Windows / Linux 友好性增强：命令测试不再依赖 `printf`、`sh`、`false`、`sleep` 等 Unix-only 命令。
 
 ## 1. 自动化测试范围
@@ -98,7 +98,7 @@
 - `ContextBuilder` 会把相关长期记忆注入 `Long-term retrieved memory`。
 - `mini-agent memory index`、`mini-agent memory search`、`mini-agent memory list` 能输出结构化 JSON。
 - 交互式 `/memory <query>` 能检索当前仓库的长期记忆。
-- 普通 Direct/Web 回答不主动召回长期记忆；仓库任务只按策略选择稳定偏好、项目约定和架构决策，显式历史召回才允许检索已验证结果。实时 Web 问题和易过期赛果必须禁用历史事实召回。
+- 普通回答不主动召回长期记忆；仓库任务只按策略选择稳定偏好、项目约定和架构决策，显式历史召回才允许检索已验证结果。实时 Web 问题和易过期赛果必须禁用历史事实召回。
 - `remember -> search -> forget/clear` 生命周期、失败任务过滤和常见密钥脱敏。
 - `structured-salience-v2` compaction 同时受字符与 Token 预算控制，分层保留用户硬约束、最近对话和执行证据。
 - 超长工具结果会单条裁剪，重复记录会去重；压缩正文保留来源 id，trace 能解释每条选择的分层、原因和裁剪状态。
@@ -138,22 +138,28 @@
 
 测试中可以 stub `fetch`，避免依赖真实网络。
 
-### 1.6 TaskRouter、TaskContract 和兼容标签
+### 1.6 TaskFrame、TaskContract 和单一控制链
 
 覆盖：
 
-- `TaskUnderstanding` 先确定性产出 operation、target、answerShape、answerDepth、外部事实策略和权限信号；高置信度短追问不增加额外模型调用，条件、复杂否定与间接动作进入带 Conversation 的模型结构化补全，合并策略必须保留显式只读/联网/本地事实硬约束。
-- 所有 CLI 请求最终都进入统一 `AgentLoop`；TaskRouter 只映射最终语义记录到兼容标签，`TaskContractBuilder` 负责编译能力和完成条件。
-- 未显式传入契约的程序化调用方也使用语义推导契约；默认契约不授予仓库读取、写入、命令、Web、RAG、MCP 或委派能力。
-- 普通聊天和明确声明“代码片段 / 不要改文件”的请求生成 `DIRECT_RESPONSE` 单步契约，并保留 `DIRECT_ANSWER` 兼容标签。
-- 默认代码生成、仓库修改、测试和修复请求生成 `REPOSITORY_TASK`，并真正创建或修改仓库文件。
-- 需要最新外部资料的问题生成 `WEB_RESEARCH` 契约，并保留 `WEB_ANSWER` 兼容标签。
-- `ExternalFactPolicy` 区分一般知识、需要验证的精确/完整事实和非外部事实；“有哪些知名/代表性例子”保持 Direct，“全部/完整/有界清单”可以在执行前进入 Web。
-- 即使前置路由漏判，`EvidenceRiskAssessor` 也会在 Direct 草稿发布前按有界关系、精确属性、强否定、时态、运行日期矛盾和最近纠错信号复核，并在同一 AgentLoop 中动态升级为 Web 契约。
-- `AnswerQualityPolicy` 独立识别定义、数量、枚举、有界关系、身份和解释型回答；用户要求的简短/均衡/详细深度进入 Task Contract，不以最低字符数代替语义完成性。
-- “世界杯”“股票”等主题名词不能单独强制联网；时效、精确属性、结果或显式研究意图仍应进入 Web。
-- 代码审查与仓库分析共用 `REPOSITORY_INVESTIGATION` 只读契约，只区分输出要求。
-- 多 Agent 默认可用；能力问句保持本地产品回答，明确“使用多个 subagent”进入仓库任务并成为完成条件，不依赖 CLI 开关。
+- CLI、程序化 `AgentLoop` 和 AgentHarness 都先请求受 Schema 约束的 `TaskFrame`，没有公开控制面开关。
+- 旧配置中的 `controlPlane` 字段只会被丢弃，不能启用另一条路由或运行时。
+- `TaskFrame` 包含 objective、target、answer、effects、`webEvidencePolicy`、constraints、collaboration、conversation evidence、completion criteria、confidence 和 rationale。
+- 非法 TaskFrame 使用中性自适应 fallback，不能回退到自然语言正则路由。
+- bootstrap 和编译后的合同都保持 `AGENT_TASK`；Web、知识库、仓库读写、命令和委派是可组合效果。
+- `CapabilityNegotiator` 可以在一次 `AGENT_TASK` 中依次授权 Web、读取、Patch、Command 和精确 MCP Tool。
+- TaskFrame 的显式只读、禁网、禁命令、禁委派和禁 MCP 约束必须拒绝相应动作。
+- 最新/当前任务的搜索视角、抓取数、域名、引用、时效与权威来源要求来自 `webEvidencePolicy`；Guardrail 不得重新用原始问句正则决定证据门槛。
+- 多 Agent 的 requirement、writer proposal、review 和 requestedAgents 由 `TaskFrame.collaboration` 表达。
+- 当 `conversationEvidence.requiresHistory` 为真时，模型语义查询从完整 Session 有界选择旧消息和相邻上下文；仓库 Context 不按原句关键词预加载。
+- MCP metadata 作为不可信数据进入 TaskFrame；每次只授权模型选择的精确 `<server>__<tool>`。
+- 端到端覆盖 TaskFrame -> `web_search` -> `fetch_url` -> `read_file` -> `APPLY_PATCH` -> `RUN_COMMAND` -> `FINAL`。
+- 仓库内绝对路径的 `read_file` 必须成功；超大 `maxLines` / `maxTokens` 自动收敛，负数、错误类型和越界路径返回具体错误。
+
+### 1.6.1 多 Agent 与完成性
+
+- `AnswerQualityPolicy` 消费 TaskFrame 的答案形态和深度。
+- `NONE / CONDITIONAL / REQUIRED` 修改语义由 TaskFrame 表达；无缺陷的条件任务可以只读完成，有 Patch 时必须验证。
 - 子任务协议覆盖 `READ_ONLY`、`PROPOSE_CHANGES` 和依赖前序 Writer 的 `REVIEW_CHANGES`；Writer 在临时 worktree 修改和验证，但不能直接改变主工作区。
 - 主 Agent 只有在收到完成的 patch proposal 后才能执行 `APPLY_DELEGATED_PATCH`，并且合入后仍必须满足父级验证门禁。
 - 子 Agent 的任务开始、worktree、读工具、Patch、受限验证命令、任务完成、变更文件和依赖关系会进入统一终端事件流。
@@ -166,21 +172,22 @@
 - writer 可以在隔离工作区多次应用补丁，并运行允许列表内的测试、类型检查、Lint 或 Build；安装、Shell、联网和高风险命令必须拒绝。
 - reviewer 工作区应物化 writer proposal，使其能检查补丁后的文件与真实 diff。
 - proposal 必须携带基线指纹和子级验证结果；父级并发变化后重新校验，冲突返回 `DELEGATED_PATCH_CONFLICT`，不得覆盖父级内容。
-- 间接请求“实现不太对，你处理一下”可被模型语义补全为仓库修改；“只分析，不要修改”即使模型误判也必须保持只读；非法或低置信度语义 JSON 回退确定性结果。
-- 服务商 `reasoning_content` 只产生“私有字段可用”的遥测，不作为 Direct 正文输出；终端显示 reasoning token、决策理由和工具证据，不显示原始隐藏思维链。
+- 间接请求“实现不太对，你处理一下”由模型 TaskFrame 解释；“只分析，不要修改”的结构化只读约束不能被动作升级突破。
+- 说明历史修改、询问使用方式或询问“是否需要修改”不得因为历史动作词产生强制 Patch。
+- 从 Web 动作继续选择 `read_file` 和 `APPLY_PATCH` 时保持同一个 `AGENT_TASK`，不能要求用户重新发起“编辑模式”任务。
+- 服务商 `reasoning_content` 只产生“私有字段可用”的遥测；终端显示 reasoning token、决策理由和工具证据，不显示原始隐藏思维链。
 - 旧 `DELEGATE_READONLY` 会话记录仍可解析和恢复，但新 Prompt 只公开 `DELEGATE`。
 - 英文关键词按词边界匹配，避免 `latest` 被误判成 `test`。
 - 覆盖 `django`/`go`、`websocket`/`web`、项目管理/项目仓库等词汇碰撞，以及 `.txt`、`.mjs` 等普通文件修改，防止子串和有限样例表制造误路由。
 
-### 1.7 Follow-up Resolver 与 Web 契约
+### 1.7 Conversation 与 Web 证据
 
 覆盖：
 
-- 根据结构化 Conversation 只补全短追问中省略的上一轮主题，不从压缩后的 session memory 文本重新解析另一份会话真相。
-- “360”承接“腾讯有多少子公司”、“字节跳动呢”承接“腾讯有哪些核心产品”时，要恢复数量/枚举谓词，并用补全后的问题重建同类型契约。
-- 普通隐式指代只选择紧邻上一轮，避免旧主题竞争；审计助手旧回答时不走该切片，而是从完整会话记录召回相关原话、相邻问题和后续纠正。
+- TaskFrame 使用最近 Conversation，并可通过语义查询选择更早证据。
+- 当前请求始终是权威目标，旧消息只作为上下文或历史证据。
 - 模型否认可见旧原话时触发一次有界修订；再次冲突时使用只判断“说过什么”、不判断外部真伪的安全回退。
-- Web 行为由 `WEB_RESEARCH` 契约约束：先搜索、再抓取、满足独立来源和引用白名单。
+- Web 行为由 TaskFrame evidence policy 约束：先搜索、再抓取、满足来源和引用要求。
 - 首个搜索查询必须保持用户范围；“知名”不能被改写成未请求的“最知名 / most famous / top / best”排名。
 - `fetch_url` 只接受用户给出的 URL 或成功搜索返回的精确 URL；搜索失败后猜测来源地址必须在执行前拦截。
 - `fetch_url` 对非 2xx、WAF JSON、CAPTCHA、安全验证和登录壳返回结构化失败，不能让 HTTP 200 的反爬页面满足证据门槛。
@@ -196,8 +203,7 @@
 - apply_patch -> git diff -> final。
 - run_command 成功。
 - run_command 失败后进入下一轮。
-- 高风险 Direct 草稿必须被扣留，不能进入实时 Context 或 `ASSISTANT_MESSAGE`；升级后 State 应变为 `WEB_RESEARCH`，获得 Web 工具和新的研究步数预算。
-- Web/Knowledge/Direct 的自然语言 `FINAL` 必须满足问题形态：数量题给数字或范围化限制，枚举题给清晰列表，定义题真正定义对象，只有来源链接的结果必须拒绝。
+- 自然语言 `FINAL` 必须满足 TaskFrame 问题形态：数量题给数字或范围化限制，枚举题给清晰列表，定义题真正定义对象，只有来源链接的结果必须拒绝。
 - 写文件类任务如果没有成功 patch，不能直接 final 成功。
 - 已经有代码上下文的“写进去 / 保存到文件”追问，不能反问用户重复提供代码或文件路径。
 - 最大步数终止。
@@ -236,37 +242,19 @@
 
 新增一套独立的 CLI regression suite，目标不是单纯增加覆盖率，而是固定住已经踩过的真实问题。当前至少覆盖：
 
-- 明确要求“代码片段 / 不要改文件”的请求，不能误入 `AGENT_LOOP`
-- “帮我写个 最长有效括号”这类实现型请求，应该真正落到文件
-- 先返回代码片段，再追问“写入一个文件里面”或“写进去”时，必须自动承接上一轮代码块并创建文件
-- 上一轮是代码落盘任务时，继续问“数据流的中位数呢”这类短算法追问，必须继续走 `AGENT_LOOP`
-- 用户问“你写入了嘛？”时，必须读取 session 中的 `FILE_CHANGE` 记录作答，不能让模型猜测
-- 用户贴出 `npm error enoent Could not read package.json`，且报错路径不在当前仓库时，必须诊断为运行目录错误，而不是说代码本身能跑
-- `葡萄牙呢` 这种短追问，必须结合上一轮会话补全为明确问题
-- 先测试 Skill、再创建五子棋，随后问“这个难度如何”时，`LATEST_REFERENT` 只提供最近的五子棋 exchange；包含“你之前说过……”等审计语义的请求必须先分类为 `PRIOR_RESPONSE_AUDIT`，不能被 latest-only 切片截断
-- `long time no see` 必须走普通问答，不能进入 AgentLoop 或输出 `[diff]`
-- “昨天法国队踢西班牙队，谁赢了”与“法国队vs西班牙队，谁赢了”必须直接进入 `WEB_ANSWER`
-- 普通回答拒绝联网后再说“你用搜一下啊”，必须复用上一轮赛事问题，而不是搜索这句追问本身
-- `/new` 后的实时赛果不得从旧 session 长期记忆中作答
-- 名称、模型标识、处理路径和 `WEB_ANSWER` 能力说明必须由本地产品知识回答，不能虚构手动切换方式
-- AgentLoop 的 tool/patch/command decision 不能作为 `ASSISTANT_MESSAGE` 进入后续聊天历史；旧 session 中紧随 `AGENT_DECISION` 的遗留消息也必须过滤
-- 用户质疑助手较早的原话时，即使该 claim 已超出旧的 newest-16 边界，也必须用 `PRIOR_RESPONSE_AUDIT` 召回；若草稿仍否认原话，最终输出必须被修订并记录 Guardrail/Event
-- “Kanye West 有哪些知名歌曲”属于代表性一般知识，不应仅因“有哪些”强制联网；若显式要求联网，查询不得擅自增加“最”，搜索不可达时必须输出可完成的证据不足说明
-- “OpenAI 最新模型”一类时序最高级问题不能直接接受 DuckDuckGo 前五名：provider 第六名存在更新官方发布时必须经候选池重排进入前列；最终结论还必须有权威时效搜索，且不能忽略证据中的更高同系列版本
-- 搜索质量能力必须对 provider 无关：两个任意命名的 fake provider 应经过同一候选归一化、跨源 URL 去重、fallback 和时效重排，DuckDuckGo HTML 解析不得进入通用 Pipeline/Policy
-- “Claude 最新模型”一类查询允许把 `site:官方域名 + 当前年份` 识别为权威时效检索意图，但必须抓取该次搜索返回的精确站内候选，且正文包含版本、日期、发布、更新或当前状态证据；站外噪声、只搜不抓、抓取其它第三方结果以及无时效内容的公司页都不能满足守卫
-- 连续重复同一个 Final Guardrail 时，错误必须保留具体 guardrail code 和恢复动作，不能与普通模型或工具失败合并为笼统的连续失败
-- Web Research 默认决策上限为 14；`WebResearchProgress` 必须依次表达普通召回、权威搜索、来源检查、证据比较和最终综合的完成状态，并在上下文中展示唯一推荐动作
-- 最新类任务已有一个普通搜索视角后，第二个 `web_search` 若仍非权威时效查询必须被拦截；最后 2 次综合预留中模型可见工具必须为空，运行时也必须拒绝猜 URL、继续搜索、PLAN 或 ASK_USER
-- “第三章 Boss 是谁”“某公司负责人是谁”等跨领域有界关系即使初始被分到 Direct，也必须在草稿发布前升级取证；“运行于 2026 年却声称尚未发布、计划 2024 年发布”必须命中确定性日期矛盾
-- 最近刚发生事实纠错时，新草稿继续输出日期、版本、发布、位置等精确外部结论必须提高证据等级；正确承认并撤回旧错误不能被误判为重新发布事实
-- “光合作用是什么”“解释哈希表原理”等普通定义和原理说明，以及仓库工作和产品能力问题，不应被声明审计无差别升级到 Web
-- “世界杯是什么”“股票是什么”必须保持普通定义路径；“世界杯最新比分”“股票今天收盘价格”仍进入 Web
-- 精确数量和 Direct 动态升级后的有界事实默认需要两个独立抓取来源；限制性回答仍可以在明确说明证据不足时结束
-- 数量答案不能用投资对象、合作伙伴等相邻类别替代用户请求的类别；无稳定总数时必须说明定义、统计范围、时间点或披露限制
-- “分析当前文件夹的项目”必须先读取真实仓库证据，再总结
-- 模型声称“已写入”但没有 patch 时，必须被质量闸门拦截并继续修复
-- 模型在已经有代码上下文时反问“写入什么内容到哪个文件”，必须被质量闸门拦截
+- 文件分析请求必须由 TaskFrame 选择 `read_file`，不能因任意问句分类而丢失读取能力。
+- Web 研究后模型选择 `APPLY_PATCH` 时必须在同一 AgentLoop 写入，不要求用户切换模式。
+- 明确只要代码片段时，模型可直接 `FINAL`，且不产生 Patch。
+- 先回答代码、再要求写入文件时，Conversation 必须把旧代码提供给模型；是否写入由当前 TaskFrame 决定。
+- 当前请求与旧 Session 冲突时以当前请求为准；需要较早原话时由 `conversationEvidence` 语义召回。
+- Tool/Patch/Command decision 不能作为 assistant 自然语言消息污染后续 Conversation。
+- “Kanye West 有哪些知名歌曲”显式联网时，查询不得把“知名”强化为“最知名”。
+- 最新模型 TaskFrame 必须声明 `freshness=CURRENT`、`authority=REQUIRED` 和至少两个搜索视角；Guardrail 据此要求权威检索、精确候选抓取和可见时效证据。
+- 搜索质量能力必须对 provider 无关：候选归一化、跨源 URL 去重、fallback 和时效重排在通用 Pipeline 中完成。
+- 最后 2 次综合预留中模型可见工具为空，运行时拒绝继续搜索、猜 URL、PLAN 或 ASK_USER。
+- 数量答案不能用相邻类别替代用户请求的类别；无稳定总数时说明定义、范围、时间点或披露限制。
+- “分析当前文件夹的项目”必须先读取真实仓库证据，再总结。
+- 模型声称“已写入”但没有 Patch 时，必须被完成性 Guardrail 拦截。
 
 执行命令：
 

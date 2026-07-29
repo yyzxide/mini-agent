@@ -50,13 +50,22 @@ export type AgentRuntimeEvent = RuntimeEventMetadata & (
   | { type: "conversation"; trace: RuntimeConversationTrace }
   | {
     type: "understanding";
-    source: "DETERMINISTIC" | "MODEL_REFINED" | "MODEL_FALLBACK";
+    source: "DETERMINISTIC" | "MODEL_REFINED" | "MODEL_FALLBACK" | "MODEL_TASK_FRAME";
     operation: string;
     target: string;
+    mutationRequirement: "NONE" | "CONDITIONAL" | "REQUIRED";
     confidence: number;
     reason: string;
   }
   | { type: "task_contract"; kind: string; outputKind: string }
+  | {
+    type: "capability_upgrade";
+    previousKind: string;
+    kind: string;
+    action: "APPLY_PATCH" | "APPLY_DELEGATED_PATCH" | "RUN_COMMAND" | "TOOL_CALL" | "DELEGATE";
+    granted: string[];
+    grantedTools?: string[];
+  }
   | { type: "decision"; decisionType: AgentDecision["type"]; message: string; decision?: AgentDecision }
   | { type: "plan"; message: string }
   | { type: "context"; trace: ContextTrace }

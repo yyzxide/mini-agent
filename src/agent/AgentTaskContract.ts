@@ -1,13 +1,8 @@
 import type { TaskChangeMode } from "../session/TaskChangeLogStore.js";
 import type { ToolSpec } from "../llm/LlmClient.js";
-import type { TaskUnderstanding } from "./TaskUnderstanding.js";
+import type { TaskFrame } from "../runtime/TaskFrame.js";
 
-export type AgentTaskKind =
-  | "DIRECT_RESPONSE"
-  | "WEB_RESEARCH"
-  | "REPOSITORY_INVESTIGATION"
-  | "REPOSITORY_TASK"
-  | "KNOWLEDGE_QUERY";
+export type AgentTaskKind = "AGENT_TASK";
 
 export type AgentOutputKind =
   | "NATURAL_LANGUAGE"
@@ -31,9 +26,12 @@ export interface AgentEvidenceRequirements {
   repositoryRead: boolean;
   completeFileRead: boolean;
   webSearch: boolean;
+  webSearchViewCount: number;
   fetchedWebSourceCount: number;
   independentWebDomainCount: number;
   webCitation: boolean;
+  webFreshnessRequired: boolean;
+  webAuthorityRequired: boolean;
   knowledgeSearch: boolean;
 }
 
@@ -42,14 +40,16 @@ export interface AgentTaskContract {
   kind: AgentTaskKind;
   outputKind: AgentOutputKind;
   executionStrategy: "SINGLE_SHOT" | "ITERATIVE";
+  adaptationPolicy: "ADAPTIVE" | "FIXED_READ_ONLY";
   resultMode: TaskChangeMode;
   capabilities: AgentCapabilities;
   evidence: AgentEvidenceRequirements;
   maxSteps: number;
   instructions: string[];
   routeReason?: string;
-  deterministicAnswer?: string;
-  understanding?: TaskUnderstanding;
+  taskFrame?: TaskFrame;
+  /** Exact MCP tool names authorized by TaskFrame capability negotiation. */
+  mcpToolGrants?: string[];
 }
 
 const REPOSITORY_READ_TOOLS = new Set([
@@ -64,12 +64,13 @@ const WEB_TOOLS = new Set(["web_search", "fetch_url"]);
 export function createDefaultAgentTaskContract(): AgentTaskContract {
   return {
     version: 1,
-    kind: "DIRECT_RESPONSE",
-    outputKind: "NATURAL_LANGUAGE",
-    executionStrategy: "SINGLE_SHOT",
-    resultMode: "DIRECT_ANSWER",
+    kind: "AGENT_TASK",
+    outputKind: "TASK_RESULT",
+    executionStrategy: "ITERATIVE",
+    adaptationPolicy: "ADAPTIVE",
+    resultMode: "AGENT_LOOP",
     capabilities: {
-      repositoryRead: false,
+      repositoryRead: true,
       repositoryWrite: false,
       commandExecution: false,
       webAccess: false,
@@ -81,14 +82,18 @@ export function createDefaultAgentTaskContract(): AgentTaskContract {
       repositoryRead: false,
       completeFileRead: false,
       webSearch: false,
+      webSearchViewCount: 0,
       fetchedWebSourceCount: 0,
       independentWebDomainCount: 0,
       webCitation: false,
+      webFreshnessRequired: false,
+      webAuthorityRequired: false,
       knowledgeSearch: false,
     },
-    maxSteps: 1,
+    maxSteps: 20,
     instructions: [
-      "No capabilities are granted by default. Build an explicit task contract before using tools or changing repository state.",
+      "Compile the raw request into a TaskFrame before choosing actions.",
+      "Safe tools are discoverable. Repository writes, commands, network access, delegation, and MCP calls require runtime authorization.",
     ],
   };
 }
@@ -112,8 +117,7 @@ export function isToolAllowedByTaskContract(
 
   if (tool.source === "mcp") {
     if (!contract.capabilities.mcpAccess) return false;
-    if (contract.capabilities.repositoryWrite || contract.capabilities.commandExecution) return true;
-    return tool.annotations?.readOnlyHint === true && tool.annotations.destructiveHint === false;
+    return contract.mcpToolGrants?.includes(tool.name) === true;
   }
 
   return false;
@@ -127,6 +131,9 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
     contract.evidence.repositoryRead ? "read repository evidence before final" : undefined,
     contract.evidence.completeFileRead ? "read every line of the target file before final" : undefined,
     contract.evidence.webSearch ? "perform web_search before final" : undefined,
+    contract.evidence.webSearchViewCount > 1
+      ? `perform ${String(contract.evidence.webSearchViewCount)} non-equivalent search views`
+      : undefined,
     contract.evidence.fetchedWebSourceCount > 0
       ? `fetch at least ${String(contract.evidence.fetchedWebSourceCount)} web source(s)`
       : undefined,
@@ -134,6 +141,8 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
       ? `use at least ${String(contract.evidence.independentWebDomainCount)} independent web domain(s)`
       : undefined,
     contract.evidence.webCitation ? "cite gathered source URLs verbatim" : undefined,
+    contract.evidence.webFreshnessRequired ? "show visible freshness evidence" : undefined,
+    contract.evidence.webAuthorityRequired ? "inspect an authority-targeted source" : undefined,
     contract.evidence.knowledgeSearch ? "perform knowledge_search before final" : undefined,
   ].filter((value): value is string => value !== undefined);
 
@@ -141,13 +150,18 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
     `Task kind: ${contract.kind}`,
     `Output kind: ${contract.outputKind}`,
     `Execution strategy: ${contract.executionStrategy}`,
-    ...(contract.understanding ? [
-      `Understood operation: ${contract.understanding.operation}`,
-      `Understood target: ${contract.understanding.target}`,
-      `Answer shape: ${contract.understanding.answerShape}`,
-      `Understanding confidence: ${contract.understanding.confidence.toFixed(2)}`,
+    `Capability adaptation: ${contract.adaptationPolicy}`,
+    ...(contract.taskFrame ? [
+      `Task objective: ${contract.taskFrame.objective}`,
+      `Task target: ${contract.taskFrame.target}`,
+      `Repository mutation: ${contract.taskFrame.effects.repositoryWrite}`,
+      `Answer form: ${contract.taskFrame.answer.shape} / ${contract.taskFrame.answer.depth}`,
+      `Task completion criteria: ${contract.taskFrame.completionCriteria.join(" | ") || "satisfy the objective"}`,
     ] : []),
     `Enabled capabilities: ${enabledCapabilities.join(", ") || "none"}`,
+    ...(contract.mcpToolGrants?.length
+      ? [`MCP tool grants: ${contract.mcpToolGrants.join(", ")}`]
+      : []),
     `Evidence requirements: ${evidence.join("; ") || "none beyond an accurate answer"}`,
     "Task-specific instructions:",
     ...(contract.instructions.length > 0

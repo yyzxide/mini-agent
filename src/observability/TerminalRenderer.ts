@@ -54,7 +54,7 @@ export class TerminalRenderer {
         return;
       case "understanding":
         if (event.source !== "DETERMINISTIC" || this.verbosity !== "normal") {
-          this.line(`${this.paint("cyan", "├─")} [understanding] ${event.source.toLowerCase()} · ${event.operation}/${event.target} · confidence=${event.confidence.toFixed(2)}`);
+          this.line(`${this.paint("cyan", "├─")} [understanding] ${event.source.toLowerCase()} · ${event.operation}/${event.target} · mutation=${event.mutationRequirement.toLowerCase()} · confidence=${event.confidence.toFixed(2)}`);
           if (this.verbosity !== "normal") this.detail(event.reason);
         }
         return;
@@ -64,6 +64,12 @@ export class TerminalRenderer {
           kind: event.kind as AgentTaskContract["kind"],
           outputKind: event.outputKind as AgentTaskContract["outputKind"],
         };
+        return;
+      case "capability_upgrade":
+        this.line(`${this.paint("yellow", "├─")} [capability] ${event.previousKind} → ${event.kind} · action=${event.action} · granted=${[
+          ...event.granted,
+          ...(event.grantedTools ?? []).map((tool) => `mcp:${tool}`),
+        ].join(",")}`);
         return;
       case "decision":
         if (!["PLAN", "FINAL", "FAILED"].includes(event.decisionType)) {
@@ -182,6 +188,7 @@ export class TerminalRenderer {
       : [
         trace.selectionStrategy === "LATEST_REFERENT" ? "prioritized latest exchange" : undefined,
         trace.selectionStrategy === "PRIOR_RESPONSE_AUDIT" ? "prior-response audit" : undefined,
+        trace.selectionStrategy === "TASK_FRAME_RETRIEVAL" ? "TaskFrame semantic retrieval" : undefined,
         trace.selectionStrategy === "PRIOR_RESPONSE_AUDIT" && trace.matchedAssistantMessages > 0
           ? `matched ${String(trace.matchedAssistantMessages)} prior assistant message(s)`
           : undefined,
@@ -308,8 +315,6 @@ export class TerminalRenderer {
     }
     if (this.contract.outputKind === "CODE_REVIEW") {
       this.line(`[review]\n${safeSummary}`);
-    } else if (this.contract.kind === "DIRECT_RESPONSE" || this.contract.kind === "WEB_RESEARCH") {
-      this.line(`[answer]\n${safeSummary}`);
     } else {
       this.line(`[summary] ${safeSummary}`);
     }

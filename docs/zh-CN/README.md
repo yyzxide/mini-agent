@@ -18,7 +18,7 @@
 
 | 文档 | 内容 | 维护原则 |
 | --- | --- | --- |
-| [架构设计](ARCHITECTURE.md) | AgentLoop、TaskUnderstanding、TaskContract、Context、证据、子代理和终端事件 | 只描述当前实现 |
+| [架构设计](ARCHITECTURE.md) | AgentLoop、TaskFrame、TaskContract、Context、证据、子代理和终端事件 | 只描述当前实现 |
 | [项目现状](PROJECT_STATUS.md) | 能力清单、验证基线、产品边界和剩余风险 | 不使用主观百分制评分 |
 | [测试计划](TEST_PLAN.md) | 自动化、场景测试、手工验收和提交前命令 | 与真实测试和 CLI 保持一致 |
 | [Roadmap](ROADMAP.md) | 已完成能力与有限的下一步 | 不把“可做”全部写成“必须做” |
@@ -54,10 +54,7 @@
 
 ```text
 User request
-  -> Follow-up resolution
-  -> TaskUnderstanding
-     -> optional schema-validated semantic refinement
-  -> TaskRouter compatibility label
+  -> schema-validated AI TaskFrame
   -> AgentTaskContract
   -> AgentLoop
      -> ContextBuilder
@@ -70,9 +67,9 @@ User request
 运行时的关键原则：
 
 - Task Contract 是每轮能力与完成条件的唯一边界。
-- 简单语义使用确定性理解；条件、复杂否定和间接动作可请求模型消歧。
+- 开放式语义统一由模型编译为 TaskFrame；确定性代码只处理授权、安全和证据。
 - 模型不能仅凭自己的标签获得仓库写权限。
-- Direct、Web、Review、Repository Analysis 与 Change 使用同一个 AgentLoop，不是五套执行器。
+- 回答、Web、Review、Repository Analysis 与 Change 使用同一个 AgentLoop，不是五套执行器。
 - Writer 子代理在一次性 worktree 中修改和验证；Reviewer 读取物化后的依赖补丁；主 Agent 独占合入权。
 - 终端展示结构化决策和证据，不展示隐藏思维链。
 - Prompt Cache、Embedding Cache、Conversation 与 Context Compaction 是四个不同概念。

@@ -184,7 +184,7 @@ describe("TerminalRenderer", () => {
     expect(text).toContain("tools=read_file");
     expect(text).toContain("367 tests passed");
     expect(text).toContain("[usage] calls=1");
-    expect(text).toContain("[answer]\nDone.");
+    expect(text).toContain("[summary] Done.");
   });
 
   it("shows when conversation evidence was selected for a prior-response audit", () => {

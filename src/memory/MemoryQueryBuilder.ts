@@ -1,11 +1,9 @@
 import { extractKeywords, unique } from "./MemoryText.js";
-import { understandTask, type TaskUnderstanding } from "../agent/TaskUnderstanding.js";
 
 export type MemoryQueryIntent =
   | "CODE_TASK"
   | "CODE_REVIEW"
   | "ERROR_DIAGNOSIS"
-  | "WEB_RESEARCH"
   | "CONVERSATION"
   | "GENERAL";
 
@@ -41,14 +39,12 @@ const QUERY_EXPANSIONS: Array<{ pattern: RegExp; terms: string[] }> = [
 export function buildMemoryQuery(input: BuildMemoryQueryInput): MemoryQuery {
   const originalQuery = input.query.trim();
   const normalizedQuery = normalizeQuery(originalQuery);
-  const understanding = understandTask(originalQuery);
-  const intent = inferMemoryQueryIntent(normalizedQuery, understanding);
+  const intent = inferMemoryQueryIntent(normalizedQuery);
   const preferredModes = inferPreferredModes(intent, normalizedQuery);
   const expansions = [
     ...QUERY_EXPANSIONS
       .filter((item) => item.pattern.test(normalizedQuery))
       .flatMap((item) => item.terms),
-    ...semanticExpansionTerms(understanding),
   ];
   const recentContextTerms = input.recentMemory
     ? extractKeywords(input.recentMemory).slice(0, 12)
@@ -91,48 +87,20 @@ function normalizeQuery(value: string): string {
 
 function inferMemoryQueryIntent(
   query: string,
-  understanding: TaskUnderstanding,
 ): MemoryQueryIntent {
-  if (understanding.signals.includes("local-diagnostic")) {
+  if (/报错|错误|失败|\b(?:error|failed|exception|enoent)\b/i.test(query)) {
     return "ERROR_DIAGNOSIS";
   }
-  if (understanding.target === "SESSION") {
-    return "CONVERSATION";
-  }
-  if (understanding.operation === "RESEARCH") {
-    return "WEB_RESEARCH";
-  }
-  if (understanding.operation === "REVIEW_REPOSITORY") {
-    return "CODE_REVIEW";
-  }
-  if (
-    understanding.operation === "CHANGE_REPOSITORY"
-    || understanding.operation === "ANALYZE_REPOSITORY"
-    || understanding.operation === "QUERY_KNOWLEDGE"
-    || /怎么运行|运行|启动|\b(?:run|start)\b/.test(query)
-  ) {
+  if (/怎么运行|运行|启动|写入|写进去|修改|实现|\b(?:run|start|write|modify|implement)\b/i.test(query)) {
     return "CODE_TASK";
   }
-  return "GENERAL";
-}
-
-function semanticExpansionTerms(understanding: TaskUnderstanding): string[] {
-  switch (understanding.operation) {
-    case "RESEARCH":
-      return ["联网", "搜索", "来源", "web_search", "fetch_url"];
-    case "REVIEW_REPOSITORY":
-      return ["代码审查", "finding", "verification"];
-    case "ANALYZE_REPOSITORY":
-      return ["仓库分析", "repository", "evidence"];
-    case "CHANGE_REPOSITORY":
-      return ["仓库修改", "patch", "verification"];
-    case "QUERY_KNOWLEDGE":
-      return ["知识库", "knowledge_search", "citation"];
-    case "LOCAL_STATE":
-      return understanding.target === "SESSION" ? ["记忆", "session", "summary"] : [];
-    case "ANSWER":
-      return [];
+  if (/记得|之前|上次|刚才|历史|\b(?:memory|session|previous|earlier)\b/i.test(query)) {
+    return "CONVERSATION";
   }
+  if (/审查|检查.*bug|\b(?:review|code review)\b/i.test(query)) {
+    return "CODE_REVIEW";
+  }
+  return "GENERAL";
 }
 
 function inferPreferredModes(intent: MemoryQueryIntent, query: string): string[] {
@@ -140,13 +108,11 @@ function inferPreferredModes(intent: MemoryQueryIntent, query: string): string[]
     case "CODE_TASK":
       return ["AGENT_LOOP"];
     case "CODE_REVIEW":
-      return ["CODE_REVIEW", "AGENT_LOOP"];
+      return ["AGENT_LOOP"];
     case "ERROR_DIAGNOSIS":
-      return ["DIRECT_ANSWER", "AGENT_LOOP"];
-    case "WEB_RESEARCH":
-      return ["WEB_ANSWER"];
+      return ["AGENT_LOOP"];
     case "CONVERSATION":
-      return ["DIRECT_ANSWER", "WEB_ANSWER", "AGENT_LOOP"];
+      return ["AGENT_LOOP"];
     case "GENERAL":
       return /怎么运行|运行|启动|run/.test(query) ? ["AGENT_LOOP"] : [];
     default:
@@ -158,7 +124,7 @@ function inferRecencyBias(intent: MemoryQueryIntent, query: string): number {
   if (/刚才|最近|latest|current|今天|昨天|yesterday|上次|previous|last/.test(query)) {
     return 1;
   }
-  if (intent === "WEB_RESEARCH" || intent === "ERROR_DIAGNOSIS") {
+  if (intent === "ERROR_DIAGNOSIS") {
     return 0.75;
   }
   if (intent === "CONVERSATION") {
@@ -173,7 +139,6 @@ function inferEvidenceBudget(intent: MemoryQueryIntent): number {
     case "ERROR_DIAGNOSIS":
       return 6;
     case "CODE_TASK":
-    case "WEB_RESEARCH":
       return 5;
     default:
       return 4;

@@ -6,7 +6,7 @@
 
 ## 一句话定位
 
-`mini-coding-agent` 是一个本地运行、可审计、契约驱动的 AI Coding Agent CLI。它重点解决自然语言任务理解、最小权限工具执行、上下文治理、证据完成性、仓库变更和隔离式多 Agent 协作。
+`mini-coding-agent` 是一个本地运行、可审计、由 AI TaskFrame 驱动并由确定性安全内核约束的 AI Coding Agent CLI。它重点解决自然语言任务理解、最小权限工具执行、上下文治理、证据完成性、仓库变更和隔离式多 Agent 协作。
 
 当前成熟度可以描述为：
 
@@ -16,50 +16,53 @@
 
 ## 当前验证基线
 
-截至 2026-07-27，本地确定性验证基线为：
+截至 2026-07-28，本地确定性验证基线为：
 
 - 62 个 Vitest 测试文件；
-- 549 个自动化测试；
+- 510 个自动化测试；
+- `npm test -- --run` 实际运行全部通过；
 - TypeScript 构建通过；
 - `noUnusedLocals` / `noUnusedParameters` 检查通过；
 - `git diff --check` 通过；
 - GitHub Actions 在 `main` 的 push 和 pull request 上执行安装、构建与测试。
 
-测试数量只是当前快照，不是质量本身。更重要的是覆盖范围包含权限边界、失败路径和端到端 AgentLoop，而不只是工具函数。
+测试数量相比迁移前减少，是因为删除了旧 Router、TaskUnderstanding、LocalReply 及双控制面专用测试，并把旧 CLI 回归替换为单控制链架构回归。更重要的是覆盖范围包含权限边界、失败路径和端到端 AgentLoop，而不只是工具函数。
 
 ## 已完成的核心闭环
 
 ### 1. 单一 AgentLoop
 
-Direct Answer、Web Research、Code Review、Repository Analysis 和 Repository Change 最终都进入同一个 `AgentLoop`。任务差异由 `AgentTaskContract` 表达：
+运行时不再先把请求划入 Direct、Web、Review 或 Edit 模式。每个 CLI 请求都以 `AGENT_TASK` 进入同一个 `AgentLoop`，任务差异由 `TaskFrame` 和当前效果授权表达：
 
-- 能使用哪些工具；
-- 是否允许读仓库、写仓库、执行命令、访问 Web 或委派；
-- 需要哪些证据；
-- 输出形态和回答深度；
-- 最大步骤与完成条件。
+- 用户目标和目标范围；
+- 是否需要回答、读写仓库、执行命令、访问 Web、知识库或委派；
+- 显式只读、禁网、禁命令等约束；
+- 验证强度和完成条件；
+- 当前已经授权的最小能力与已获得的证据。
 
-旧模式名只作为兼容标签保存在 Session 和变更记录中，不再对应独立执行器。
+模型选择 `web_search`、`read_file`、`APPLY_PATCH`、`RUN_COMMAND` 或某个 MCP Tool 时，`CapabilityNegotiator` 在同一个 State、Session 和事件流中申请并组合能力，`kind` 始终保持 `AGENT_TASK`。CLI、程序化 `AgentLoop` 和 AgentHarness 使用同一条 TaskFrame 执行链。旧 Session 中的结果字符串只用于持久化数据兼容，不对应另一套执行器。
 
-### 2. 混合任务理解
+### 2. AI TaskFrame 任务理解
 
-`TaskUnderstanding` 是语义控制面的统一记录。系统先用确定性逻辑处理高置信度简单请求和短追问；遇到条件、复杂否定或间接动作时，可请求模型返回受 Schema 约束的语义候选。
+`TaskFrame` 是唯一语义记录。`TaskFrameResolver` 让模型结合原始请求和 Conversation 返回受 Zod Schema 约束的目标、效果、Web 证据策略、约束、验证等级和完成条件。CLI 不通过问句关键词决定能否读取文件、联网或修改代码。
 
-合并策略遵循以下边界：
+运行边界如下：
 
-- 显式只读约束不能被模型升级为写入；
-- 显式 Web 请求不能被降级为模型记忆回答；
-- 模型声称 `CHANGE_REPOSITORY` 时，还必须一致地给出修改意图；
-- 非法 JSON、低置信度或不可用的语义完成自动回退确定性结果；
-- Task Contract 只消费最终语义记录，不再重新猜测原句。
+- 模型负责解释目标和选择下一步动作，本地代码负责授权与执行；
+- 显式只读、禁网、禁命令约束不能被后续模型动作突破；
+- 写入、命令、Web 和委派是可组合效果，不是需要切换的互斥模式；
+- 非法 JSON 或不可用的 TaskFrame 使用中性自适应 fallback，不退回正则自然语言路由；
+- Completion Contract 消费 TaskFrame 和实际证据，不在结束阶段重新猜测原始问句；
+- 路径沙箱、危险命令、Patch 检查、权限确认和验证时序仍由确定性内核掌控。
 
-这不是完整的自然语言理解模型，但比为具体问句编写特殊分支更可泛化、也更可审计。
+旧 `TaskUnderstanding`、`TaskUnderstandingResolver`、`TaskRouter`、`TaskContractBuilder`、`LegacyControlPlane` 和本地固定问句回复器已经从源码物理删除。配置中也不再公开控制面开关；加载旧配置时只会丢弃旧字段。
 
 ### 3. 可验证的仓库执行
 
 仓库任务支持：
 
 - 安全列目录、搜索和分页读文件；
+- 过大的 `read_file` 分页提示自动收敛，真实 Schema 错误返回具体字段；
 - 完整文件覆盖率追踪；
 - unified diff 检查与应用；
 - 结构化命令执行和实时输出；
@@ -69,7 +72,7 @@ Direct Answer、Web Research、Code Review、Repository Analysis 和 Repository 
 - 新文件与文档变更记录；
 - 中断 checkpoint 与恢复。
 
-成功 `FINAL` 不是模型单方面决定。运行时会检查是否真的产生了要求的修改、证据是否覆盖目标、测试是否相关且发生在最新补丁之后。
+成功 `FINAL` 不是模型单方面决定。运行时会检查 `REQUIRED` 修改是否真的落盘、条件修改是否已有调查证据、证据是否覆盖目标、测试是否相关且发生在最新补丁之后。
 
 ### 4. 隔离式多 Agent 协作
 
@@ -96,11 +99,13 @@ Writer 的命令允许列表是应用层控制，不等同于容器或操作系�
 - Prompt Cache：模型服务商报告的输入 Token 复用；
 - Embedding Cache：本地检索向量缓存。
 
-Context 使用字符与 Token 双预算，并记录选中、裁剪和排除原因。短追问会优先解析最近 exchange、artifact 和本地事实，避免把“文件在哪里”回答成产品能力介绍。
+Context 使用字符与 Token 双预算，并记录选中、裁剪和排除原因。运行时先用中性的最近消息窗口构建 TaskFrame；当模型声明需要旧陈述、决策、产物、约束或话题证据时，由 `TaskFrame.conversationEvidence.queries` 从完整 Session 中选择有界语义匹配及其相邻上下文。
 
 ### 6. Web 证据闭环
 
 Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效候选比较、任务相关证据阈值和引用白名单。
+
+搜索视角数、抓取数、独立域名、引用、时效与权威来源要求由模型写入 `TaskFrame.webEvidencePolicy`，Guardrail 只执行结构化策略，不再从原始问句正则推断“最新版任务”。
 
 已处理的典型失败包括：
 
@@ -150,8 +155,15 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 
 - 真实模型任务成功率尚未形成足够大的公开 benchmark。
 - 自动化测试主要证明运行时确定性，不代表所有模型都能稳定规划。
-- 混合语义层减少规则误判，但复杂表达仍依赖模型质量。
+- TaskFrame 和动作选择仍依赖模型质量；中性 fallback 保证架构不倒退到硬编码路由，但不能替代可用模型。
 - 缺少按模型、任务类别和重复次数长期维护的成功率/成本趋势。
+
+### 语义与控制边界
+
+- 多 Agent 要求进入 `TaskFrame.collaboration`，长会话取证进入 `TaskFrame.conversationEvidence`，Web 时效要求进入 `TaskFrame.webEvidencePolicy`。
+- 系统使用中性的最近窗口解析 TaskFrame，再根据模型给出的语义查询从完整 Session 有界召回历史消息和相邻上下文；它不是向量检索。
+- 产品元事实校验、危险命令、路径、URL 血缘和 Memory 召回仍有确定性规则，但这些规则不选择 Direct/Web/Edit 执行模式。
+- 配置中的 MCP Tool 可被模型逐个发现和申请；授权精确到 `<server>__<tool>`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准。
 
 ### 安全与隔离
 

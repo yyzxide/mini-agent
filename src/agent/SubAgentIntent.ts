@@ -1,3 +1,5 @@
+import type { AgentTaskContract } from "./AgentTaskContract.js";
+
 export type DelegationPreference = "AUTO" | "REQUIRED" | "DISABLED";
 
 export interface SubAgentIntent {
@@ -47,6 +49,44 @@ export function classifySubAgentIntent(value: string): SubAgentIntent {
     requestsChangeProposal,
     requestsReview,
     signals,
+  };
+}
+
+/** Resolve collaboration policy only from the model-compiled TaskFrame. */
+export function resolveContractSubAgentIntent(
+  contract: AgentTaskContract,
+): SubAgentIntent {
+  const collaboration = contract.taskFrame?.collaboration;
+  if (!collaboration) {
+    return {
+      mentioned: false,
+      capabilityQuestion: false,
+      preference: "AUTO",
+      requestsChangeProposal: false,
+      requestsReview: false,
+      signals: ["task-frame-collaboration-pending"],
+    };
+  }
+  const disabled = contract.taskFrame?.constraints.noDelegation === true;
+  const preference = disabled
+    ? "DISABLED"
+    : collaboration.requirement === "REQUIRED" ? "REQUIRED" : "AUTO";
+  return {
+    mentioned: disabled || collaboration.requirement !== "NONE",
+    capabilityQuestion: false,
+    preference,
+    ...(collaboration.requestedAgents === null
+      ? {}
+      : { requestedAgents: collaboration.requestedAgents }),
+    requestsChangeProposal: collaboration.changeProposal,
+    requestsReview: collaboration.review,
+    signals: [
+      "task-frame",
+      ...(disabled ? ["delegation-disabled"] : []),
+      ...(collaboration.requirement === "REQUIRED" ? ["explicit-delegation"] : []),
+      ...(collaboration.changeProposal ? ["delegated-change"] : []),
+      ...(collaboration.review ? ["delegated-review"] : []),
+    ],
   };
 }
 

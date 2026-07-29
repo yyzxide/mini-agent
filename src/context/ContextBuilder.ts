@@ -1,7 +1,5 @@
-import { looksLikeDocumentCreationTask } from "../agent/ArtifactIntent.js";
 import type { AgentState } from "../agent/AgentState.js";
 import { buildTaskCompletionContract, formatTaskCompletionContract } from "../agent/TaskCompletionContract.js";
-import { looksLikeIndexedKnowledgeRequest } from "../agent/TaskRouter.js";
 import { isTestCommand } from "../command/CommandClassification.js";
 import { GitManager } from "../git/GitManager.js";
 import { MemoryContextService } from "../memory/MemoryContextService.js";
@@ -15,7 +13,7 @@ import {
   formatLatestFileChunk,
   formatRecentEvidence,
 } from "./ContextEvidence.js";
-import type { ContextSectionCandidate, ContextTrace, TaskPhase, WorkingSet } from "./ContextTypes.js";
+import type { ContextSectionCandidate, ContextTrace, WorkingSet } from "./ContextTypes.js";
 import { FilePlacementAdvisor, formatFilePlacementAdvice } from "./FilePlacementAdvisor.js";
 import { formatRepoState, RepoStateAnalyzer } from "./RepoStateAnalyzer.js";
 import { RepoScanner } from "./RepoScanner.js";
@@ -58,23 +56,29 @@ export class ContextBuilder {
     const workingSet = buildWorkingSet(state);
     const phase = workingSet.phase;
     const goal = state.userGoal;
-    const canReadRepository = state.taskContract.capabilities.repositoryRead;
-    const needsTree = canReadRepository && shouldIncludeTree(goal, phase, workingSet);
-    const needsReadme = canReadRepository && shouldIncludeReadme(goal, phase);
-    const needsBuildFiles = canReadRepository && shouldIncludeBuildFiles(goal, phase);
-    const needsFilePlacement = canReadRepository && shouldIncludeFilePlacement(goal, phase, state);
-    const needsRepoState = canReadRepository && (phase === "DISCOVERY" || needsFilePlacement);
-    const knowledgeRequest = state.taskContract.understanding?.operation === "QUERY_KNOWLEDGE"
-      || (!state.taskContract.understanding && looksLikeIndexedKnowledgeRequest(goal));
+    // Model-visible read tools are intentionally broader than eagerly hydrated
+    // repository context. TaskFrame evidence requirements control hydration;
+    // ordinary chat does not pay for an unsolicited tree/status/diff scan.
+    const hydrateRepositoryContext = state.taskContract.capabilities.repositoryRead
+      && state.taskContract.evidence.repositoryRead;
+    // Repository material is acquired through safe tools rather than
+    // task-specific request regexes.
+    const needsTree = false;
+    const needsReadme = false;
+    const needsBuildFiles = false;
+    const needsFilePlacement = false;
+    const needsRepoState = false;
+    const knowledgeRequest = state.taskContract.taskFrame?.effects.knowledgeEvidence === true
+      || state.taskContract.evidence.knowledgeSearch;
     const memoryPlan = planMemoryRead({
       query: goal,
       mode: memoryModeForTask(state),
-      needsLiveData: state.taskContract.kind === "WEB_RESEARCH",
+      needsLiveData: state.taskContract.taskFrame?.effects.webEvidence === true,
       indexedKnowledgeRequest: knowledgeRequest,
     });
     const needsLongTermMemory = memoryPlan.retrieve;
-    const needsSessionMemory = state.taskContract.kind !== "DIRECT_RESPONSE"
-      || state.taskContract.understanding?.target === "SESSION";
+    const needsSessionMemory = state.taskContract.taskFrame?.target === "SESSION"
+      || state.taskContract.taskFrame?.conversationEvidence.requiresHistory === true;
 
     const scanner = new RepoScanner({ repoPath: this.repoPath });
     const git = new GitManager({ repoPath: this.repoPath });
@@ -106,11 +110,11 @@ export class ContextBuilder {
       needsBuildFiles
         ? scanner.readBuildFileSummary().catch((error: unknown) => `error: ${errorToText(error)}`)
         : Promise.resolve(""),
-      canReadRepository ? scanner.isGitRepository().catch(() => false) : Promise.resolve(false),
-      canReadRepository
+      hydrateRepositoryContext ? scanner.isGitRepository().catch(() => false) : Promise.resolve(false),
+      hydrateRepositoryContext
         ? git.getStatus().catch((error: unknown) => `error: ${errorToText(error)}`)
         : Promise.resolve(""),
-      canReadRepository
+      hydrateRepositoryContext
         ? git.getDiff({ maxChars: 10_000 }).then((result) => result.diff)
           .catch((error: unknown) => `error: ${errorToText(error)}`)
         : Promise.resolve(""),
@@ -222,8 +226,7 @@ export class ContextBuilder {
 }
 
 function memoryModeForTask(state: AgentState): MemoryConsumerMode {
-  if (state.taskContract.kind === "DIRECT_RESPONSE") return "DIRECT_ANSWER";
-  if (state.taskContract.kind === "WEB_RESEARCH") return "WEB_ANSWER";
+  if (state.taskContract.taskFrame?.effects.webEvidence === true) return "WEB_ANSWER";
   if (state.taskContract.outputKind === "CODE_REVIEW") return "CODE_REVIEW";
   if (state.taskContract.outputKind === "REPOSITORY_ANALYSIS") return "REPOSITORY_ANALYSIS";
   return "AGENT_LOOP";
@@ -317,8 +320,8 @@ function buildCandidates(input: {
       title: "Web research progress",
       content: input.webResearchProgress,
       priority: 98,
-      required: input.state.taskContract.kind === "WEB_RESEARCH",
-      enabled: input.state.taskContract.kind === "WEB_RESEARCH",
+      required: input.state.taskContract.evidence.webSearch,
+      enabled: input.state.taskContract.evidence.webSearch,
       maxTokens: 520,
       retention: "head_tail",
       reason: "A deterministic research state exposes satisfied evidence, the exact next action, and the final-synthesis reserve.",
@@ -485,7 +488,7 @@ function buildCandidates(input: {
       title: "Runtime context",
       content: formatRuntimeContext(),
       priority: 60,
-      enabled: isTemporalTask(input.state.userGoal),
+      enabled: input.state.taskContract.taskFrame?.effects.webEvidence === true,
       maxTokens: 300,
       reason: "Current date and time are injected only for time-sensitive tasks.",
     },
@@ -502,44 +505,6 @@ function formatDelegationEvidence(state: AgentState): string {
       formatSubAgentResults(batch.results),
     ].join("\n")),
   ].join("\n\n");
-}
-
-function shouldIncludeTree(goal: string, phase: TaskPhase, workingSet: WorkingSet): boolean {
-  if (phase !== "DISCOVERY") {
-    return false;
-  }
-  return workingSet.relevantFiles.length === 0 || isRepositoryOverviewTask(goal);
-}
-
-function shouldIncludeReadme(goal: string, phase: TaskPhase): boolean {
-  return phase === "DISCOVERY" && (
-    /\breadme\b/i.test(goal)
-    || isRepositoryOverviewTask(goal)
-    || /(?:怎么|如何|怎样).{0,10}(?:运行|安装|配置|使用)|\b(?:how to|setup|installation|getting started|usage)\b/i.test(goal)
-  );
-}
-
-function shouldIncludeBuildFiles(goal: string, phase: TaskPhase): boolean {
-  return phase === "DISCOVERY" && (
-    isRepositoryOverviewTask(goal)
-    || /(?:构建|编译|运行|安装|依赖|测试|配置|脚本)|\b(?:build|compile|run|install|dependency|dependencies|test|config|script)\b/i.test(goal)
-  );
-}
-
-function shouldIncludeFilePlacement(goal: string, phase: TaskPhase, state: AgentState): boolean {
-  if (phase === "VERIFICATION" || state.patchResults.some((result) => result.result.success)) {
-    return false;
-  }
-  return looksLikeDocumentCreationTask(goal)
-    || /(?:写一个|写个|创建|新建|新增|生成|实现一个|scaffold|create a|create an|write a|write an|add a new)/i.test(goal);
-}
-
-function isRepositoryOverviewTask(goal: string): boolean {
-  return /(?:分析|检查|审视|了解|介绍|概览|总结).{0,12}(?:仓库|项目|代码库)|(?:仓库|项目|代码库).{0,12}(?:分析|结构|概览|总结)|\b(?:inspect|analyze|understand|overview|summarize)\b.{0,20}\b(?:repo|repository|project|codebase)\b/i.test(goal);
-}
-
-function isTemporalTask(goal: string): boolean {
-  return /(?:今天|现在|当前时间|当前日期|昨天|明天|最新|最近)|\b(?:today|now|current date|current time|yesterday|tomorrow|latest|recent)\b/i.test(goal);
 }
 
 function formatDiagnostics(state: AgentState): string {

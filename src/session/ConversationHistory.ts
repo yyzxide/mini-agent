@@ -14,7 +14,8 @@ export interface ConversationHistoryOptions {
 export type ConversationSelectionStrategy =
   | "RECENT_HISTORY"
   | "LATEST_REFERENT"
-  | "PRIOR_RESPONSE_AUDIT";
+  | "PRIOR_RESPONSE_AUDIT"
+  | "TASK_FRAME_RETRIEVAL";
 
 export interface ConversationFocusOptions {
   maxMessages?: number;

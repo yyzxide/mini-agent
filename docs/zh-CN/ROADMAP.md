@@ -7,7 +7,7 @@
 ## 已完成的主线
 
 - 单一 `AgentLoop` + deny-by-default `AgentTaskContract`。
-- 统一 `TaskUnderstanding` 与条件式模型语义补全。
+- 统一 `TaskFrame` 模型语义编译。
 - Direct、Web、Review、Analysis、Change 共用执行生命周期。
 - 结构化 Tool Registry、Zod 参数校验和权限元数据。
 - 路径安全、Patch check、受控命令和验证强度。
@@ -65,7 +65,7 @@
 
 ### 语义评测
 
-- 为 TaskUnderstanding 生成释义、否定、条件和中英文对抗样本；
+- 为 TaskFrame 生成释义、否定、条件和中英文对抗样本；
 - 统计误授予权限、误拒绝修改和追问谓词丢失；
 - 对模型语义补全测量调用率与回退率；
 - 不恢复按具体主题编写的问句规则。

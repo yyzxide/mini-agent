@@ -16,26 +16,26 @@ describe("buildMemoryQuery", () => {
     expect(query.sameSessionBias).toBe(1);
   });
 
-  it("detects web research and recency-sensitive queries", () => {
+  it("keeps live-data interpretation out of memory retrieval while preserving recency", () => {
     const query = buildMemoryQuery({ query: "今天中国股市收盘大盘指数涨跌情况" });
 
-    expect(query.intent).toBe("WEB_RESEARCH");
-    expect(query.preferredModes).toEqual(["WEB_ANSWER"]);
+    expect(query.intent).toBe("GENERAL");
+    expect(query.preferredModes).toEqual([]);
     expect(query.recencyBias).toBeGreaterThan(0.7);
   });
 
-  it("treats recent match-result questions as volatile web research", () => {
+  it("does not turn match-result wording into an execution mode", () => {
     const query = buildMemoryQuery({ query: "法国队vs西班牙队，谁赢了" });
 
-    expect(query.intent).toBe("WEB_RESEARCH");
-    expect(query.preferredModes).toEqual(["WEB_ANSWER"]);
+    expect(query.intent).toBe("GENERAL");
+    expect(query.preferredModes).toEqual([]);
   });
 
   it("detects pasted runtime errors", () => {
     const query = buildMemoryQuery({ query: "npm error enoent Could not read package.json" });
 
     expect(query.intent).toBe("ERROR_DIAGNOSIS");
-    expect(query.preferredModes).toEqual(expect.arrayContaining(["DIRECT_ANSWER", "AGENT_LOOP"]));
+    expect(query.preferredModes).toEqual(["AGENT_LOOP"]);
     expect(query.expandedQuery).toContain("command_result");
   });
 

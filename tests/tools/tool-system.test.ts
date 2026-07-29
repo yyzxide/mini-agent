@@ -137,10 +137,11 @@ describe("ToolRegistry", () => {
   it("returns a structured error when input is invalid", async () => {
     const registry = createDefaultToolRegistry();
 
-    const result = await registry.execute("read_file", { path: "README.md", maxLines: 999 }, { repoPath });
+    const result = await registry.execute("read_file", { path: "README.md", maxLines: 0 }, { repoPath });
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe("INVALID_TOOL_INPUT");
+    expect(result.error?.message).toContain("maxLines");
   });
 
   it("marks fetch_url as a review-level tool", () => {
@@ -227,6 +228,26 @@ describe("read-only repository tools", () => {
     expect(result.data.nextStartLine).toBe(3);
     expect(result.data.estimatedTokens).toBeGreaterThan(0);
     expect(result.data.sourceVersion).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("read_file caps oversized model paging hints instead of rejecting the call", async () => {
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("read_file", {
+      path: "README.md",
+      maxLines: 559,
+      maxTokens: 8_000,
+    }, { repoPath });
+
+    expectSuccess<ReadFileData>(result);
+    expect(result.data.content).toContain("# Demo Repo");
+    expect(result.metadata).toMatchObject({
+      inputAdjusted: true,
+      requestedMaxLines: 559,
+      effectiveMaxLines: 500,
+      requestedMaxTokens: 8_000,
+      effectiveMaxTokens: 4_000,
+    });
   });
 
   it("read_file exposes deterministic pagination until EOF", async () => {

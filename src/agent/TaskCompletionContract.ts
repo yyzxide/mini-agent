@@ -1,7 +1,4 @@
-import { looksLikeDocumentCreationTask } from "./ArtifactIntent.js";
 import type { AgentState, AgentCompletionEvidence } from "./AgentState.js";
-import { looksLikeSaveToFileFollowUp } from "./TaskFollowUp.js";
-import { looksLikeIndexedKnowledgeRequest } from "./TaskRouter.js";
 import type { VerificationLevel } from "../command/CommandClassification.js";
 import { extractChangedPathsFromUnifiedDiff } from "../diff/ChangedPaths.js";
 
@@ -25,24 +22,9 @@ export interface TaskCompletionContract {
   verificationReason?: string;
 }
 
-const FILE_MUTATION_KEYWORDS = [
-  "写入", "写进", "写到", "写个", "写一个", "做个", "做一个", "保存", "落盘", "创建", "新建",
-  "新增", "添加", "加入", "追加", "修改", "改成", "更新", "修复", "重构", "删除", "移除", "重命名",
-  "实现", "生成", "scaffold", "create", "write", "save", "implement", "modify", "update", "add", "append",
-  "change", "fix", "refactor", "delete", "remove", "rename",
-];
-
-const FILE_TARGET_KEYWORDS = [
-  "代码", "程序", "算法", "函数", "类", "文件", "页面", "游戏", "组件", "脚本", "html", "typescript",
-  "javascript", "python", "java", "c++", "cpp", "go", "rust", "leetcode", "文档", "说明书", "报告",
-  "指南", "手册", "readme", "documentation", "document", "specification", "manual",
-];
-
 const SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte)$/i;
 const CONFIG_EXTENSION_PATTERN = /\.(?:json|ya?ml|toml|xml)$/i;
 const DOCUMENT_EXTENSION_PATTERN = /\.(?:md|markdown|mdx|txt|rst|adoc)$/i;
-const SOURCE_TASK_PATTERN = /(?:代码|程序|算法|函数|类|组件|脚本|typescript|javascript|python|java|c\+\+|cpp|golang|rust|\bcode\b|\bfunction\b|\bclass\b|\bcomponent\b|\bscript\b)/i;
-const EXPLICIT_VERIFICATION_PATTERN = /(?:运行|执行|验证|检查|确保).{0,24}(?:测试|test|typecheck|类型检查|lint|构建|build|编译)|(?:run|execute|verify|validate|ensure).{0,24}(?:tests?|typecheck|lint|build|compile)/i;
 const TEST_REQUIRED_PATTERN = /(?:修复|回归|重构|缺陷)|\b(?:bug|regression|refactor|fix)\b/i;
 const EXPLICIT_TEST_PATTERN = /(?:运行|执行|验证|检查|确保).{0,24}(?:测试|test)|(?:run|execute|verify|validate|ensure).{0,24}tests?/i;
 const STATIC_SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|vue|svelte)$/i;
@@ -61,28 +43,33 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
     };
   }
 
-  const requiresKnowledgeEvidence = state.taskContract.evidence.knowledgeSearch
-    || looksLikeIndexedKnowledgeRequest(state.userGoal);
-  const requiresRepositoryChange = state.taskContract.capabilities.repositoryWrite && (
-    requiresRepositoryFileChange(state.userGoal)
-    || state.getCompletionEvidence().repositoryChanged
-  );
+  const completionEvidence = state.getCompletionEvidence();
+  const taskFrame = state.taskContract.taskFrame;
+  const requiresKnowledgeEvidence = taskFrame?.effects.knowledgeEvidence === true
+    || state.taskContract.evidence.knowledgeSearch;
+  // Completion requirements consume the one resolved semantic record. They
+  // must not independently reinterpret raw user wording. Conditional mutation
+  // tasks require verification only after a patch actually occurs.
+  const requiresRepositoryChange = completionEvidence.repositoryChanged
+    || taskFrame?.effects.repositoryWrite === "REQUIRED";
   const targetFiles = extractTargetFiles(state);
   const hasSourceTarget = targetFiles.some((file) => SOURCE_EXTENSION_PATTERN.test(file));
   const hasConfigTarget = targetFiles.some(isConfigurationFile);
   const hasDocumentTarget = targetFiles.length > 0 && targetFiles.every((file) => DOCUMENT_EXTENSION_PATTERN.test(file));
-  const explicitVerification = state.taskContract.capabilities.commandExecution
-    && EXPLICIT_VERIFICATION_PATTERN.test(state.userGoal);
-  const inferredSourceTask = requiresRepositoryChange && targetFiles.length === 0 && SOURCE_TASK_PATTERN.test(state.userGoal);
+  const explicitVerification = taskFrame !== undefined
+    && taskFrame.effects.verification !== "NONE";
+  const inferredSourceTask = false;
   const requiredVerificationLevel = requiresRepositoryChange || explicitVerification
-    ? determineRequiredVerificationLevel({
-      userGoal: state.userGoal,
-      targetFiles,
-      explicitVerification,
-      hasSourceTarget,
-      hasConfigTarget,
-      inferredSourceTask,
-    })
+    ? taskFrame && taskFrame.effects.verification !== "NONE"
+      ? taskFrame.effects.verification
+      : determineRequiredVerificationLevel({
+        userGoal: "",
+        targetFiles,
+        explicitVerification,
+        hasSourceTarget,
+        hasConfigTarget,
+        inferredSourceTask,
+      })
     : "NONE";
   const requiresVerification = requiredVerificationLevel !== "NONE";
 
@@ -91,7 +78,7 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
   else if (explicitVerification && !requiresRepositoryChange) kind = "VERIFICATION";
   else if (hasSourceTarget || inferredSourceTask) kind = "SOURCE_CHANGE";
   else if (hasConfigTarget) kind = "CONFIGURATION_CHANGE";
-  else if (requiresRepositoryChange && (hasDocumentTarget || looksLikeDocumentCreationTask(state.userGoal))) kind = "DOCUMENTATION_CHANGE";
+  else if (requiresRepositoryChange && hasDocumentTarget) kind = "DOCUMENTATION_CHANGE";
   else if (requiresRepositoryChange) kind = "REPOSITORY_CHANGE";
 
   return {
@@ -172,24 +159,6 @@ function determineRequiredVerificationLevel(input: {
   }
   if (input.hasSourceTarget) return "STATIC";
   return input.explicitVerification ? "STATIC" : "NONE";
-}
-
-export function requiresRepositoryFileChange(userGoal: string): boolean {
-  const normalized = userGoal.trim().toLowerCase();
-  if (!normalized) return false;
-  if (looksLikeSaveToFileFollowUp(userGoal) || looksLikeDocumentCreationTask(userGoal)) return true;
-  if (normalized.includes("真正写入仓库文件") || normalized.includes("需要落盘的代码如下")) return true;
-  if (!FILE_MUTATION_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()))) return false;
-  return FILE_TARGET_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()))
-    || /\.(?:ts|tsx|js|jsx|mjs|cjs|java|go|py|cpp|cc|c|h|hpp|html|css|rs|sh|vue|svelte|md|mdx|txt|json|ya?ml|toml|xml)\b/i.test(userGoal);
-}
-
-export function hasEnoughContextForFileWrite(userGoal: string): boolean {
-  const normalized = userGoal.trim().toLowerCase();
-  return normalized.includes("需要落盘的代码如下")
-    || userGoal.includes("```")
-    || looksLikeDocumentCreationTask(userGoal)
-    || FILE_TARGET_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
 }
 
 function extractTargetFiles(state: AgentState): string[] {

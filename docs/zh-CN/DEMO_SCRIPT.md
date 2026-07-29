@@ -55,14 +55,14 @@ mini-agent doctor
 
 ```bash
 mini-agent run \
-  "只分析 src/agent/TaskUnderstandingResolver.ts 的职责，不要修改任何文件" \
+  "只分析 src/runtime/TaskFrameResolver.ts 的职责，不要修改任何文件" \
   --verbose
 ```
 
 需要讲解：
 
 - 请求进入统一 `AgentLoop`，不是单独的“代码审查程序”。
-- `TaskUnderstanding` 识别 Repository Analysis 和显式只读约束。
+- `TaskFrame` 表达仓库分析目标和显式只读约束。
 - Task Contract 只开放仓库读取，不开放 Patch 和命令。
 - 模型即使错误提出写入，也会被本地契约阻断。
 
@@ -70,7 +70,7 @@ mini-agent run \
 
 ```bash
 mini-agent run \
-  "不是让你只分析：检查 src/agent/TaskUnderstandingResolver.ts，发现问题就直接修复并验证" \
+  "不是让你只分析：检查 src/runtime/TaskFrameResolver.ts，发现问题就直接修复并验证" \
   --verbose
 ```
 
@@ -203,7 +203,7 @@ mini-agent run "联网确认 TypeScript 当前稳定版本，并引用来源" --
 推荐顺序：
 
 1. 1 分钟：问题与定位——为什么聊天模型不能直接成为 Coding Agent。
-2. 2 分钟：单 AgentLoop、TaskUnderstanding 和 Task Contract。
+2. 2 分钟：单 AgentLoop、TaskFrame 和 Task Contract。
 3. 3 分钟：Writer/Reviewer worktree 演示。
 4. 2 分钟：Artifact 追问、Context 与终端时间线。
 5. 1 分钟：测试和 AgentBench。

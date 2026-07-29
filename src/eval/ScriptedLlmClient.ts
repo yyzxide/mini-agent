@@ -8,11 +8,16 @@ import type {
 
 export class ScriptedLlmClient implements LlmClient {
   private readonly decisions: AgentDecision[];
+  private readonly textCompletions: LlmTextCompletionResult[];
   private readonly calls: LlmInput[] = [];
   private readonly textCalls: LlmTextCompletionInput[] = [];
 
-  constructor(decisions: AgentDecision[]) {
+  constructor(
+    decisions: AgentDecision[],
+    textCompletions: LlmTextCompletionResult[] = [],
+  ) {
     this.decisions = decisions;
+    this.textCompletions = textCompletions;
   }
 
   async chat(input: LlmInput): Promise<AgentDecision> {
@@ -25,6 +30,11 @@ export class ScriptedLlmClient implements LlmClient {
 
   async completeText(input: LlmTextCompletionInput): Promise<LlmTextCompletionResult> {
     this.textCalls.push(input);
+    const scriptedText = this.textCompletions[Math.min(
+      this.textCalls.length - 1,
+      this.textCompletions.length - 1,
+    )];
+    if (scriptedText) return scriptedText;
     const decision = this.decisions[Math.min(this.textCalls.length - 1, this.decisions.length - 1)];
     if (decision?.type === "FINAL") {
       return { success: decision.success, text: decision.summary };

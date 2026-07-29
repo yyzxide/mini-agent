@@ -48,7 +48,7 @@ describe("product capability architecture", () => {
 
     expect(answer).toContain(capability.zh.name);
     expect(answer).toContain(capability.tools[0]!);
-    expect(answer).toContain(capability.contracts[0]!);
+    expect(answer).toContain(capability.effects[0]!);
   });
 
   it("keeps the registry usable as authoritative prompt context", () => {

@@ -3,7 +3,6 @@ import { McpServerConfigSchema } from "../mcp/McpTypes.js";
 import type { McpServerConfig } from "../mcp/McpTypes.js";
 import { pathExists, readJsonFile, resolveMiniAgentPath, resolveRepoPath, writeJsonFileAtomic } from "../utils/fs.js";
 import { DEFAULT_MULTI_AGENT_POLICY, type MultiAgentPolicy } from "../agent/SubAgentTypes.js";
-import type { SubAgentIntent } from "../agent/SubAgentIntent.js";
 
 export const USER_CONFIG_FILE = "mini-agent.config.json";
 export const LEGACY_MINI_AGENT_CONFIG_FILE = ".mini-agent/config.json";
@@ -82,6 +81,9 @@ const llmConfigSchema = z.object({
 
 const agentConfigSchema = z.object({
   version: z.literal(1).default(1),
+  // Read and discard the removed switch so existing config files migrate to
+  // the single TaskFrame control plane instead of failing at startup.
+  controlPlane: z.enum(["v2", "legacy"]).optional(),
   repoPath: z.string().optional(),
   createdAt: z.string().optional(),
   llm: llmConfigSchema.optional(),
@@ -108,16 +110,12 @@ const agentConfigSchema = z.object({
 export function resolveMultiAgentPolicy(
   config: AgentConfig,
   agentsOverride?: number,
-  intent?: SubAgentIntent,
 ): MultiAgentPolicy {
   const configured = config.multiAgent ?? {};
   const enabled = agentsOverride === undefined
-    ? intent?.preference === "DISABLED"
-      ? false
-      : configured.mode !== "off"
+    ? configured.mode !== "off"
     : agentsOverride > 1;
   const maxConcurrency = agentsOverride
-    ?? intent?.requestedAgents
     ?? configured.maxConcurrency
     ?? DEFAULT_MULTI_AGENT_POLICY.maxConcurrency;
   return {
@@ -148,7 +146,8 @@ export async function loadAgentConfig(repoPath: string): Promise<AgentConfig> {
     throw new Error(`Invalid ${configPath}${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`);
   }
 
-  return parsed.data as AgentConfig;
+  const { controlPlane: _removedControlPlane, ...config } = parsed.data;
+  return config as AgentConfig;
 }
 
 export async function initAgentConfig(repoPath: string, input: InitAgentConfigInput = {}): Promise<AgentConfig> {

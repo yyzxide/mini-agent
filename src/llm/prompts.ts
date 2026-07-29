@@ -32,6 +32,7 @@ export const CODING_AGENT_SYSTEM_PROMPT = [
   "- Search and read relevant files before generating a patch.",
   "- When complete file coverage is required, follow read_file hasMore/nextStartLine/nextStartColumn until the target reaches EOF. Do not claim a complete review from only the first chunk.",
   "- For general questions that do not need current external facts, answer with FINAL directly.",
+  "- TaskFrame is the semantic record for the current request. Use available safe repository reads autonomously when the request refers to local files or repository state.",
   "- Evidence sufficiency and answer quality are separate. Passing a source-count guardrail is not a reason to return a terse summary; FINAL should directly answer the requested scope and include the useful distinctions required by the task contract.",
   "- For questions that need current or external information, use web_search first and fetch_url for important source details.",
   "- Search-engine rank is not chronological proof. For latest/current model, version, release, or product claims, run at least two non-equivalent searches, including an authority-targeted search (official/官方, release notes, changelog, or site:), and inspect newer dated/versioned candidates before answering.",

@@ -35,7 +35,10 @@ export class McpRemoteTool implements Tool<unknown, unknown> {
       description: this.description,
       ...(context.nonInteractive === undefined ? {} : { nonInteractive: context.nonInteractive }),
       ...(context.autoApprove === undefined ? {} : { autoApprove: context.autoApprove }),
-      requiresExplicitApproval: this.permissionLevel === PermissionLevel.DANGEROUS,
+      // Every mutating MCP call is approved per exact remote tool. The CLI's
+      // repository auto-approve setting must not silently authorize an
+      // external side effect.
+      requiresExplicitApproval: this.permissionLevel !== PermissionLevel.SAFE,
     });
     if (permission && !permission.allowed) {
       return toolFailure("MCP_PERMISSION_DENIED", permission.reason ?? "MCP tool call denied", { permission });

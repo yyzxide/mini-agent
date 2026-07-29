@@ -14,12 +14,18 @@ import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
 import { estimateTokens } from "../context/TokenEstimator.js";
 
+export const MAX_READ_FILE_LINES = 500;
+export const MAX_READ_FILE_TOKENS = 4_000;
+
 const ReadFileInputSchema = z.object({
   path: z.string().min(1),
   startLine: z.number().int().min(1).default(1),
   startColumn: z.number().int().min(1).default(1),
-  maxLines: z.number().int().min(1).max(500).default(300),
-  maxTokens: z.number().int().min(128).max(4_000).default(3_000),
+  // These are model-provided output preferences, not safety boundaries.
+  // Accept oversized requests and cap them in execute() so a harmless paging
+  // hint cannot turn an otherwise valid file read into a failed tool call.
+  maxLines: z.number().int().min(1).default(300),
+  maxTokens: z.number().int().min(128).default(3_000),
 });
 
 export type ReadFileInput = z.infer<typeof ReadFileInputSchema>;
@@ -42,7 +48,7 @@ export interface ReadFileData {
 
 export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
   readonly name = "read_file";
-  readonly description = "Read a token-bounded range from a repository text file. Use hasMore with nextStartLine and nextStartColumn to continue until complete when full-file coverage is required.";
+  readonly description = "Read a token-bounded range from a repository text file. Oversized maxLines/maxTokens hints are capped automatically. Use hasMore with nextStartLine and nextStartColumn to continue until complete when full-file coverage is required.";
   readonly inputSchema = ReadFileInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
   readonly metadata = {
@@ -56,6 +62,8 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
   };
 
   async execute(input: ReadFileInput, context: ToolContext): Promise<ToolResult<ReadFileData>> {
+    const maxLines = Math.min(input.maxLines, MAX_READ_FILE_LINES);
+    const maxTokens = Math.min(input.maxTokens, MAX_READ_FILE_TOKENS);
     const absolutePath = resolveRepoPath(context.repoPath, input.path);
     const repoRealPath = await fs.realpath(normalizeRepoPath(context.repoPath));
     const fileRealPath = await fs.realpath(absolutePath).catch(() => undefined);
@@ -101,7 +109,7 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
       sourceHash.update("\n");
       if (
         totalLines >= input.startLine
-        && selectedLines.length < input.maxLines
+        && selectedLines.length < maxLines
         && !tokenBudgetReached
       ) {
         const isStartingLine = totalLines === input.startLine;
@@ -116,8 +124,8 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
         const segment = line.slice(startColumn - 1);
         const prefix = selectedLines.length > 0 ? "\n" : "";
         const lineTokens = estimateTokens(`${prefix}${segment}`);
-        if (selectedLines.length === 0 && lineTokens > input.maxTokens) {
-          const chunk = takeTokenBoundedPrefix(segment, input.maxTokens);
+        if (selectedLines.length === 0 && lineTokens > maxTokens) {
+          const chunk = takeTokenBoundedPrefix(segment, maxTokens);
           selectedLines.push(chunk);
           selectedTokens = estimateTokens(chunk);
           partialLine = {
@@ -126,7 +134,7 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
             complete: chunk.length === segment.length,
           };
           tokenBudgetReached = true;
-        } else if (selectedTokens + lineTokens > input.maxTokens) {
+        } else if (selectedTokens + lineTokens > maxTokens) {
           tokenBudgetReached = true;
         } else {
           selectedLines.push(segment);
@@ -168,7 +176,15 @@ export class ReadFileTool implements Tool<ReadFileInput, ReadFileData> {
       lineComplete,
       estimatedTokens: selectedTokens,
       sourceVersion: `sha256:${sourceHash.digest("hex")}`,
-    });
+    }, input.maxLines !== maxLines || input.maxTokens !== maxTokens
+      ? {
+        inputAdjusted: true,
+        requestedMaxLines: input.maxLines,
+        effectiveMaxLines: maxLines,
+        requestedMaxTokens: input.maxTokens,
+        effectiveMaxTokens: maxTokens,
+      }
+      : undefined);
   }
 }
 

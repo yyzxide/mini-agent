@@ -1,29 +1,20 @@
 import { AgentLoop } from "../agent/AgentLoop.js";
-import { resolveArtifactFollowUp } from "../agent/ArtifactFollowUp.js";
-import { resolveRepositoryFollowUpTask } from "../agent/TaskFollowUp.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import { PatchManager } from "../patch/PatchManager.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { createConfiguredToolRegistry } from "../mcp/McpRegistryLoader.js";
-import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import { createOpenAICompatibleClient, createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
 import { IsolatedSubAgentCoordinator } from "../agent/IsolatedSubAgentCoordinator.js";
 import { loadAgentConfig, resolveMultiAgentPolicy } from "../config/AgentConfig.js";
-import { classifySubAgentIntent } from "../agent/SubAgentIntent.js";
-import { resolveLlmConfig } from "../config/AgentConfig.js";
 import type { AgentTaskContract } from "../agent/AgentTaskContract.js";
 import { createDefaultAgentTaskContract } from "../agent/AgentTaskContract.js";
-import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
-import { routeTask } from "../agent/TaskRouter.js";
 import {
   buildConversationHistoryWithTrace,
   estimateConversationTokens,
   focusConversationHistory,
 } from "../session/ConversationHistory.js";
-import { resolveFollowUpQuestion } from "../agent/FollowUpQuestionResolver.js";
-import { resolveLocalDirectReply, resolveLocalSessionReply } from "./LocalReplyResolver.js";
 import { toJsonObject, toJsonValue } from "../utils/json.js";
 import { TerminalRenderer } from "../observability/TerminalRenderer.js";
 import { sanitizeTerminalText } from "../observability/TerminalSanitizer.js";
@@ -49,56 +40,18 @@ export async function runAgentLoopTask(
     maxMessages: Number.MAX_SAFE_INTEGER,
     maxChars: Number.MAX_SAFE_INTEGER,
   });
-  const conversationFocus = focusConversationHistory(conversationHistory.messages, userGoal, {
+  // Give TaskFrame a neutral recent window. It can request older evidence
+  // through conversationEvidence after semantic resolution.
+  const conversationFocus = focusConversationHistory(
+    conversationHistory.messages,
+    "",
+    {
     maxMessages: 16,
     maxChars: 12_000,
-  });
-  const resolvedUserGoal = options.session
-    ? await sessionStore.readRecords(options.session)
-      .then((records) => resolveRepositoryFollowUpTask(userGoal, records)?.resolvedGoal)
-      .catch(() => undefined)
-    : undefined;
-  const resolvedQuestion = taskContract.kind === "DIRECT_RESPONSE" || taskContract.kind === "WEB_RESEARCH"
-    ? resolveFollowUpQuestion(userGoal, conversationHistory.messages)
-    : undefined;
-  const resolvedQuestionContract = resolvedQuestion && resolvedQuestion !== userGoal
-    ? buildAgentTaskContract({
-      userGoal: resolvedQuestion,
-      route: routeTask(resolvedQuestion),
-      operatingMode: options.operatingMode ?? "EXECUTE",
-      multiAgentEnabled: false,
-    })
-    : taskContract;
-  const configuredModel = options.model ?? await loadAgentConfig(repoPath)
-    .then((config) => resolveLlmConfig(config).openai.model)
-    .catch(() => undefined);
-  const artifactFollowUp = taskContract.kind === "DIRECT_RESPONSE"
-    ? resolveArtifactFollowUp(repoPath, userGoal, recordsBeforeCurrent)
-    : undefined;
-  const deterministicAnswer = taskContract.kind === "DIRECT_RESPONSE"
-    ? artifactFollowUp?.answer
-      ?? resolveLocalSessionReply(userGoal, recordsBeforeCurrent)
-      ?? resolveLocalDirectReply(repoPath, userGoal, configuredModel ? { configuredModel } : {})
-    : undefined;
-  const contextualInstructions = [
-    ...(resolvedQuestion && resolvedQuestion !== userGoal
-      ? [`Resolved current request: ${resolvedQuestion}`]
-      : []),
-    ...(conversationFocus.strategy === "LATEST_REFERENT"
-      ? ["Referent rule: prioritize the immediately preceding exchange when resolving an implicit demonstrative. Older selected turns remain audit context, not competing current requests."]
-      : []),
-    ...(conversationFocus.strategy === "PRIOR_RESPONSE_AUDIT"
-      ? [
-        "Prior-response audit rule: visible assistant turns are the authoritative record of what you previously output, but they are not proof that those external facts are true.",
-        "Inspect the exact prior wording before defending it. If it conflicts with the current answer, acknowledge and retract it instead of rewriting its intent or denying that it appeared.",
-        "If the disputed original statement is not visible, say that the available conversation record is insufficient; never assert that you did not say it.",
-      ]
-      : []),
-  ];
+    },
+  );
   const effectiveContract: AgentTaskContract = {
-    ...resolvedQuestionContract,
-    instructions: [...resolvedQuestionContract.instructions, ...contextualInstructions],
-    ...(deterministicAnswer ? { deterministicAnswer } : {}),
+    ...taskContract,
   };
   const verbosity: RuntimeVerbosity = options.trace === true
     ? "trace"
@@ -111,17 +64,12 @@ export async function runAgentLoopTask(
     }
   };
   const permissionManager = new PermissionManager(prompt ? { prompt } : {});
-  const effectiveGoal = resolvedUserGoal ?? resolvedQuestion ?? userGoal;
-  const subAgentIntent = classifySubAgentIntent(effectiveGoal);
   const multiAgent = resolveMultiAgentPolicy(
     await loadAgentConfig(repoPath),
     options.agents,
-    subAgentIntent,
   );
   const llmClient = await createOpenAICompatibleClient(repoPath, options);
-  const { registry: toolRegistry, diagnostics } = effectiveContract.capabilities.mcpAccess
-    ? await createConfiguredToolRegistry(repoPath)
-    : { registry: createDefaultToolRegistry(), diagnostics: [] };
+  const { registry: toolRegistry, diagnostics } = await createConfiguredToolRegistry(repoPath);
   for (const diagnostic of diagnostics.filter((entry) => !entry.success)) {
     const safeServer = sanitizeTerminalText(diagnostic.server);
     const safeError = sanitizeTerminalText(String(redactSecrets(diagnostic.error ?? "failed to load")));
@@ -150,8 +98,7 @@ export async function runAgentLoopTask(
   });
 
   const result = await loop.run({
-    userGoal: effectiveGoal,
-    ...((resolvedUserGoal || resolvedQuestion) ? { originalUserGoal: userGoal } : {}),
+    userGoal,
     ...(options.session ? { sessionId: options.session } : {}),
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     autoApprove: true,
@@ -161,27 +108,25 @@ export async function runAgentLoopTask(
     multiAgent,
     taskContract: effectiveContract,
     conversation: conversationFocus.messages,
-    ...(effectiveContract.executionStrategy === "SINGLE_SHOT" && !effectiveContract.deterministicAnswer ? {
-      conversationTrace: {
-        totalMessages: conversationHistory.trace.totalMessages,
-        selectedMessages: conversationFocus.messages.length,
-        estimatedInputTokens: conversationHistory.trace.estimatedInputTokens,
-        estimatedOutputTokens: estimateConversationTokens(conversationFocus.messages),
-        truncated: conversationHistory.trace.truncated
-          || conversationFocus.messages.length < conversationHistory.trace.totalMessages,
-        focusedOnLatestTurn: conversationFocus.focusedOnLatestTurn,
-        selectionStrategy: conversationFocus.strategy,
-        matchedAssistantMessages: conversationFocus.matchedAssistantMessages,
-        roles: conversationFocus.messages.map((message) => message.role),
-      },
-    } : {}),
-    ...(artifactFollowUp ? { followUpResolution: artifactFollowUp } : {}),
+    conversationCorpus: conversationHistory.messages,
+    conversationTrace: {
+      totalMessages: conversationHistory.trace.totalMessages,
+      selectedMessages: conversationFocus.messages.length,
+      estimatedInputTokens: conversationHistory.trace.estimatedInputTokens,
+      estimatedOutputTokens: estimateConversationTokens(conversationFocus.messages),
+      truncated: conversationHistory.trace.truncated
+        || conversationFocus.messages.length < conversationHistory.trace.totalMessages,
+      focusedOnLatestTurn: conversationFocus.focusedOnLatestTurn,
+      selectionStrategy: conversationFocus.strategy,
+      matchedAssistantMessages: conversationFocus.matchedAssistantMessages,
+      roles: conversationFocus.messages.map((message) => message.role),
+    },
   }).finally(async () => await toolRegistry.dispose());
 
   return {
     success: result.success,
     sessionId: result.sessionId,
-    mode: options.operatingMode === "PLAN" ? "PLAN" : effectiveContract.resultMode,
+    mode: options.operatingMode === "PLAN" ? "PLAN" : result.resultMode,
     summary: result.summary,
     ...(result.error ? { error: result.error } : {}),
     metadata: toJsonObject({

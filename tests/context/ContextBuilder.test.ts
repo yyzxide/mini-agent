@@ -5,11 +5,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
-import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
-import { routeTask } from "../../src/agent/TaskRouter.js";
 import { ContextBuilder } from "../../src/context/ContextBuilder.js";
 import { LongTermMemoryStore } from "../../src/memory/LongTermMemoryStore.js";
 import { SessionStore } from "../../src/session/SessionStore.js";
+import { createTestTaskContract } from "../helpers/TaskFrameContract.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,42 +30,6 @@ afterEach(async () => {
 });
 
 describe("ContextBuilder", () => {
-  it("builds a bounded repository context for the agent", async () => {
-    const state = new AgentState({
-      sessionId: "test-session",
-      repoPath,
-      userGoal: "inspect repository",
-      taskContract: contractFor("inspect repository"),
-    });
-    state.addToolResult({
-      toolName: "git_status",
-      input: {},
-      result: {
-        success: true,
-        data: { status: " M README.md" },
-      },
-    });
-
-    const builder = new ContextBuilder({ repoPath, maxChars: 10_000 });
-    const context = await builder.build(state);
-
-    expect(context).toContain("User task:");
-    expect(context).toContain("inspect repository");
-    expect(context).toContain("Repository state summary:");
-    expect(context).toContain("package manager:");
-    expect(context).toContain("Git status:");
-    expect(context).toContain("Tree summary:");
-    expect(context).toContain("file README.md");
-    expect(context).toContain("README evidence:");
-    expect(context).toContain("Context builder readme.");
-    expect(context).toContain("Build-file evidence:");
-    expect(context).toContain("package.json");
-    expect(context).toContain("Task completion contract:");
-    expect(context).toContain("Relevant tool evidence:");
-    expect(context.length).toBeLessThanOrEqual(10_000);
-    expect(builder.getLastTrace()).toMatchObject({ version: 2, phase: "DISCOVERY" });
-  });
-
   it("injects recent session records into the agent context", async () => {
     const sessionStore = new SessionStore({ repoPath });
     const session = await sessionStore.createSession({ title: "memory test" });
@@ -83,7 +46,14 @@ describe("ContextBuilder", () => {
       sessionId: session.sessionId,
       repoPath,
       userGoal: "你还记得刚才聊了什么吗",
-      taskContract: contractFor("你还记得刚才聊了什么吗"),
+      taskContract: createTestTaskContract({
+        objective: "Recall the prior discussion.",
+        target: "SESSION",
+        conversationEvidence: {
+          requiresHistory: true,
+          queries: ["session 记忆"],
+        },
+      }),
     });
 
     const context = await new ContextBuilder({ repoPath, maxChars: 10_000 }).build(state);
@@ -99,9 +69,15 @@ describe("ContextBuilder", () => {
       sessionId: "web-progress",
       repoPath,
       userGoal,
-      taskContract: buildAgentTaskContract({
-        userGoal,
-        route: { intent: "WEB_ANSWER", reason: "test" },
+      taskContract: createTestTaskContract({
+        objective: userGoal,
+        target: "WORLD",
+        effects: { webEvidence: true },
+        webEvidencePolicy: {
+          searchViews: 2,
+          freshness: "CURRENT",
+          authority: "REQUIRED",
+        },
       }),
     });
 
@@ -111,7 +87,7 @@ describe("ContextBuilder", () => {
     expect(context).toContain("Phase: DISCOVER");
     expect(context).toContain("Search views: 0 / 2");
     expect(context).toContain("Required next action: WEB_SEARCH");
-    expect(context).toContain("Remaining decisions: 14");
+    expect(context).toContain("Remaining decisions: 20");
   });
 
   it("injects retrieved long-term memory into the agent context", async () => {
@@ -245,9 +221,11 @@ describe("ContextBuilder", () => {
       sessionId: "complete-read-session",
       repoPath,
       userGoal: "完整读取 src/index.ts",
-      taskContract: buildAgentTaskContract({
-        userGoal: "完整读取 src/index.ts",
-        route: { intent: "AGENT_LOOP", reason: "test" },
+      taskContract: createTestTaskContract({
+        objective: "完整读取 src/index.ts",
+        target: "REPOSITORY",
+        effects: { repositoryRead: true },
+        constraints: { requireCompleteFileRead: true },
       }),
     });
     const source = "const firstChunkMarker = true;\nconst secondLine = true;";
@@ -284,11 +262,21 @@ describe("ContextBuilder", () => {
       sessionId: "ordinary-session",
       repoPath,
       userGoal: "修复 src/index.ts",
+      taskContract: createTestTaskContract({
+        objective: "修复 src/index.ts",
+        target: "REPOSITORY",
+        effects: { repositoryWrite: "REQUIRED" },
+      }),
     });
     const temporal = new AgentState({
       sessionId: "temporal-session",
       repoPath,
       userGoal: "检查今天生成的构建报告",
+      taskContract: createTestTaskContract({
+        objective: "检查今天生成的构建报告",
+        target: "WORLD",
+        effects: { webEvidence: true },
+      }),
     });
 
     await expect(new ContextBuilder({ repoPath }).build(ordinary)).resolves.not.toContain("Runtime context:");
@@ -297,5 +285,9 @@ describe("ContextBuilder", () => {
 });
 
 function contractFor(userGoal: string) {
-  return buildAgentTaskContract({ userGoal, route: routeTask(userGoal) });
+  return createTestTaskContract({
+    objective: userGoal,
+    target: "REPOSITORY",
+    effects: { repositoryRead: true, repositoryWrite: "REQUIRED" },
+  });
 }

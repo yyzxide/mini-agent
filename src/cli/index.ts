@@ -6,12 +6,6 @@ import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { execa } from "execa";
-import {
-  looksLikeCodeContinuationFollowUp,
-  routeTask,
-} from "../agent/TaskRouter.js";
-import type { TaskRoute } from "../agent/TaskRouter.js";
-import { buildAgentTaskContract } from "../agent/TaskContractBuilder.js";
 import { findLatestAgentCheckpoint, recoverLatestAgentCheckpoint } from "../agent/AgentCheckpoint.js";
 import { CommandRunner } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
@@ -23,7 +17,6 @@ import {
   resolveLlmConfig,
   resolveMultiAgentPolicy,
 } from "../config/AgentConfig.js";
-import { classifySubAgentIntent } from "../agent/SubAgentIntent.js";
 import { MessageCompressor } from "../context/MessageCompressor.js";
 import { formatRepoState, RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
 import { TaskDiffStore } from "../diff/TaskDiffStore.js";
@@ -52,7 +45,6 @@ import { resolveRepoPath } from "../utils/fs.js";
 import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger, readRuntimeLogs } from "../utils/logger.js";
 import type { LogLevel, LogRecord } from "../utils/logger.js";
-import { isShortFollowUpQuestion } from "../agent/FollowUpQuestionResolver.js";
 import { SkillStore } from "../skills/SkillStore.js";
 import { createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
@@ -61,6 +53,7 @@ import { registerMcpCommands } from "./McpCommands.js";
 import { registerRagCommands } from "./RagCommands.js";
 import { registerToolCommands } from "./ToolCommands.js";
 import { registerBenchCommands } from "./BenchCommands.js";
+import { createTaskFrameBootstrapContract } from "../runtime/TaskFrameContract.js";
 
 const VERSION = "0.1.0";
 const INTERACTIVE_RESUME_LIST_LIMIT = 10;
@@ -1754,19 +1747,12 @@ async function runAgentTask(
   options: AgentCliOptions & { nonInteractive?: boolean },
   prompt?: (message: string) => Promise<string>,
 ): Promise<CliTaskResult> {
-  const route = await resolveTaskRoute(repoPath, userGoal, options.session);
-  const subAgentIntent = classifySubAgentIntent(userGoal);
-  const multiAgentPolicy = await loadAgentConfig(repoPath)
-    .then((config) => resolveMultiAgentPolicy(config, options.agents, subAgentIntent))
-    .catch(() => resolveMultiAgentPolicy({ version: 1 }, options.agents, subAgentIntent));
-  const taskContract = buildAgentTaskContract({
-    userGoal,
-    route,
-    ...(options.operatingMode ? { operatingMode: options.operatingMode } : {}),
-    forceIterative: options.operatingMode !== "PLAN"
-      && (options.iterative === true || options.agentLoop === true),
-    multiAgentEnabled: multiAgentPolicy.enabled,
-  });
+  const agentConfig = await loadAgentConfig(repoPath).catch(() => ({ version: 1 as const }));
+  const multiAgentPolicy = resolveMultiAgentPolicy(agentConfig, options.agents);
+  const taskContract = createTaskFrameBootstrapContract({
+    operatingMode: options.operatingMode ?? "EXECUTE",
+    });
+  const routeReason = "TaskFrame semantic control plane; no deterministic natural-language route was applied.";
   const mode: TaskChangeMode = taskContract.resultMode;
   const logger = createRuntimeLogger(repoPath);
   const beforeSnapshot = await readGitSnapshot(repoPath);
@@ -1775,10 +1761,11 @@ async function runAgentTask(
   await logger.info("cli", "Task started", {
     task: userGoal,
     mode,
-    reason: route.reason,
+    reason: routeReason,
+    semanticFrame: "task-frame",
     requestedSessionId: options.session ?? null,
     multiAgentRequested: multiAgentPolicy.enabled,
-    multiAgentIntent: subAgentIntent.preference,
+    multiAgentIntent: "TASK_FRAME",
   }).catch(() => undefined);
 
   try {
@@ -1854,55 +1841,6 @@ async function indexLongTermMemoryForSession(
     indexed: result.indexed,
     total: result.total,
   }, sessionId).catch(() => undefined);
-}
-
-async function resolveTaskRoute(
-  repoPath: string,
-  userGoal: string,
-  sessionId: string | undefined,
-): Promise<TaskRoute> {
-  const baseRoute = routeTask(userGoal);
-  const activatedSkill = await new SkillStore({ repoPath }).matchExactActivation(userGoal).catch(() => undefined);
-  if (activatedSkill) {
-    return {
-      intent: "DIRECT_ANSWER",
-      reason: `Input exactly activates repository skill ${activatedSkill.name}.`,
-    };
-  }
-
-  if (!sessionId || !isShortFollowUpQuestion(userGoal)) {
-    return baseRoute;
-  }
-
-  const { sessionStore } = createStores(repoPath);
-  const lastMode = await readLastTaskMode(sessionStore, sessionId).catch(() => undefined);
-  if (!lastMode) {
-    return baseRoute;
-  }
-
-  if (baseRoute.intent === "CODE_REVIEW" || baseRoute.intent === "AGENT_LOOP") {
-    return baseRoute;
-  }
-
-  if (baseRoute.intent === "DIRECT_ANSWER" && lastMode === "WEB_ANSWER") {
-    return {
-      intent: "WEB_ANSWER",
-      reason: "Short follow-up inherited the previous web-answer mode from the active session.",
-    };
-  }
-
-  if (
-    baseRoute.intent === "DIRECT_ANSWER"
-    && lastMode === "AGENT_LOOP"
-    && looksLikeCodeContinuationFollowUp(userGoal)
-  ) {
-    return {
-      intent: "AGENT_LOOP",
-      reason: "Short coding follow-up inherited the previous repository-editing mode from the active session.",
-    };
-  }
-
-  return baseRoute;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

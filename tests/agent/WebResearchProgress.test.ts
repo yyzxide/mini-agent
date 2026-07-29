@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentState } from "../../src/agent/AgentState.js";
-import { buildAgentTaskContract } from "../../src/agent/TaskContractBuilder.js";
 import { buildWebResearchProgress } from "../../src/agent/WebResearchProgress.js";
+import { createTestTaskContract } from "../helpers/TaskFrameContract.js";
 
 describe("WebResearchProgress", () => {
   it("moves a latest-model task through authority, inspection, comparison, and synthesis", () => {
@@ -10,7 +10,7 @@ describe("WebResearchProgress", () => {
       phase: "DISCOVER",
       searchViews: 0,
       requiredSearchViews: 2,
-      remainingSteps: 14,
+      remainingSteps: 20,
       recommendedAction: "WEB_SEARCH",
     });
 
@@ -82,9 +82,15 @@ function webState(userGoal: string): AgentState {
     sessionId: "session",
     repoPath: "/repo",
     userGoal,
-    taskContract: buildAgentTaskContract({
-      userGoal,
-      route: { intent: "WEB_ANSWER", reason: "test" },
+    taskContract: createTestTaskContract({
+      objective: userGoal,
+      target: "WORLD",
+      effects: { webEvidence: true },
+      webEvidencePolicy: {
+        searchViews: 2,
+        freshness: "CURRENT",
+        authority: "REQUIRED",
+      },
     }),
   });
 }

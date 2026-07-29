@@ -34,12 +34,6 @@ export function validateWebSearchQueryScope(
   };
 }
 
-export function looksLikeTemporalSuperlativeRequest(value: string): boolean {
-  const text = normalize(value);
-  return /(?:最新(?:的)?|最新版|最新型号|最近发布(?:的)?|当前(?:版本|型号|模型|发布))|\b(?:latest|newest|current)\s+(?:model|version|release|product|generation|api|sdk)\b/i
-    .test(text);
-}
-
 export function looksLikeAuthoritativeFreshnessQuery(value: string): boolean {
   const text = normalize(value);
   const authority = /(?:官方|官网|发布页|发布说明|更新日志)|\b(?:official|primary source|release notes?|changelog)\b|\bsite:\s*[a-z0-9.-]+/i.test(text);

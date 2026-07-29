@@ -34,7 +34,7 @@ export interface LlmTextCompletionInput {
   userGoal: string;
   context?: string;
   conversation?: ConversationMessage[];
-  mode?: "direct" | "web" | "web_rewrite" | "task_understanding";
+  mode?: "direct" | "web" | "web_rewrite" | "task_frame";
 }
 
 export interface LlmTextCompletionResult {

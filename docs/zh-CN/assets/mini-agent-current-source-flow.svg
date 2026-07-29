@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 920">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#172033" flood-opacity=".12"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0 0L12 6 0 12Z" fill="#536178"/>
+    </marker>
+    <marker id="purpleArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0 0L12 6 0 12Z" fill="#7048d8"/>
+    </marker>
+    <style>
+      .title { font: 700 38px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#14203a; }
+      .subtitle { font: 400 18px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#647086; }
+      .lane { font: 700 20px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#30405e; }
+      .heading { font: 700 20px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#19243a; }
+      .body { font: 400 16px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#536178; }
+      .small { font: 600 14px "Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#68758d; }
+      .white { fill:#fff; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="920" fill="#f7f9fc"/>
+  <circle cx="1510" cy="65" r="120" fill="#eee9ff"/>
+  <circle cx="60" cy="870" r="125" fill="#e8f2ff"/>
+
+  <text x="60" y="64" class="title">Mini Coding Agent 当前控制链</text>
+  <text x="60" y="98" class="subtitle">一个 TaskFrame、一个 AgentLoop；回答、Web、读文件、写代码和验证是可组合动作</text>
+
+  <rect x="45" y="130" width="1510" height="172" rx="26" fill="#eef4ff" stroke="#85aef3" stroke-width="2"/>
+  <text x="70" y="166" class="lane">① AI 语义编译</text>
+
+  <rect x="95" y="190" width="280" height="78" rx="18" class="white" stroke="#6196e9" stroke-width="3" filter="url(#shadow)"/>
+  <text x="235" y="222" text-anchor="middle" class="heading">用户请求 + Conversation</text>
+  <text x="235" y="248" text-anchor="middle" class="body">当前目标始终优先</text>
+
+  <path d="M375 229H480" stroke="#536178" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="490" y="178" width="440" height="102" rx="20" class="white" stroke="#7048d8" stroke-width="4" filter="url(#shadow)"/>
+  <text x="710" y="211" text-anchor="middle" class="heading">AI TaskFrame</text>
+  <text x="710" y="238" text-anchor="middle" class="body">目标 · Effects · 约束 · Web 证据策略</text>
+  <text x="710" y="263" text-anchor="middle" class="body">Conversation 取证 · 协作 · 完成条件</text>
+
+  <path d="M930 229H1035" stroke="#536178" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="1045" y="190" width="410" height="78" rx="18" class="white" stroke="#1d9b87" stroke-width="3" filter="url(#shadow)"/>
+  <text x="1250" y="222" text-anchor="middle" class="heading">AGENT_TASK Contract</text>
+  <text x="1250" y="248" text-anchor="middle" class="body">当前授权 + 证据门槛，不是运行模式</text>
+
+  <rect x="45" y="330" width="1510" height="360" rx="26" fill="#f3f0ff" stroke="#a28be7" stroke-width="2"/>
+  <text x="70" y="366" class="lane">② 单一 AgentLoop</text>
+
+  <rect x="90" y="410" width="250" height="92" rx="18" class="white" stroke="#7c67cf" stroke-width="3" filter="url(#shadow)"/>
+  <text x="215" y="445" text-anchor="middle" class="heading">ContextBuilder</text>
+  <text x="215" y="474" text-anchor="middle" class="body">有界证据与运行状态</text>
+
+  <path d="M340 456H420" stroke="#7048d8" stroke-width="4" fill="none" marker-end="url(#purpleArrow)"/>
+
+  <rect x="430" y="410" width="250" height="92" rx="18" class="white" stroke="#7c67cf" stroke-width="3" filter="url(#shadow)"/>
+  <text x="555" y="445" text-anchor="middle" class="heading">LLM AgentDecision</text>
+  <text x="555" y="474" text-anchor="middle" class="body">选择一个下一动作</text>
+
+  <path d="M680 456H760" stroke="#7048d8" stroke-width="4" fill="none" marker-end="url(#purpleArrow)"/>
+
+  <rect x="770" y="396" width="300" height="120" rx="18" class="white" stroke="#d09125" stroke-width="3" filter="url(#shadow)"/>
+  <text x="920" y="431" text-anchor="middle" class="heading">Capability + Guardrails</text>
+  <text x="920" y="460" text-anchor="middle" class="body">逐动作最小授权</text>
+  <text x="920" y="486" text-anchor="middle" class="body">Permission · Sandbox · Evidence</text>
+
+  <path d="M1070 456H1150" stroke="#7048d8" stroke-width="4" fill="none" marker-end="url(#purpleArrow)"/>
+
+  <rect x="1160" y="384" width="330" height="144" rx="18" class="white" stroke="#1d9b87" stroke-width="3" filter="url(#shadow)"/>
+  <text x="1325" y="418" text-anchor="middle" class="heading">可组合动作</text>
+  <text x="1325" y="449" text-anchor="middle" class="body">Web · Read · Knowledge · MCP</text>
+  <text x="1325" y="476" text-anchor="middle" class="body">Patch · Command · Delegate</text>
+  <text x="1325" y="503" text-anchor="middle" class="small">结果回到同一 State / Session</text>
+
+  <path d="M1325 528V596H215V512" stroke="#7048d8" stroke-width="4" fill="none" marker-end="url(#purpleArrow)"/>
+  <text x="770" y="622" text-anchor="middle" class="small">Observation / Error / Diff → 下一轮；满足完成条件后 FINAL</text>
+
+  <rect x="45" y="718" width="1510" height="150" rx="26" fill="#edf8f5" stroke="#69b8aa" stroke-width="2"/>
+  <text x="70" y="754" class="lane">③ 关键不变量</text>
+
+  <rect x="90" y="783" width="420" height="56" rx="16" class="white" stroke="#42a18f" stroke-width="2"/>
+  <text x="300" y="817" text-anchor="middle" class="heading">Web → Patch：不切模式</text>
+
+  <rect x="590" y="783" width="420" height="56" rx="16" class="white" stroke="#42a18f" stroke-width="2"/>
+  <text x="800" y="817" text-anchor="middle" class="heading">模型理解语义，本地执行安全</text>
+
+  <rect x="1090" y="783" width="420" height="56" rx="16" class="white" stroke="#42a18f" stroke-width="2"/>
+  <text x="1300" y="817" text-anchor="middle" class="heading">旧模式名只可作为历史数据</text>
+</svg>

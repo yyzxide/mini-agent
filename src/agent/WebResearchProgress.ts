@@ -1,6 +1,5 @@
 import type { AgentState } from "./AgentState.js";
 import { assessAuthoritativeFreshnessEvidence } from "./WebResearchEvidence.js";
-import { looksLikeTemporalSuperlativeRequest } from "./WebResearchPolicy.js";
 
 export type WebResearchPhase =
   | "DISCOVER"
@@ -38,23 +37,31 @@ export interface WebResearchProgress {
 const FINAL_SYNTHESIS_RESERVE_STEPS = 2;
 
 export function buildWebResearchProgress(state: AgentState): WebResearchProgress | undefined {
-  if (state.taskContract.kind !== "WEB_RESEARCH") return undefined;
+  if (
+    !state.taskContract.evidence.webSearch
+    && !state.taskContract.capabilities.webAccess
+  ) {
+    return undefined;
+  }
 
-  const temporalSuperlative = looksLikeTemporalSuperlativeRequest(state.userGoal);
+  const temporalSuperlative = state.taskContract.evidence.webFreshnessRequired;
+  const authorityRequired = state.taskContract.evidence.webAuthorityRequired;
   const searchQueries = successfulSearchQueries(state);
   const fetchedUrls = successfulFetchedUrls(state);
   const fetchedDomains = new Set(fetchedUrls.map(readDomain).filter(isString));
   const gatheredUrls = new Set([...successfulSearchUrls(state), ...fetchedUrls]);
-  const authority = temporalSuperlative
+  const authority = authorityRequired
     ? assessAuthoritativeFreshnessEvidence(state)
     : undefined;
-  const requiredSearchViews = temporalSuperlative ? 2 : state.taskContract.evidence.webSearch ? 1 : 0;
-  const authoritySearchSatisfied = !temporalSuperlative
+  const requiredSearchViews = state.taskContract.evidence.webSearchViewCount;
+  const authoritySearchSatisfied = !authorityRequired
     || authority?.status !== "NO_AUTHORITY_FRESHNESS_SEARCH";
-  const authorityCandidateFetched = !temporalSuperlative
+  const authorityCandidateFetched = !authorityRequired
     || (authority?.status !== "NO_AUTHORITY_FRESHNESS_SEARCH"
       && authority?.status !== "AUTHORITY_RESULT_NOT_FETCHED");
-  const visibleFreshnessEvidence = !temporalSuperlative || authority?.status === "SATISFIED";
+  const visibleFreshnessEvidence = !temporalSuperlative
+    || !authorityRequired
+    || authority?.status === "SATISFIED";
   const searchReady = searchQueries.length >= requiredSearchViews;
   const fetchReady = fetchedUrls.length >= state.taskContract.evidence.fetchedWebSourceCount;
   const domainReady = fetchedDomains.size >= state.taskContract.evidence.independentWebDomainCount;
@@ -76,7 +83,7 @@ export function buildWebResearchProgress(state: AgentState): WebResearchProgress
     phase = "DISCOVER";
     recommendedAction = "WEB_SEARCH";
   } else if (!searchReady || !authoritySearchSatisfied) {
-    phase = temporalSuperlative && !authoritySearchSatisfied ? "AUTHORITY_SEARCH" : "DISCOVER";
+    phase = authorityRequired && !authoritySearchSatisfied ? "AUTHORITY_SEARCH" : "DISCOVER";
     recommendedAction = "WEB_SEARCH";
   } else if (!fetchReady || !domainReady || !authorityCandidateFetched || !visibleFreshnessEvidence) {
     phase = "INSPECT_SOURCE";

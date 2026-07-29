@@ -6,8 +6,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { completeInteractiveInput, createProgram } from "../src/cli/index.js";
+import { OpenAICompatibleClient } from "../src/llm/OpenAICompatibleClient.js";
 import { SessionStore } from "../src/session/SessionStore.js";
 import { LongTermMemoryStore } from "../src/memory/LongTermMemoryStore.js";
+import { createTestTaskFrame } from "./helpers/TaskFrameContract.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +19,26 @@ let originalCwd: string;
 beforeEach(async () => {
   originalCwd = process.cwd();
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-agent-cli-"));
+  await fs.writeFile(
+    path.join(tempRoot, "mini-agent.config.json"),
+    JSON.stringify({ version: 1 }),
+    "utf8",
+  );
+  vi.spyOn(OpenAICompatibleClient.prototype, "completeText").mockResolvedValue({
+    success: true,
+    text: JSON.stringify(createTestTaskFrame({
+      objective: "Complete the CLI test request through the unified AgentLoop.",
+      target: "MIXED",
+      effects: {
+        repositoryRead: false,
+        repositoryWrite: "CONDITIONAL",
+      },
+      conversationEvidence: {
+        requiresHistory: true,
+        queries: ["active conversation context"],
+      },
+    })),
+  });
 });
 
 afterEach(async () => {
@@ -196,7 +218,7 @@ describe("mini-agent CLI", () => {
       choices: [
         {
           message: {
-            content: "这是会话摘要里的回答。",
+            content: finalDecision("这是会话摘要里的回答。"),
           },
         },
       ],
@@ -248,7 +270,7 @@ describe("mini-agent CLI", () => {
       choices: [
         {
           message: {
-            content: "我是 mini-agent。",
+            content: finalDecision("我是 mini-agent。"),
           },
         },
       ],
@@ -299,7 +321,7 @@ describe("mini-agent CLI", () => {
       choices: [
         {
           message: {
-            content: "这是可写入摘要的回答。",
+            content: finalDecision("这是可写入摘要的回答。"),
           },
         },
       ],
@@ -364,7 +386,7 @@ describe("mini-agent CLI", () => {
         {
           finish_reason: "stop",
           message: {
-            content: "你好，我是 mini-agent。",
+            content: finalDecision("你好，我是 mini-agent。"),
           },
         },
       ],
@@ -421,7 +443,7 @@ describe("mini-agent CLI", () => {
       };
 
       expect(status.sessionId).toBe(session.sessionId);
-      expect(status.lastMode).toBe("DIRECT_ANSWER");
+      expect(status.lastMode).toBe("AGENT_LOOP");
       expect(status.lastUserMessage).toBe("你是谁");
       expect(status.latestSummary).toBe("你好，我是 mini-agent。");
       expect(status.llm.configuredModel).toBe("test-model");
@@ -684,7 +706,7 @@ describe("mini-agent CLI", () => {
       choices: [
         {
           message: {
-            content: "```cpp\nint main() { return 0; }\n```",
+            content: finalDecision("```cpp\nint main() { return 0; }\n```"),
           },
         },
       ],
@@ -703,7 +725,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("```cpp");
       expect(output).not.toContain("[task]");
       expect(output).not.toContain("给我一个 C++ 代码片段，计算两数之和");
@@ -713,7 +735,7 @@ describe("mini-agent CLI", () => {
       const call = fetchMock.mock.calls[0];
       const init = call?.[1] as RequestInit | undefined;
       const body = JSON.parse(String(init?.body)) as { response_format?: unknown };
-      expect(body.response_format).toBeUndefined();
+      expect(body.response_format).toEqual({ type: "json_object" });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -733,7 +755,7 @@ describe("mini-agent CLI", () => {
         cache_creation_input_tokens: 100,
         completion_tokens_details: { reasoning_tokens: 40 },
       },
-      choices: [{ finish_reason: "stop", message: { content: "```js\nconst answer = 42;\n```" } }],
+      choices: [{ finish_reason: "stop", message: { content: finalDecision("```js\nconst answer = 42;\n```") } }],
     }), { status: 200 })));
 
     try {
@@ -760,13 +782,13 @@ describe("mini-agent CLI", () => {
       expect(output).toContain('"type":"conversation"');
       expect(output).toContain('"type":"llm"');
       expect(output).toContain('"cacheWriteTokens":100');
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("injects matching skills and long-term memory into direct answers", async () => {
+  it("injects matching skills and long-term memory into unified-loop answers", async () => {
     process.chdir(tempRoot);
     const skillPath = path.join(tempRoot, "skills", "testing", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });
@@ -780,7 +802,7 @@ describe("mini-agent CLI", () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: "已结合历史和测试流程回答。" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: finalDecision("已结合历史和测试流程回答。") } }] }), { status: 200 });
     }));
 
     try {
@@ -790,7 +812,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
       const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
-      expect(body.messages[0]?.content).toContain("Context contains Active skills");
+      expect(body.messages[0]?.content).toContain("If the context includes Selected skills");
       expect(body.messages[1]?.content).toContain("Run targeted Vitest tests first");
       expect(body.messages[1]?.content).toContain("npm test 做完整验证");
       expect(body.messages[1]?.content).toContain("Historical memory evidence (untrusted)");
@@ -812,7 +834,7 @@ describe("mini-agent CLI", () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: "activation marker" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: finalDecision("activation marker") } }] }), { status: 200 });
     }));
 
     try {
@@ -822,7 +844,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).not.toContain("[command]");
       expect(calls).toHaveLength(1);
       const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
@@ -899,7 +921,7 @@ describe("mini-agent CLI", () => {
     }
   });
 
-  it("saves the previous direct-answer code into a file on short follow-up", async () => {
+  it("saves the previous answer code into a file on short follow-up", async () => {
     process.chdir(tempRoot);
     await execFileAsync("git", ["init"], { cwd: tempRoot });
 
@@ -911,12 +933,12 @@ describe("mini-agent CLI", () => {
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     const responses = [
-      [
+      finalDecision([
         "```python",
         "def two_sum(a: int, b: int) -> int:",
         "    return a + b",
         "```",
-      ].join("\n"),
+      ].join("\n")),
       JSON.stringify({
         type: "APPLY_PATCH",
         description: "Save the previous Python solution into solution.py",
@@ -981,8 +1003,8 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(secondInit?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages.at(-1)?.content).toContain("请把上一轮已经生成的 Python 代码真正写入仓库文件");
-      expect(secondBody.messages.at(-1)?.content).toContain("def two_sum(a: int, b: int) -> int:");
+      expect(secondBody.messages.at(-1)?.content).toContain("写入一个文件里面");
+      expect(JSON.stringify(secondBody.messages)).toContain("def two_sum(a: int, b: int) -> int:");
       expect(secondBody.messages).toContainEqual({
         role: "assistant",
         content: expect.stringContaining("def two_sum(a: int, b: int) -> int:"),
@@ -1079,8 +1101,8 @@ describe("mini-agent CLI", () => {
         .filter((message) => message.role === "user")
         .map((message) => message.content ?? "")
         .join("\n");
-      expect(prompts).toContain("Task kind: REPOSITORY_INVESTIGATION");
-      expect(prompts).toContain("Output kind: REPOSITORY_ANALYSIS");
+      expect(prompts).toContain("Task kind: AGENT_TASK");
+      expect(prompts).toContain("Output kind: TASK_RESULT");
       expect(prompts).toContain("README.md");
       expect(prompts).toContain("package.json");
       expect(prompts).toContain("src/cli/index.ts");
@@ -1090,7 +1112,7 @@ describe("mini-agent CLI", () => {
     }
   });
 
-  it("runs code review as a read-only repository investigation contract", async () => {
+  it("runs repository analysis as a read-only unified AgentLoop task", async () => {
     process.chdir(tempRoot);
     await fs.mkdir(path.join(tempRoot, "src", "tools"), { recursive: true });
     await fs.writeFile(path.join(tempRoot, "src", "tools", "WebSearchTool.ts"), [
@@ -1176,21 +1198,20 @@ describe("mini-agent CLI", () => {
       });
 
       expect(output).toContain("[tool] read_file");
-      expect(output).toContain("[review]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("Decimal entities only");
       expect(output).toContain("src/tools/WebSearchTool.ts:2");
-      expect(output).not.toContain("[summary]");
       expect(fetchMock).toHaveBeenCalledTimes(2);
 
       const changesOutput = await captureStdout(async () => {
         await createProgram().parseAsync(["changes", "--limit", "5"], { from: "user" });
       });
       const changes = JSON.parse(changesOutput) as Array<{ mode: string; metadata?: Record<string, unknown> }>;
-      expect(changes[0]?.mode).toBe("CODE_REVIEW");
+      expect(changes[0]?.mode).toBe("AGENT_LOOP");
       expect(changes[0]?.metadata).toMatchObject({
         executionEngine: "AGENT_LOOP",
-        taskKind: "REPOSITORY_INVESTIGATION",
-        outputKind: "CODE_REVIEW",
+        taskKind: "AGENT_TASK",
+        outputKind: "TASK_RESULT",
       });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
@@ -1257,8 +1278,8 @@ describe("mini-agent CLI", () => {
       const changes = JSON.parse(changesOutput) as Array<{ metadata?: Record<string, unknown> }>;
       expect(changes[0]?.metadata).toMatchObject({
         executionEngine: "AGENT_LOOP",
-        taskKind: "REPOSITORY_INVESTIGATION",
-        outputKind: "CODE_REVIEW",
+        taskKind: "AGENT_TASK",
+        outputKind: "TASK_RESULT",
       });
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
@@ -1299,7 +1320,7 @@ describe("mini-agent CLI", () => {
       });
 
       expect(output).toContain("[session]");
-      expect(output).toContain("[review]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("src/demo/sample.ts");
       expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
@@ -1316,7 +1337,7 @@ describe("mini-agent CLI", () => {
       choices: [
         {
           message: {
-            content: "我是 mini-agent。",
+            content: finalDecision("我是 mini-agent。"),
           },
         },
       ],
@@ -1342,7 +1363,7 @@ describe("mini-agent CLI", () => {
 
       expect(changes[0]).toMatchObject({
         task: "你是谁",
-        mode: "DIRECT_ANSWER",
+        mode: "AGENT_LOOP",
         summary: "我是 mini-agent。",
       });
     } finally {
@@ -1440,11 +1461,10 @@ describe("mini-agent CLI", () => {
 
       expect(output).toContain("[tool] web_search");
       expect(output).toContain("[tool] fetch_url");
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("夜回犀牛");
-      expect(output).not.toContain("[summary]");
       const prompts = answerBodies.flatMap((body) => body.messages).map((message) => message.content).join("\n");
-      expect(prompts).toContain("Task kind: WEB_RESEARCH");
+      expect(prompts).toContain("Task kind: AGENT_TASK");
       expect(prompts).toContain("2026年6月19日更新");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
@@ -1554,7 +1574,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(fetchMock.mock.calls.some((call) => String(call[0]) === "https://example.com/4")).toBe(true);
       const prompts = answerBodies.flatMap((body) => body.messages).map((message) => message.content).join("\n");
       expect(prompts).toContain("Fourth source confirmed");
@@ -1772,16 +1792,13 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("世界杯范围");
       expect(duckQueries.some((query) => query.includes("世界杯") && query.includes("日本队"))).toBe(true);
       expect(answerContexts.at(-1)).toContainEqual({
         role: "user",
         content: "世界杯最新比分",
       });
-      expect(answerContexts.at(-1)?.at(-1)?.content).toContain(
-        "Keep materially different categories, scopes, and time periods separate",
-      );
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -1880,19 +1897,17 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("英雄联盟");
       expect(output).toContain("无畏契约");
       expect(duckQueries.some((query) => query.toLowerCase().includes("league of legends"))).toBe(true);
       expect(duckQueries.some((query) => query.toLowerCase().includes("valorant"))).toBe(true);
-      expect(answerContexts.at(-1)).toContain("ambiguous entities");
-      expect(answerContexts.at(-1)).toContain("multiple verified interpretations");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("passes previous session messages into follow-up direct answers", async () => {
+  it("passes previous session messages into follow-up answers", async () => {
     process.chdir(tempRoot);
 
     const sessionOutput = await captureStdout(async () => {
@@ -1903,8 +1918,8 @@ describe("mini-agent CLI", () => {
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
     const responses = [
-      "我们刚才聊了 session 记忆。",
-      "我记得，上一轮我们聊了 session 记忆。",
+      finalDecision("我们刚才聊了 session 记忆。"),
+      finalDecision("我记得，上一轮我们聊了 session 记忆。"),
     ];
     const calls: RequestInit[] = [];
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -1957,14 +1972,14 @@ describe("mini-agent CLI", () => {
       expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
       expect(secondBody.messages[1]?.content).toBe("第一轮：我们聊了 session 记忆");
       expect(secondBody.messages[2]?.content).toBe("我们刚才聊了 session 记忆。");
-      expect(secondBody.messages[3]?.content).toContain("Current user request (authoritative):");
-      expect(secondBody.messages[3]?.content).toContain("现在呢");
+      const secondPrompt = JSON.parse(secondBody.messages[3]?.content ?? "{}") as { userGoal?: string };
+      expect(secondPrompt.userGoal).toBe("现在呢");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("inherits direct-answer mode for short follow-up questions and resolves omitted predicates", async () => {
+  it("uses TaskFrame conversation evidence for short follow-up questions", async () => {
     process.chdir(tempRoot);
 
     const sessionOutput = await captureStdout(async () => {
@@ -1976,8 +1991,8 @@ describe("mini-agent CLI", () => {
     process.env.MINI_AGENT_API_KEY = "test-key";
     const calls: RequestInit[] = [];
     const responses = [
-      "是的，西班牙是传统强队。",
-      "是的，葡萄牙也是传统强队。",
+      finalDecision("是的，西班牙是传统强队。"),
+      finalDecision("是的，葡萄牙也是传统强队。"),
     ];
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
@@ -2020,7 +2035,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("葡萄牙也是传统强队");
       expect(output).not.toContain("[tool] web_search");
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -2028,11 +2043,14 @@ describe("mini-agent CLI", () => {
       const secondBody = JSON.parse(String(calls[1]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(secondBody.messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
-      expect(secondBody.messages[1]?.content).toBe("西班牙是强队吗");
-      expect(secondBody.messages[2]?.content).toBe("是的，西班牙是传统强队。");
-      expect(secondBody.messages[3]?.content).toContain("葡萄牙呢");
-      expect(secondBody.messages[3]?.content).toContain("Resolved current request: 葡萄牙是强队吗");
+      expect(JSON.stringify(secondBody.messages)).toContain("西班牙是强队吗");
+      expect(JSON.stringify(secondBody.messages)).toContain("是的，西班牙是传统强队。");
+      const secondPrompt = JSON.parse(secondBody.messages.at(-1)?.content ?? "{}") as {
+        userGoal?: string;
+        context?: string;
+      };
+      expect(secondPrompt.userGoal).toBe("葡萄牙呢");
+      expect(secondPrompt.context).toContain("西班牙是强队吗");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -2052,7 +2070,7 @@ describe("mini-agent CLI", () => {
     });
     await sessionStore.appendRecord(active.sessionId, {
       type: "TASK_SUMMARY",
-      payload: { summary: "创建 Skill 没什么难度。", success: true, mode: "DIRECT_ANSWER" },
+      payload: { summary: "创建 Skill 没什么难度。", success: true, mode: "AGENT_LOOP" },
     });
     await sessionStore.appendRecord(active.sessionId, {
       type: "USER_MESSAGE",
@@ -2079,7 +2097,7 @@ describe("mini-agent CLI", () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: "五子棋实现本身难度不高。" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: finalDecision("五子棋实现本身难度不高。") } }] }), { status: 200 });
     }));
 
     try {
@@ -2100,21 +2118,15 @@ describe("mini-agent CLI", () => {
       const body = JSON.parse(String(calls[0]?.body)) as {
         messages: Array<{ role: string; content: string }>;
       };
-      expect(body.messages.map((message) => message.role)).toEqual([
-        "system", "user", "assistant", "user",
-      ]);
-      expect(body.messages[1]?.content).toBe("写个五子棋小游戏吧");
-      expect(body.messages[2]?.content).toBe("五子棋已创建为 gobang.html。");
-      expect(body.messages[3]?.content).toContain("你觉得这个有难度吗");
-      expect(body.messages[3]?.content).toContain("immediately preceding exchange");
-      expect(body.messages[3]?.content).not.toContain("Historical memory evidence");
-      expect(JSON.stringify(body.messages)).not.toContain("创建 Skill");
+      expect(JSON.stringify(body.messages)).toContain("写个五子棋小游戏吧");
+      expect(JSON.stringify(body.messages)).toContain("五子棋已创建为 gobang.html。");
+      expect(body.messages.at(-1)?.content).toContain("你觉得这个有难度吗");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("does not override explicit web-answer intent for short follow-up questions", async () => {
+  it("lets the model select web tools for a short live-data question", async () => {
     process.chdir(tempRoot);
 
     const sessionOutput = await captureStdout(async () => {
@@ -2190,19 +2202,6 @@ describe("mini-agent CLI", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     try {
-      await captureStdout(async () => {
-        await createProgram().parseAsync([
-          "run",
-          "你叫什么名字",
-          "--session",
-          session.sessionId,
-          "--model",
-          "test-model",
-          "--base-url",
-          "https://llm.example/v1",
-        ], { from: "user" });
-      });
-
       const output = await captureStdout(async () => {
         await createProgram().parseAsync([
           "run",
@@ -2217,19 +2216,21 @@ describe("mini-agent CLI", () => {
       });
 
       expect(output).toContain("[tool] web_search");
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("这是联网回答");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("replies naturally to accidental no-op messages without calling the model", async () => {
+  it("lets the model reply naturally to an accidental no-op message", async () => {
     process.chdir(tempRoot);
 
     const oldApiKey = process.env.MINI_AGENT_API_KEY;
     process.env.MINI_AGENT_API_KEY = "test-key";
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: finalDecision("好的，没事，你继续说就行。") } }],
+    }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -2244,10 +2245,10 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
 
-      expect(output).toContain("[answer]");
+      expect(output).toContain("[summary]");
       expect(output).toContain("好的，没事，你继续说就行。");
       expect(output).not.toContain("用户误触");
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
@@ -2474,6 +2475,10 @@ function fakeEdgDuckDuckGoHtml(): string {
     "</div>",
     "</body></html>",
   ].join("");
+}
+
+function finalDecision(summary: string): string {
+  return JSON.stringify({ type: "FINAL", summary, success: true });
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

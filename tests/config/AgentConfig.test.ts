@@ -9,7 +9,6 @@ import {
   resolveLlmConfig,
   resolveMultiAgentPolicy,
 } from "../../src/config/AgentConfig.js";
-import { classifySubAgentIntent } from "../../src/agent/SubAgentIntent.js";
 
 let tempRoot: string;
 
@@ -22,6 +21,15 @@ afterEach(async () => {
 });
 
 describe("AgentConfig", () => {
+  it("discards the removed legacy control-plane marker during config migration", async () => {
+    await fs.writeFile(
+      path.join(tempRoot, "mini-agent.config.json"),
+      JSON.stringify({ version: 1, controlPlane: "legacy" }),
+      "utf8",
+    );
+    expect(await loadAgentConfig(tempRoot)).not.toHaveProperty("controlPlane");
+  });
+
   it("loads a minimal config when no config file exists", async () => {
     const config = await loadAgentConfig(tempRoot);
 
@@ -169,9 +177,7 @@ describe("AgentConfig", () => {
     expect(resolveMultiAgentPolicy({ version: 1 }, 3)).toMatchObject({ enabled: true, maxConcurrency: 3 });
     expect(resolveMultiAgentPolicy(
       { version: 1, multiAgent: { mode: "off" } },
-      undefined,
-      classifySubAgentIntent("请使用3个subagent并行分析这个仓库"),
-    )).toMatchObject({ enabled: false, maxConcurrency: 3 });
+    )).toMatchObject({ enabled: false, maxConcurrency: 2 });
   });
 });
 
