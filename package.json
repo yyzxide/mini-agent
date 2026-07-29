@@ -14,17 +14,20 @@
     "mini-agent.config.example.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "check:exports": "node scripts/check-exports.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "build": "npm run clean --silent && tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
-    "guess": "tsx src/guessing-game.ts",
     "test:regression": "vitest run tests/cli-regression.test.ts tests/cli-real-api-regressions.test.ts",
     "bench": "npm run build --silent && node dist/cli/index.js bench run benchmarks/agent-bench-v1.json",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:unused": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
-    "verify": "npm run build && npm test",
-    "verify:regression": "npm run build && npm run test:regression"
+    "verify": "npm run check:architecture && npm run check:exports && npm run check:docs && npm run build && npm run lint:unused && npm test",
+    "verify:regression": "npm run check:architecture && npm run check:exports && npm run check:docs && npm run build && npm run test:regression"
   },
   "keywords": [
     "agent",
