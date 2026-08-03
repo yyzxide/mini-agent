@@ -27,6 +27,8 @@
 - `fetch_url` 能读取公网文本内容，拒绝 localhost/内网目标，并限制输出。
 - `git_status` 和 `git_diff`。
 - `apply_patch` 权限、check、apply、失败返回，并验证 patch 行尾不会被全局 Git `core.autocrlf` 配置干扰。
+- Patch 目标状态以文件系统为准：普通修改补丁可修改未跟踪但已存在的文件；create-existing、modify-missing 和 delete-missing 分别返回结构化目标错误，不依赖 Git tracking 状态。
+- Patch 失败的 error code、目标、操作与 Git stderr 必须进入下一轮 Context；同一失败补丁即使只改变 description 也只能重试一次，最终错误保留根因。
 - tool manifest 输出 source、category 和能力标注。
 - MCP 风格 tool descriptor 输出 inputSchema、annotations 和 permission metadata。
 
@@ -170,12 +172,15 @@
 - `AnswerQualityPolicy` 消费 TaskFrame 的答案形态和深度。
 - `NONE / CONDITIONAL / REQUIRED` 修改语义由 TaskFrame 表达；无缺陷的条件任务可以只读完成，有 Patch 时必须验证。
 - 已存在或仅被读取的文件不能满足新的创建/写入请求；没有本轮成功 Patch 时，`FINAL` 不得声称文件由本轮创建或修改。
+- 成功 `read_file` 的路径必须在模型 Context 中标为文件系统已存在；`git status` 的 `??` 只能表达未跟踪，不能触发 new-file patch。
 - 子任务协议覆盖 `READ_ONLY`、`PROPOSE_CHANGES` 和依赖前序 Writer 的 `REVIEW_CHANGES`；Writer 在临时 worktree 修改和验证，但不能直接改变主工作区。
 - 主 Agent 只有在收到完成的 patch proposal 后才能执行 `APPLY_DELEGATED_PATCH`，并且合入后仍必须满足父级验证门禁。
 - 子 Agent 的任务开始、worktree、读工具、Patch、受限验证命令、任务完成、变更文件和依赖关系会进入统一终端事件流。
 - 子 Agent 每次 LLM 决策前显示 `thinking step`，之后显示结构化 decision 摘要；协议错误、恢复动作和最终失败原因不得被空状态覆盖。
 - 新建独立文件的 writer 可以不读取无关仓库文件直接提交经校验的补丁；修改或删除已有文件仍必须先取得读取证据。
 - 常见子级 JSON/Schema 协议错误进行有界恢复；恢复耗尽后保留精确错误。
+- 默认结构化决策输出预算为 16384；`finish_reason=length` 只触发一次扩大预算的紧凑恢复，DeepSeek 恢复请求关闭思考，第二次耗尽返回 `LLM_OUTPUT_BUDGET_EXHAUSTED` 且不进入外层重复循环。
+- 即使 `reasoning_content` 含有看似合法的 AgentDecision JSON，也不得被解析或执行；仅 `message.content`、标准文本字段和 `output_text` 可进入协议解析器。
 - 明确要求子代理实现时，writer 失败后主 Agent 不得普通 patch 代写；委派预算耗尽应立即终止，不能循环到父级 max steps。
 - writer 成功但明确要求的 reviewer 失败时，不得合入提案；评审批次耗尽同样立即终止。
 - Git writer worktree 必须包含父级创建时的 staged、unstaged 和非忽略 untracked 状态，同时不能改变父工作区；非 Git 夹具使用隔离副本。
@@ -211,8 +216,13 @@
 
 - tool_call -> tool result -> final。
 - apply_patch -> git diff -> final。
+- 只有上下文、没有 `+`/`-` 内容变化的 Patch 返回 `PATCH_NO_CHANGES`，模型可根据精确诊断恢复为真实修改。
 - run_command 成功。
 - run_command 失败后进入下一轮。
+- `node --check *.html` 在执行前返回 `VERIFIER_TARGET_MISMATCH`，且不会成为验证证据；独立 HTML 使用 `verify_file` 检查结构和内嵌 JavaScript。
+- TaskFrame 的 `TASK_INFERRED STATIC` 在独立 HTML Patch 后收敛为可执行的 `SYNTAX`；`USER_REQUIRED STATIC` 保持不变。
+- 两种 Guardrail 交替复现且没有新增完成证据时提前返回 recurring-cycle 根因，不耗尽全部步数。
+- Capability Registry 区分 Tool 与 Decision Action，模型工具清单不暴露伪 `run_command` 或内部 `apply_patch`。
 - 自然语言 `FINAL` 必须满足 TaskFrame 问题形态：数量题给数字或范围化限制，枚举题给清晰列表，定义题真正定义对象，只有来源链接的结果必须拒绝。
 - 写文件类任务如果没有成功 patch，不能直接 final 成功。
 - 已经有代码上下文的“写进去 / 保存到文件”追问，不能反问用户重复提供代码或文件路径。

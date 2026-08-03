@@ -25,6 +25,8 @@ User request + Conversation
 
 不存在 Direct、Web、Review、Edit 等互斥运行模式，也不存在根据用户问句先选择执行器的 `TaskRouter`。普通回答是在 AgentLoop 第一次决策返回 `FINAL`；文件分析会选择 `read_file`；Web 研究会选择 `web_search` / `fetch_url`；写代码会选择 `APPLY_PATCH`。这些动作可以在同一次运行中连续出现。
 
+Capability Registry 明确区分两类协议：`tools` 只包含可用于 `TOOL_CALL` 的注册工具，`actions` 只包含顶层 `AgentDecision`（如 `APPLY_PATCH`、`RUN_COMMAND`、`DELEGATE`）。Patch 和命令执行动作不会再以 `apply_patch` / `run_command` 工具名出现在模型可见工具清单中，避免模型把动作误发成不存在的 Tool Call。
+
 因此：
 
 - Web 搜索完成后可以直接继续读仓库、修改文件和验证，不需要切换“编辑模式”。
@@ -51,6 +53,8 @@ TaskFrame 由模型结合当前请求与最近 Conversation 生成，并由 Zod 
 | `completionCriteria` | 可观察的完成条件 |
 
 TaskFrame 负责语义，不负责授权。即使模型声明需要写入或命令，运行时仍要经过 Capability、Permission、Sandbox 和 Guardrail。
+
+验证效果同时记录 `verification` 和 `verificationBasis`。只有用户明确要求某个验证强度时才使用 `USER_REQUIRED`，并原样保留该等级；普通修改任务使用 `TASK_INFERRED`，Completion Contract 会在 Patch 确定真实目标文件后选择兼容等级。这样既不会把用户要求的测试静默降级，也不会要求独立 HTML 完成并不存在的类型检查。
 
 TaskFrame 解析与失败策略：
 
@@ -191,6 +195,7 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 - `search_code`
 - `git_status`
 - `git_diff`
+- `verify_file`
 
 `read_file`：
 
@@ -201,6 +206,20 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 - 为完整审查记录来源哈希和分页覆盖。
 
 “输入无效”只应用于真正不符合 Schema 的字段；过大的安全分页建议会被调整并在 metadata 中说明。
+
+`verify_file` 是不执行仓库代码的只读、文件类型感知验证器。目前支持 HTML（基础结构和内嵌 classic JavaScript 语法）、JSON、`.js` 与 `.cjs`。命令验证仍会做“验证器—目标类型”兼容检查，例如 `node --check page.html` 会在启动进程前以 `VERIFIER_TARGET_MISMATCH` 拒绝，并引导 Agent 对独立 HTML 使用 `verify_file`；该失败不能被计入完成证据。
+
+### 8.1 文件系统状态与 Git 状态分离
+
+文件是否存在由工作区文件系统决定，与 Git 是否跟踪无关。成功的 `read_file` 证据明确表示 `Filesystem state: EXISTS`；即使 `git status` 显示 `?? path`，模型也必须把它作为现有文件修改。Git 状态只用于审计用户已有变更、生成差异、提交和推送，不能把未跟踪文件解释成待创建文件。
+
+`PatchManager` 在调用 `git apply --check` 前把 unified diff 解析为 `ADDED / MODIFIED / DELETED / RENAMED` 文件操作，并对目标执行文件系统预检：创建已存在路径返回 `PATCH_TARGET_ALREADY_EXISTS`，修改或删除缺失路径返回 `PATCH_TARGET_MISSING`。普通上下文不匹配才进入 `PATCH_CONTEXT_MISMATCH`。这些结构化代码、目标路径、操作类型和受限 stderr 会完整进入 AgentState、Diagnostics 与下一轮模型 Context。
+
+Patch 还必须包含真实内容变化。只有文件头和上下文、没有任何 `+`/`-` 变更行的占位或整文件原样复制 Patch，会在进入 `git apply` 前返回 `PATCH_NO_CHANGES`；这样模型得到的是“没有提交修改”的根因，而不是误导性的 corrupt-patch/context-mismatch。
+
+连续失败保护使用“去除描述文本后的 Decision + 精确错误”指纹。相同失败动作重复两次便保留根因终止，不再被不同 description 绕过，也不会最终退化为无法定位的 `Agent failed too many consecutive steps`。
+
+循环保护还统计“自上次新增完成证据以来”的 Guardrail 复现次数，因此 `FINAL_WITH_INSUFFICIENT_VERIFICATION -> VERIFIER_TARGET_MISMATCH -> FINAL...` 这类交替循环不会绕过连续失败判断并耗尽全部步数；成功 Patch、有效验证、读取证据或委派结果会重置该计数。
 
 ## 9. 完成性与验证
 
@@ -214,6 +233,7 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 - Web 搜索、抓取、时效、权威和引用是否满足 TaskFrame；
 - 知识库回答是否执行 `knowledge_search`；
 - 源码/配置修改是否在最新补丁之后通过相关验证；
+- 验证动作是否与目标文件类型兼容；独立 HTML 可由 `verify_file` 提供 scoped `SYNTAX` 证据；
 - 明确要求的 writer/reviewer 是否完成；
 - 答案形态和深度是否满足 TaskFrame。
 
@@ -237,6 +257,12 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 
 当前配置没有 `controlPlane` 选项。旧配置里即使存在 `"controlPlane": "legacy"`，加载后也会删除该字段。
 
+### 11.1 结构化决策的输出预算与推理降级
+
+`OpenAICompatibleClient` 默认给控制面决策 `16384` 个输出 Token。服务商以 `finish_reason=length` 返回时，运行时把它识别为 `LLM_OUTPUT_BUDGET_EXHAUSTED`，而不是伪装成普通 JSON 语法错误；随后只执行一次紧凑恢复，预算最多扩展到 `32768`。对支持显式思考开关的 DeepSeek 接口，该次恢复会关闭思考，避免再次把全部预算消耗在隐藏推理中。若恢复仍耗尽，错误直接向上返回，不再进入 AgentLoop 的通用协议重试。
+
+`reasoning_content` 只用于“是否存在”和 reasoning token 遥测，永远不作为 TaskFrame 或 AgentDecision 的解析输入。正常空响应和普通 Schema/JSON 错误仍各有一次客户端级纠正；AgentLoop 的额外协议恢复上限也收敛为一次，防止调用呈乘法放大。`llm.thinkingMode` 可设为 `auto`、`enabled` 或 `disabled`；默认 `auto` 不向未知 OpenAI-compatible 服务商发送扩展字段。
+
 ## 12. 对应源码
 
 - `src/runtime/TaskFrame.ts`
@@ -253,6 +279,8 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 - `src/llm/LlmClient.ts`
 - `src/llm/OpenAICompatibleClient.ts`
 - `src/tools/ReadFileTool.ts`
+- `src/tools/ToolErrorFormatter.ts`
+- `src/patch/PatchManager.ts`
 - `src/cli/AgentLoopTask.ts`
 - `scripts/check-architecture.mjs`
 - `scripts/check-exports.mjs`

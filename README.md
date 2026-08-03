@@ -59,6 +59,10 @@ For example, these requests intentionally receive different permissions:
 
 Repository tasks can delegate investigation, implementation, and review. A writer edits and verifies a disposable Git worktree; a reviewer can inspect the writer's materialized patch; only the parent Agent may merge the result. Parent-worktree changes are fingerprinted and conflicting proposals are rejected instead of overwriting concurrent work.
 
+### Filesystem-first mutations
+
+File existence comes from the workspace filesystem, never from Git tracking state. A successfully read untracked file is modified as an existing file; a create patch is valid only when its target path is absent. Patch preflight returns structured target-state errors before invoking Git, and those details remain visible to the next model decision. Git is used to validate diff context, summarize changes, commit, and push—not to decide whether a file can be edited.
+
 ### Evidence and answer quality
 
 The runtime distinguishes “the model produced an answer” from “the task is complete.” It tracks repository reads, full-file coverage, Web search/fetch evidence, citations, patch scope, verification strength, and whether verification happened after the latest change. Answer depth and shape are evaluated separately so stricter evidence does not collapse responses into minimal summaries.
@@ -129,7 +133,8 @@ Minimal configuration:
     "apiKey": "your-api-key",
     "model": "your-model",
     "temperature": 0.2,
-    "maxTokens": 4096,
+    "maxTokens": 16384,
+    "thinkingMode": "auto",
     "timeoutMs": 60000
   },
   "multiAgent": {
@@ -142,6 +147,8 @@ Minimal configuration:
 ```
 
 Environment variables and command-line overrides are also supported. See [`mini-agent.config.example.json`](mini-agent.config.example.json) for LLM, RAG, multi-agent, and MCP options. Embedding environment variables and cache behavior are documented in [`docs/zh-CN/RAG_GUIDE.md`](docs/zh-CN/RAG_GUIDE.md); Memory and Web are runtime capabilities rather than sections in the example JSON.
+
+`maxTokens` is the provider's output budget, including reasoning tokens on providers that count them there. The default is `16384`; when a response ends with `finish_reason=length`, mini-agent makes at most one compact recovery request with a budget up to `32768`. `thinkingMode` is an optional provider extension (`auto`, `enabled`, or `disabled`). Keep `auto` for broad OpenAI-compatible portability; for DeepSeek models that spend the whole budget in hidden reasoning, use `"thinkingMode": "disabled"` or `mini-agent config init --thinking-mode disabled`. Private `reasoning_content` is telemetry only and is never parsed as an `AgentDecision`.
 
 ## Three useful demos
 

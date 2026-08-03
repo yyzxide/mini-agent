@@ -426,6 +426,7 @@ Function Calling 描述模型如何选择一个宿主提供的函数；MCP 描�
 - `resolveRepoPath`
 - `.git` / `.mini-agent` 内部路径保护
 - `PatchManager` 的 check-before-apply
+- 文件系统事实与 Git tracking 分层：CREATE / MODIFY / DELETE 的目标存在性先由工作区预检，Git 只验证 diff 上下文和提供版本控制能力
 - `CommandRunner` 的危险命令拦截
 - `FetchUrlTool` 的私网和重定向限制
 - Plan 模式的工具暴露与运行时双重限制

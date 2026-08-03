@@ -42,6 +42,8 @@ GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm ver
 
 模型选择 `web_search`、`read_file`、`APPLY_PATCH`、`RUN_COMMAND` 或某个 MCP Tool 时，`CapabilityNegotiator` 在同一个 State、Session 和事件流中申请并组合能力，`kind` 始终保持 `AGENT_TASK`。CLI、程序化 `AgentLoop` 和 AgentHarness 使用同一条 TaskFrame 执行链。旧 Session 中的结果字符串只用于持久化数据兼容，不对应另一套执行器。
 
+Capability Registry 的 `tools` 与 `actions` 已物理分离：`TOOL_CALL` 只会看到真实注册工具，`APPLY_PATCH` / `RUN_COMMAND` 等只作为顶层 Decision 动作出现。运行时也会对遗留的 `TOOL_CALL run_command` / `TOOL_CALL apply_patch` 返回精确的 `DECISION_ACTION_REQUIRED`，而不是模糊的 `TOOL_NOT_FOUND`。
+
 ### 2. AI TaskFrame 任务理解
 
 `TaskFrame` 是唯一语义记录。`TaskFrameResolver` 让模型结合原始请求和 Conversation 返回受 Zod Schema 约束的目标、效果、Web 证据策略、约束、验证等级和完成条件。CLI 不通过问句关键词决定能否读取文件、联网或修改代码。
@@ -68,14 +70,19 @@ GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm ver
 - 过大的 `read_file` 分页提示自动收敛，真实 Schema 错误返回具体字段；
 - 完整文件覆盖率追踪；
 - unified diff 检查与应用；
+- 占位/无变化 Patch 的 `PATCH_NO_CHANGES` 语义诊断，不把空补丁误报为 Git 上下文损坏；
 - 结构化命令执行和实时输出；
 - 验证强度分级；
+- 文件类型感知的内置 `verify_file`（HTML/JSON/classic JavaScript）以及命令验证器目标兼容检查；
+- 验证来源区分 `TASK_INFERRED` 与 `USER_REQUIRED`：前者根据实际变更文件收敛到可执行等级，后者保持用户明确要求；
 - 最新补丁之后的验证时序检查；
 - 任务级 before/after diff；
 - 新文件与文档变更记录；
 - 中断 checkpoint 与恢复。
 
 成功 `FINAL` 不是模型单方面决定。运行时会检查 `REQUIRED` 修改是否真的落盘、条件修改是否已有调查证据、证据是否覆盖目标、测试是否相关且发生在最新补丁之后。
+
+重复保护不仅覆盖连续相同 Decision，也覆盖没有新增完成证据时交替复现的 Guardrail 环，避免两个错误分支互相切换直到耗尽 `maxSteps`。
 
 ### 4. 隔离式多 Agent 协作
 
