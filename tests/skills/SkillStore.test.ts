@@ -102,7 +102,15 @@ describe("SkillStore", () => {
       startLine: 3,
       maxLines: 2,
     }, { repoPath });
-    expect(result).toMatchObject({ success: true, data: { content: "three\n", hasMore: false } });
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        path: "skills/testing/references/checks.md",
+        source: "repository",
+        content: "three\n",
+        hasMore: false,
+      },
+    });
   });
 
   it("does not advertise binary or oversized bundled files as readable skill resources", async () => {

@@ -29,7 +29,8 @@ const EMBEDDING_CACHE_VERSION = 1;
 const DEFAULT_MEMORY_CACHE_ENTRIES = 256;
 
 export class LocalHashEmbeddingProvider implements EmbeddingProvider {
-  readonly id = "local-hash-v2";
+  // v3 adds conservative Chinese/English keyword aliases to the vector space.
+  readonly id = "local-hash-v3";
   async embed(text: string): Promise<number[]> { return embedText(text); }
 }
 

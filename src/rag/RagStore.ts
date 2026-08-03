@@ -340,8 +340,18 @@ function toPublicSearchResult(result: InternalSearchResult): RagSearchResult {
 }
 
 function passesLocalHashEvidenceGate(result: InternalSearchResult, queryKeywords: string[]): boolean {
+  // A long cross-language query can share only one distinctive ASCII anchor
+  // (for example "checksum") with an English source. Requiring two matches in
+  // that case rejects exact lexical evidence even though the hash score gate
+  // has already passed. Keep the collision guard, but accept one sufficiently
+  // specific exact token.
+  if (result.matchedKeywords.some(isDistinctiveLexicalAnchor)) return true;
   const requiredMatches = queryKeywords.length <= 2 ? 1 : 2;
   return result.matchedKeywords.length >= requiredMatches && result.keywordScore >= 0.1;
+}
+
+function isDistinctiveLexicalAnchor(keyword: string): boolean {
+  return /^[a-z0-9_][a-z0-9_-]{3,}$/i.test(keyword);
 }
 
 function sourceMatches(source: string, filter: string): boolean {

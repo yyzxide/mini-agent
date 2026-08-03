@@ -151,7 +151,7 @@ export class AgentState {
 
   addToolResult(result: AgentToolExecutionResult): void {
     this.toolResults.push(result);
-    if (result.toolName === "read_file" && result.result.success) {
+    if ((result.toolName === "read_file" || result.toolName === "skill_read") && result.result.success) {
       const read = parseReadFileResultData(result.result.data);
       if (read) {
         this.fileReadCoverage = mergeFileReadCoverageList(this.fileReadCoverage, read);

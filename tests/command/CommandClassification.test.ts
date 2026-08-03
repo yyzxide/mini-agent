@@ -60,6 +60,7 @@ describe("CommandClassification", () => {
     const input = { executable: "node", args: ["--check", "2048.html"] };
     expect(validateVerificationCommandCompatibility(input)).toMatchObject({
       code: "VERIFIER_TARGET_MISMATCH",
+      suggestedVerifyFilePath: "2048.html",
     });
     expect(classifyVerificationCommandInput(input).level).toBe("NONE");
     expect(classifyVerificationCommand("node --check 2048.html").level).toBe("NONE");

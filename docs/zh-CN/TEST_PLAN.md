@@ -247,15 +247,19 @@
 - scripted LLM 能按预设 `AgentDecision` 驱动 AgentLoop。
 - Harness 能创建临时 git 仓库、写入初始文件、执行 patch、读取 diff。
 - Harness 能显式创建未跟踪初始文件，证明工作区存在性与 Git index 相互独立。
-- Harness 能校验成功状态、diff 内容和文件内容。
+- Harness 默认把运行失败判为场景失败；仅当场景显式声明 `expected.success=false` 时，预期失败才可通过。
+- Harness 能校验成功状态、diff、文件存在/内容、摘要正则，以及带输入子集的有序工具调用；真实验收不依赖 HTML 标签大小写或唯一引用标点。
 - Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
 - Harness 把成功的 `verify_file` 和成功的验证命令统一计入 verification 指标。
 - 重复采样同时统计 pass@1、pass@k、run pass rate、all-runs pass rate、flaky 场景数和 95% Wilson 区间，不能用“至少一次成功”掩盖波动。
 - baseline 门禁可以约束全轮通过率、flaky 数量和工具选择回退；`bench compare` 对两份同数据集、同模式报告输出总体与逐场景差值。
 - stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call；HTTP fixture 还端到端执行 resources/list/read 与 prompts/list/get adapter。
-- RAG 场景覆盖 `EMPTY_INDEX/STALE_INDEX -> knowledge_index -> knowledge_search -> citation`，验证被选中源文件的实时 hash 检查，以及索引写入会使同参数只读搜索缓存失效。
-- Skill 场景覆盖无关键词命中时仍暴露有界目录、`skill_read` 分页读取完整指令/资源，以及二进制、超大文件和路径逃逸拒绝。
+- RAG 场景覆盖 `EMPTY_INDEX/STALE_INDEX -> knowledge_index -> knowledge_search -> citation`，验证被选中源文件的实时 hash 检查、跨语言长查询中的精确英文锚点，以及索引写入会使同参数只读搜索缓存失效。
+- Skill 场景覆盖基础上下文只暴露有界目录、`skill_read` 分页读取完整指令/资源并写入文件覆盖证据，以及二进制、超大文件和路径逃逸拒绝。
+- MCP 目录累计项、描述、Schema 和注册 adapter 均有上限；超限服务降级失败，不能无限扩张模型工具上下文。
 - `real-model-acceptance-v1` 以 opt-in 真实模型模式重复检查陈旧 RAG 恢复、Skill 渐进读取和旧文件产物溯源；`bench accept` 必须同时生成 JSON 指标报告和 Markdown 人类可读报告。
+- 陈旧 RAG 场景必须覆盖中文查询检索英文文档，并保持严格词法证据门禁；引用断言同时接受机器格式 `path#Lx-Ly`、`path:x` 和中文 `path 第 x 行`，历史值被准确描述时不应误判为当前结论。
+- 单文件 HTML 的语法验证若误用了不兼容或不可用的非验证命令，运行时应在 `SYNTAX` 完成契约内安全回退到 `verify_file`；失败的测试、构建或多文件任务不得被轻量回退掩盖。
 - 普通 Web 问题没有可读正文时进入证据不足回答；普通等级映射为单来源，当前等级要求多搜索视角与精确权威来源，明确多源和高风险等级才要求双来源/双域名。最终综合阶段即使模型继续提交不合规成功答案，也必须一次降级结束。
 - Web 答案必须引用本轮真正抓取的 URL；不满足时 Guardrail 把具体缺口反馈给同一 AgentLoop，最终仍不合规则失败或进入证据不足终局。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。

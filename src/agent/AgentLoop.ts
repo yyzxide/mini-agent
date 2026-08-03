@@ -75,6 +75,7 @@ import { resolveTaskFrame } from "../runtime/TaskFrameResolver.js";
 import { compileTaskFrameContract } from "../runtime/TaskFrameContract.js";
 import { selectTaskFrameConversation } from "../runtime/TaskFrameConversationSelector.js";
 import type { TaskFrame } from "../runtime/TaskFrame.js";
+import { buildTaskCompletionContract } from "./TaskCompletionContract.js";
 import {
   aggregateLlmMetrics,
   collaborationResultMetadata,
@@ -1189,6 +1190,14 @@ export class AgentLoop {
     const command = renderCommandInput(commandInput);
     const compatibilityIssue = validateVerificationCommandCompatibility(commandInput);
     if (compatibilityIssue) {
+      const fallback = await this.executeBuiltInVerificationFallback(state, input, {
+        reason: `${compatibilityIssue.message} ${compatibilityIssue.guidance}`,
+        ...(compatibilityIssue.suggestedVerifyFilePath
+          ? { preferredPath: compatibilityIssue.suggestedVerifyFilePath }
+          : {}),
+        requireRepositoryChange: false,
+      });
+      if (fallback) return fallback;
       const error = `${compatibilityIssue.code}: ${compatibilityIssue.message} ${compatibilityIssue.guidance}`;
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
@@ -1264,12 +1273,54 @@ export class AgentLoop {
       const error = result.stderr || result.stdout || result.error || `Command failed with exit code ${String(result.exitCode)}`;
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
+      if (result.exitCode === null && !result.timedOut && result.verification?.level === "NONE") {
+        const fallback = await this.executeBuiltInVerificationFallback(state, input, {
+          reason: `The unclassified command failed (${error}).`,
+          requireRepositoryChange: true,
+        });
+        if (fallback) return fallback;
+      }
       return { failed: true };
     } else {
       state.setLastError(null);
     }
 
     return { failed: false };
+  }
+
+  private async executeBuiltInVerificationFallback(
+    state: AgentState,
+    input: AgentRunInput,
+    options: {
+      reason: string;
+      preferredPath?: string;
+      requireRepositoryChange: boolean;
+    },
+  ): Promise<StepOutcome | undefined> {
+    const contract = buildTaskCompletionContract(state);
+    if (contract.requiredVerificationLevel !== "SYNTAX") return undefined;
+    if (options.requireRepositoryChange && !state.getCompletionEvidence().repositoryChanged) return undefined;
+
+    const supportedPathPattern = /\.(?:html?|json|js|cjs)$/i;
+    const candidates = options.preferredPath
+      ? [options.preferredPath]
+      : contract.targetFiles.filter((target) => supportedPathPattern.test(target));
+    const paths = [...new Set(candidates.map((target) => target.replace(/^\.\//, "").replaceAll("\\", "/")))]
+      .filter((target) => supportedPathPattern.test(target));
+    if (paths.length !== 1) return undefined;
+
+    const tool = this.availableTools.find((candidate) => candidate.name === "verify_file");
+    if (!isToolAllowedByTaskContract(tool, state.taskContract)) return undefined;
+    const targetPath = paths[0];
+    if (!targetPath) return undefined;
+
+    const message = [
+      `VERIFIER_AUTO_FALLBACK: ${options.reason}`,
+      `Running the safe built-in verify_file parser for ${targetPath}.`,
+    ].join(" ");
+    await this.emit({ type: "guardrail", code: "VERIFIER_AUTO_FALLBACK", message });
+    const failed = await this.executeToolDecision(state, "verify_file", { path: targetPath }, input);
+    return { failed };
   }
 
   private async executeAskUserDecision(

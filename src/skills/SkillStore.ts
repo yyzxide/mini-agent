@@ -15,6 +15,8 @@ export interface AgentSkill {
 export interface SkillReadResult {
   name: string;
   resource: string;
+  path: string;
+  source: AgentSkill["source"];
   content: string;
   startLine: number;
   endLine: number;
@@ -131,6 +133,8 @@ export class SkillStore {
     return {
       name: skill.name,
       resource,
+      path: path.relative(this.repoPath, realTarget).replace(/\\/g, "/"),
+      source: skill.source,
       content: lines.slice(startLine - 1, endLine).join("\n"),
       startLine,
       endLine,

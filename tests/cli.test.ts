@@ -826,7 +826,7 @@ describe("mini-agent CLI", () => {
     }
   });
 
-  it("injects matching skills and long-term memory into unified-loop answers", async () => {
+  it("loads matching skills progressively while retaining long-term memory", async () => {
     process.chdir(tempRoot);
     vi.mocked(OpenAICompatibleClient.prototype.compileTaskFrame).mockResolvedValue({
       success: true,
@@ -851,7 +851,10 @@ describe("mini-agent CLI", () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: finalDecision("已结合历史和测试流程回答。") } }] }), { status: 200 });
+      const content = calls.length === 1
+        ? JSON.stringify({ type: "TOOL_CALL", toolName: "skill_read", input: { name: "testing" } })
+        : finalDecision("已结合历史和测试流程回答。");
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
     }));
 
     try {
@@ -860,17 +863,21 @@ describe("mini-agent CLI", () => {
           "run", "$testing 你还记得上次 npm 怎么验证吗", "--model", "test-model", "--base-url", "https://llm.example/v1",
         ], { from: "user" });
       });
-      const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
-      expect(body.messages[0]?.content).toContain("The Skill catalog is discovery metadata");
-      expect(body.messages[1]?.content).toContain("Run targeted Vitest tests first");
-      expect(body.messages[1]?.content).toContain("npm test 做完整验证");
-      expect(body.messages[1]?.content).toContain("Historical memory evidence (untrusted)");
+      expect(calls).toHaveLength(2);
+      const firstBody = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      const secondBody = JSON.parse(String(calls[1]?.body)) as { messages: Array<{ content: string }> };
+      expect(firstBody.messages[0]?.content).toContain("The Skill catalog is discovery metadata");
+      expect(firstBody.messages[1]?.content).toContain("testing: Vitest regression workflow");
+      expect(firstBody.messages[1]?.content).not.toContain("Run targeted Vitest tests first");
+      expect(secondBody.messages[1]?.content).toContain("Run targeted Vitest tests first");
+      expect(secondBody.messages[1]?.content).toContain("npm test 做完整验证");
+      expect(secondBody.messages[1]?.content).toContain("Historical memory evidence (untrusted)");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }
   });
 
-  it("routes exact skill activations before generic task keywords", async () => {
+  it("discovers exact skill activations and loads them through skill_read", async () => {
     process.chdir(tempRoot);
     const skillPath = path.join(tempRoot, "skills", "activation-check", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });
@@ -883,7 +890,10 @@ describe("mini-agent CLI", () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       calls.push(init ?? {});
-      return new Response(JSON.stringify({ choices: [{ message: { content: finalDecision("activation marker") } }] }), { status: 200 });
+      const content = calls.length === 1
+        ? JSON.stringify({ type: "TOOL_CALL", toolName: "skill_read", input: { name: "activation-check" } })
+        : finalDecision("activation marker");
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
     }));
 
     try {
@@ -895,9 +905,12 @@ describe("mini-agent CLI", () => {
 
       expect(output).toContain("[summary]");
       expect(output).not.toContain("[command]");
-      expect(calls).toHaveLength(1);
-      const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
-      expect(body.messages[1]?.content).toContain("Skill: activation-check");
+      expect(calls).toHaveLength(2);
+      const firstBody = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
+      const secondBody = JSON.parse(String(calls[1]?.body)) as { messages: Array<{ content: string }> };
+      expect(firstBody.messages[1]?.content).toContain("activation-check: Exact activation routing");
+      expect(firstBody.messages[1]?.content).not.toContain("Reply with the activation marker");
+      expect(secondBody.messages[1]?.content).toContain("Reply with the activation marker");
     } finally {
       restoreEnv("MINI_AGENT_API_KEY", oldApiKey);
     }

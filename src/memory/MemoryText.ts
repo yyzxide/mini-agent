@@ -28,6 +28,29 @@ const STOP_WORDS = new Set([
   "为什么",
 ]);
 
+// The deterministic local embedding has no learned cross-language semantics.
+// Expand only a small set of high-confidence repository terms so an exact
+// concept still provides lexical evidence across Chinese and English. This is
+// deliberately not a general translation layer: unknown terms continue to
+// fail the lexical evidence gate instead of relying on hash collisions.
+const CROSS_LANGUAGE_KEYWORD_GROUPS: readonly (readonly string[])[] = [
+  ["upload", "uploads", "uploaded", "uploading", "上传"],
+  ["download", "downloads", "downloaded", "downloading", "下载"],
+  ["policy", "policies", "策略"],
+  ["checksum", "checksums", "校验和", "校验"],
+  ["verify", "verifies", "verified", "verifying", "verification", "验证", "校验"],
+  ["validate", "validates", "validated", "validating", "validation", "验证", "校验"],
+  ["permission", "permissions", "authorization", "authorize", "权限", "授权"],
+  ["review", "reviews", "reviewed", "reviewing", "审核", "审查"],
+  ["release", "releases", "released", "releasing", "发布"],
+  ["test", "tests", "tested", "testing", "测试"],
+  ["config", "configuration", "配置"],
+  ["cache", "caches", "cached", "caching", "缓存"],
+  ["security", "secure", "安全"],
+];
+
+const CROSS_LANGUAGE_KEYWORD_ALIASES = buildKeywordAliases(CROSS_LANGUAGE_KEYWORD_GROUPS);
+
 export function extractKeywords(value: string): string[] {
   const normalized = value.toLowerCase();
   const asciiWords = normalized.match(/[a-z0-9_][a-z0-9_-]{1,}/g) ?? [];
@@ -52,7 +75,7 @@ export function extractKeywords(value: string): string[] {
     }
   }
 
-  return unique(tokens);
+  return expandKeywordAliases(unique(tokens));
 }
 
 export function embedText(value: string): number[] {
@@ -98,4 +121,22 @@ function hashString(value: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return hash >>> 0;
+}
+
+function buildKeywordAliases(groups: readonly (readonly string[])[]): ReadonlyMap<string, readonly string[]> {
+  const aliases = new Map<string, Set<string>>();
+  for (const group of groups) {
+    for (const keyword of group) {
+      const values = aliases.get(keyword) ?? new Set<string>();
+      for (const alias of group) {
+        if (alias !== keyword) values.add(alias);
+      }
+      aliases.set(keyword, values);
+    }
+  }
+  return new Map([...aliases].map(([keyword, values]) => [keyword, [...values]]));
+}
+
+function expandKeywordAliases(keywords: string[]): string[] {
+  return unique(keywords.flatMap((keyword) => [keyword, ...(CROSS_LANGUAGE_KEYWORD_ALIASES.get(keyword) ?? [])]));
 }

@@ -9,6 +9,8 @@ import { StdioMcpClient } from "./StdioMcpClient.js";
 import type { McpServerConfig } from "./McpTypes.js";
 import { createConfiguredWebSearchOptions } from "../tools/ConfiguredWebSearch.js";
 
+const MAX_REGISTERED_MCP_ADAPTERS = 256;
+
 export interface McpLoadDiagnostic {
   server: string;
   success: boolean;
@@ -35,6 +37,7 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
     webSearch: createConfiguredWebSearchOptions(config),
   });
   const diagnostics: McpLoadDiagnostic[] = [];
+  let registeredMcpAdapters = 0;
 
   for (const server of config.mcp?.servers.filter((entry) => entry.enabled) ?? []) {
     const client = createClient(server);
@@ -58,6 +61,9 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
         ...(resources.length > 0 ? [new McpResourceTool(server, resources, client)] : []),
         ...(prompts.length > 0 ? [new McpPromptTool(server, prompts, client)] : []),
       ];
+      if (registeredMcpAdapters + staged.length > MAX_REGISTERED_MCP_ADAPTERS) {
+        throw new Error(`Configured MCP adapters exceeded ${String(MAX_REGISTERED_MCP_ADAPTERS)} total entries`);
+      }
       const stagedNames = new Set<string>();
       for (const tool of staged) {
         if (stagedNames.has(tool.name) || registry.get(tool.name)) {
@@ -66,6 +72,7 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
         stagedNames.add(tool.name);
       }
       for (const tool of staged) registry.register(tool);
+      registeredMcpAdapters += staged.length;
       registry.addDisposer(async () => await client.close());
       const degraded = Object.keys(capabilityErrors).length > 0;
       diagnostics.push({

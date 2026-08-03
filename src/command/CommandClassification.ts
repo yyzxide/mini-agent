@@ -20,6 +20,7 @@ export interface VerificationCommandCompatibilityIssue {
   code: "VERIFIER_TARGET_MISMATCH";
   message: string;
   guidance: string;
+  suggestedVerifyFilePath?: string;
 }
 
 const VERIFICATION_EXECUTABLES = new Set([
@@ -137,6 +138,7 @@ export function validateVerificationCommandCompatibility(
     guidance: extension === ".html" || extension === ".htm"
       ? `Use the read-only verify_file tool for ${target}; it checks HTML structure and inline classic JavaScript syntax.`
       : "Use a verifier that supports the target file type or the repository's build/lint/test command.",
+    ...((extension === ".html" || extension === ".htm") ? { suggestedVerifyFilePath: target } : {}),
   };
 }
 

@@ -78,7 +78,7 @@ mini-agent tool run knowledge_search '{"query":"RAG 的评测指标是什么","t
 
 ## 4. Embedding 配置
 
-未配置远端 embedding 时使用 `local-hash-v2`，适合离线演示和确定性测试，但语义能力有限。为降低哈希碰撞导致的假阳性，离线 provider 对长查询要求至少命中两个有效词项并达到最低覆盖率；真实 embedding provider 可以进行纯语义召回。配置以下环境变量后使用 OpenAI-compatible `/embeddings`：
+未配置远端 embedding 时使用 `local-hash-v3`，适合离线演示和确定性测试，但语义能力有限。v3 对上传、校验、策略、权限、审核、发布、测试等高置信仓库词项进行有界的中英双语扩展，解决常见的中文提问、英文文档检索；这不是通用翻译器，未知概念仍必须命中真实词法证据。为降低哈希碰撞导致的假阳性，离线 provider 仍执行词法证据门禁；真实 embedding provider 可以进行纯语义召回。配置以下环境变量后使用 OpenAI-compatible `/embeddings`：
 
 ```text
 MINI_AGENT_EMBEDDING_BASE_URL

@@ -351,7 +351,7 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
           };
         }
       }
-      if (success && toolName === "read_file") {
+      if (success && (toolName === "read_file" || toolName === "skill_read")) {
         const result = parseReadFileResultData(record.payload.result);
         if (result) {
           recovered.effects.fileReadCoverage = mergeFileReadCoverageList(

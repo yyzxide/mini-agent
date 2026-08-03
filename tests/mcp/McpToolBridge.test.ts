@@ -6,7 +6,7 @@ import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
 import { McpRemoteTool as McpRemoteToolAdapter } from "../../src/mcp/McpRemoteTool.js";
 import { PermissionManager } from "../../src/permission/PermissionManager.js";
-import { collectMcpPages, parseInitializeResult } from "../../src/mcp/McpClient.js";
+import { collectMcpPages, parseInitializeResult, parseToolsListPage } from "../../src/mcp/McpClient.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -65,6 +65,20 @@ describe("MCP tool bridge", () => {
   it("rejects repeated pagination cursors instead of looping forever", async () => {
     await expect(collectMcpPages(async () => ({ items: ["item"], nextCursor: "same" })))
       .rejects.toThrow(/repeated cursor/i);
+  });
+
+  it("bounds discovered MCP items and remote tool schemas", async () => {
+    await expect(collectMcpPages(async () => ({ items: Array.from({ length: 129 }, (_, index) => index) })))
+      .rejects.toThrow(/exceeded 128 items/i);
+    expect(() => parseToolsListPage({
+      tools: Array.from({ length: 129 }, (_, index) => ({ name: `tool-${String(index)}`, inputSchema: {} })),
+    })).toThrow(/tools\/list exceeded 128 items/i);
+    expect(() => parseToolsListPage({
+      tools: [{
+        name: "oversized",
+        inputSchema: { type: "object", description: "x".repeat(16_001) },
+      }],
+    })).toThrow(/inputSchema exceeded/i);
   });
 
   it("requires an exact interactive approval for a mutating MCP tool", async () => {

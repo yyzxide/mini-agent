@@ -217,7 +217,7 @@ function compactPersistedToolResult(toolName: string, value: unknown) {
     return redacted;
   }
 
-  if (toolName === "read_file") {
+  if (toolName === "read_file" || toolName === "skill_read") {
     const content = typeof redacted.content === "string" ? redacted.content : "";
     return {
       ...redacted,

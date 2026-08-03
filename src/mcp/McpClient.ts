@@ -1,4 +1,5 @@
 import type { McpCallToolResult, McpGetPromptResult, McpReadResourceResult, McpRemotePrompt, McpRemoteResource, McpRemoteTool, McpServerMetadata } from "./McpTypes.js";
+import type { ToolAnnotations } from "../tools/Tool.js";
 
 export interface McpClient {
   connect(): Promise<void>;
@@ -28,6 +29,12 @@ export interface JsonRpcResponse {
 
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
 const MAX_MCP_LIST_PAGES = 100;
+const MAX_MCP_LIST_ITEMS = 128;
+const MAX_MCP_NAME_CHARS = 128;
+const MAX_MCP_DESCRIPTION_CHARS = 2_000;
+const MAX_MCP_URI_CHARS = 4_096;
+const MAX_MCP_SCHEMA_CHARS = 16_000;
+const MAX_MCP_PROMPT_ARGUMENTS = 64;
 
 export interface McpListPage<T> {
   items: T[];
@@ -51,17 +58,20 @@ export function parseToolsListPage(value: unknown): McpListPage<McpRemoteTool> {
   if (!isObject(value) || !Array.isArray(value.tools)) {
     throw new Error("MCP tools/list returned an invalid result");
   }
+  assertListItemCount(value.tools, "MCP tools/list");
 
   const items = value.tools.map((tool) => {
-    if (!isObject(tool) || typeof tool.name !== "string" || !("inputSchema" in tool)) {
+    if (!isObject(tool) || !("inputSchema" in tool) || !isObject(tool.inputSchema)) {
       throw new Error("MCP tools/list returned an invalid tool descriptor");
     }
+    assertJsonSize(tool.inputSchema, MAX_MCP_SCHEMA_CHARS, "MCP tool inputSchema");
+    const annotations = parseToolAnnotations(tool.annotations);
     return {
-      name: tool.name,
-      ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      name: requiredBoundedString(tool.name, MAX_MCP_NAME_CHARS, "MCP tool name"),
+      ...optionalBoundedString(tool.description, MAX_MCP_DESCRIPTION_CHARS, "MCP tool description", "description"),
       inputSchema: tool.inputSchema,
-      ...(isObject(tool.annotations) ? { annotations: tool.annotations } : {}),
-    } as McpRemoteTool;
+      ...(annotations ? { annotations } : {}),
+    } satisfies McpRemoteTool;
   });
   return { items, ...parseNextCursor(value) };
 }
@@ -78,13 +88,17 @@ export function parseInitializeResult(value: unknown): McpServerMetadata {
   const serverInfo = isObject(value.serverInfo)
     && typeof value.serverInfo.name === "string"
     && typeof value.serverInfo.version === "string"
-    ? { name: value.serverInfo.name, version: value.serverInfo.version }
-    : undefined;
+      ? {
+        name: requiredBoundedString(value.serverInfo.name, MAX_MCP_NAME_CHARS, "MCP server name"),
+        version: requiredBoundedString(value.serverInfo.version, MAX_MCP_NAME_CHARS, "MCP server version"),
+      }
+      : undefined;
+  assertJsonSize(value.capabilities, MAX_MCP_SCHEMA_CHARS, "MCP server capabilities");
   return {
     protocolVersion: value.protocolVersion,
     capabilities: value.capabilities,
     ...(serverInfo ? { serverInfo } : {}),
-    ...(typeof value.instructions === "string" ? { instructions: value.instructions } : {}),
+    ...optionalBoundedString(value.instructions, MAX_MCP_DESCRIPTION_CHARS, "MCP server instructions", "instructions"),
   };
 }
 
@@ -97,13 +111,14 @@ export function parseCallResult(value: unknown): McpCallToolResult {
 
 export function parseResourcesListPage(value: unknown): McpListPage<McpRemoteResource> {
   if (!isObject(value) || !Array.isArray(value.resources)) throw new Error("MCP resources/list returned an invalid result");
+  assertListItemCount(value.resources, "MCP resources/list");
   const items = value.resources.map((resource) => {
-    if (!isObject(resource) || typeof resource.uri !== "string") throw new Error("MCP resources/list returned an invalid descriptor");
+    if (!isObject(resource)) throw new Error("MCP resources/list returned an invalid descriptor");
     return {
-      uri: resource.uri,
-      ...(typeof resource.name === "string" ? { name: resource.name } : {}),
-      ...(typeof resource.description === "string" ? { description: resource.description } : {}),
-      ...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+      uri: requiredBoundedString(resource.uri, MAX_MCP_URI_CHARS, "MCP resource URI"),
+      ...optionalBoundedString(resource.name, MAX_MCP_NAME_CHARS, "MCP resource name", "name"),
+      ...optionalBoundedString(resource.description, MAX_MCP_DESCRIPTION_CHARS, "MCP resource description", "description"),
+      ...optionalBoundedString(resource.mimeType, MAX_MCP_NAME_CHARS, "MCP resource MIME type", "mimeType"),
     };
   });
   return { items, ...parseNextCursor(value) };
@@ -115,8 +130,8 @@ export function parseReadResourceResult(value: unknown): McpReadResourceResult {
     contents: value.contents.slice(0, 20).map((content) => {
       if (!isObject(content) || typeof content.uri !== "string") throw new Error("MCP resources/read returned invalid content");
       return {
-        uri: content.uri,
-        ...(typeof content.mimeType === "string" ? { mimeType: content.mimeType } : {}),
+        uri: requiredBoundedString(content.uri, MAX_MCP_URI_CHARS, "MCP resource content URI"),
+        ...optionalBoundedString(content.mimeType, MAX_MCP_NAME_CHARS, "MCP resource content MIME type", "mimeType"),
         ...(typeof content.text === "string" ? { text: content.text.slice(0, 100_000) } : {}),
         ...(typeof content.blob === "string" ? { blob: content.blob.slice(0, 100_000) } : {}),
       };
@@ -126,18 +141,22 @@ export function parseReadResourceResult(value: unknown): McpReadResourceResult {
 
 export function parsePromptsListPage(value: unknown): McpListPage<McpRemotePrompt> {
   if (!isObject(value) || !Array.isArray(value.prompts)) throw new Error("MCP prompts/list returned an invalid result");
+  assertListItemCount(value.prompts, "MCP prompts/list");
   const items = value.prompts.map((prompt) => {
-    if (!isObject(prompt) || typeof prompt.name !== "string") throw new Error("MCP prompts/list returned an invalid descriptor");
+    if (!isObject(prompt)) throw new Error("MCP prompts/list returned an invalid descriptor");
+    if (Array.isArray(prompt.arguments) && prompt.arguments.length > MAX_MCP_PROMPT_ARGUMENTS) {
+      throw new Error(`MCP prompt arguments exceeded ${String(MAX_MCP_PROMPT_ARGUMENTS)} items`);
+    }
     const args = Array.isArray(prompt.arguments)
       ? prompt.arguments.filter(isObject).map((argument) => ({
-        name: typeof argument.name === "string" ? argument.name : "",
-        ...(typeof argument.description === "string" ? { description: argument.description } : {}),
+        name: requiredBoundedString(argument.name, MAX_MCP_NAME_CHARS, "MCP prompt argument name"),
+        ...optionalBoundedString(argument.description, MAX_MCP_DESCRIPTION_CHARS, "MCP prompt argument description", "description"),
         ...(typeof argument.required === "boolean" ? { required: argument.required } : {}),
-      })).filter((argument) => argument.name.length > 0)
+      }))
       : undefined;
     return {
-      name: prompt.name,
-      ...(typeof prompt.description === "string" ? { description: prompt.description } : {}),
+      name: requiredBoundedString(prompt.name, MAX_MCP_NAME_CHARS, "MCP prompt name"),
+      ...optionalBoundedString(prompt.description, MAX_MCP_DESCRIPTION_CHARS, "MCP prompt description", "description"),
       ...(args ? { arguments: args } : {}),
     };
   });
@@ -146,8 +165,9 @@ export function parsePromptsListPage(value: unknown): McpListPage<McpRemotePromp
 
 export function parseGetPromptResult(value: unknown): McpGetPromptResult {
   if (!isObject(value) || !Array.isArray(value.messages)) throw new Error("MCP prompts/get returned an invalid result");
+  assertJsonSize(value.messages, 200_000, "MCP prompt messages");
   return {
-    ...(typeof value.description === "string" ? { description: value.description } : {}),
+    ...optionalBoundedString(value.description, MAX_MCP_DESCRIPTION_CHARS, "MCP prompt result description", "description"),
     messages: value.messages.slice(0, 50),
   };
 }
@@ -164,6 +184,9 @@ export async function collectMcpPages<T>(
   let cursor: string | undefined;
   for (let page = 0; page < MAX_MCP_LIST_PAGES; page += 1) {
     const result = await fetchPage(cursor);
+    if (items.length + result.items.length > MAX_MCP_LIST_ITEMS) {
+      throw new Error(`MCP list pagination exceeded ${String(MAX_MCP_LIST_ITEMS)} items`);
+    }
     items.push(...result.items);
     if (!result.nextCursor) return items;
     if (seenCursors.has(result.nextCursor)) {
@@ -177,6 +200,48 @@ export async function collectMcpPages<T>(
 
 function parseNextCursor(value: Record<string, unknown>): { nextCursor?: string } {
   if (value.nextCursor === undefined || value.nextCursor === null || value.nextCursor === "") return {};
-  if (typeof value.nextCursor !== "string") throw new Error("MCP list returned an invalid nextCursor");
-  return { nextCursor: value.nextCursor };
+  return { nextCursor: requiredBoundedString(value.nextCursor, MAX_MCP_URI_CHARS, "MCP nextCursor") };
+}
+
+function requiredBoundedString(value: unknown, maxChars: number, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} is missing or invalid`);
+  if (value.length > maxChars) throw new Error(`${label} exceeded ${String(maxChars)} characters`);
+  return value;
+}
+
+function optionalBoundedString<K extends string>(
+  value: unknown,
+  maxChars: number,
+  label: string,
+  key: K,
+): { [P in K]?: string } {
+  if (value === undefined || value === null) return {};
+  return { [key]: requiredBoundedString(value, maxChars, label) } as { [P in K]?: string };
+}
+
+function assertJsonSize(value: unknown, maxChars: number, label: string): void {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error(`${label} is not serializable`);
+  }
+  if (serialized === undefined || serialized.length > maxChars) {
+    throw new Error(`${label} exceeded ${String(maxChars)} serialized characters`);
+  }
+}
+
+function assertListItemCount(values: unknown[], label: string): void {
+  if (values.length > MAX_MCP_LIST_ITEMS) {
+    throw new Error(`${label} exceeded ${String(MAX_MCP_LIST_ITEMS)} items`);
+  }
+}
+
+function parseToolAnnotations(value: unknown): Partial<ToolAnnotations> | undefined {
+  if (!isObject(value)) return undefined;
+  const annotations: Partial<ToolAnnotations> = {};
+  for (const key of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const) {
+    if (typeof value[key] === "boolean") annotations[key] = value[key];
+  }
+  return Object.keys(annotations).length > 0 ? annotations : undefined;
 }

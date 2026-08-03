@@ -80,19 +80,41 @@ describe("AgentHarness", () => {
         { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
         { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs/policy.md"] } },
         { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
-        { type: "FINAL", success: true, summary: "Policy requires SHA-512 (docs/policy.md#L1-L3)." },
+        { type: "FINAL", success: true, summary: "当前策略已从 SHA-256 更新为 SHA-512（docs/policy.md 第 3 行）。" },
       ],
       expected: {
         success: true,
         toolsCalled: ["knowledge_search", "knowledge_index"],
-        summaryContains: ["SHA-512", "docs/policy.md#L"],
-        summaryNotContains: ["SHA-256"],
+        toolCallsInOrder: [
+          { name: "knowledge_search", inputContains: { query: "upload policy checksum verification" } },
+          { name: "knowledge_index", inputContains: { paths: ["docs/policy.md"] } },
+          { name: "knowledge_search", inputContains: { query: "upload policy checksum verification" } },
+        ],
+        summaryContains: ["SHA-512"],
+        summaryMatches: ["docs/policy\\.md(?:(?:#L\\d+(?:-L\\d+)?)|(?::\\d+)|(?:\\s*第\\s*\\d+(?:\\s*[-–—至到]\\s*\\d+)?\\s*行))"],
       },
     });
     createdRepos.push(result.repoPath);
 
-    expect(result.passed, result.expectationFailures.join("\n")).toBe(true);
+    expect(result.passed, [
+      result.run.error,
+      result.run.summary,
+      ...result.expectationFailures,
+    ].filter(Boolean).join("\n")).toBe(true);
     expect(result.metrics.toolCalls.filter((tool) => tool === "knowledge_search")).toHaveLength(2);
+  });
+
+  it("treats an unsuccessful run as failed when expected is omitted", async () => {
+    const result = await new AgentHarness().runScenario({
+      name: "failed without explicit expectations",
+      userGoal: "fail",
+      decisions: [{ type: "FAILED", error: "simulated failure" }],
+    });
+    createdRepos.push(result.repoPath);
+
+    expect(result.run.success).toBe(false);
+    expect(result.passed).toBe(false);
+    expect(result.expectationFailures).toContain("Expected success=true but got false");
   });
 
   it("aggregates suite metrics and failure categories", async () => {

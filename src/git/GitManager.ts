@@ -147,9 +147,19 @@ export class GitManager {
   private async captureWorkingTreeSummary(): Promise<WorkingTreeSummary> {
     const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "mini-agent-git-index-"));
     const indexPath = path.join(tempDirectory, "index");
-    const env = { GIT_INDEX_FILE: indexPath };
+    const objectDirectory = path.join(tempDirectory, "objects");
 
     try {
+      await fs.mkdir(objectDirectory, { recursive: true });
+      const repositoryObjects = await this.runGit(
+        ["rev-parse", "--git-path", "objects"],
+        "Failed to locate Git object directory",
+      );
+      const env = {
+        GIT_INDEX_FILE: indexPath,
+        GIT_OBJECT_DIRECTORY: objectDirectory,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(this.repoPath, repositoryObjects.stdout.trim()),
+      };
       const head = await execa("git", ["rev-parse", "--verify", "HEAD"], {
         cwd: this.repoPath,
         reject: false,

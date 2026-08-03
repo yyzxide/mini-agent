@@ -10,9 +10,14 @@ const expectedSchema = z.object({
   success: z.boolean().optional(),
   diffContains: z.array(z.string()).optional(),
   diffNotContains: z.array(z.string()).optional(),
+  filesExist: z.array(z.string().trim().min(1)).optional(),
   filesContain: z.record(z.string(), z.string()).optional(),
   filesNotContain: z.record(z.string(), z.string()).optional(),
   toolsCalled: z.array(z.string().min(1)).optional(),
+  toolCallsInOrder: z.array(z.object({
+    name: z.string().trim().min(1),
+    inputContains: z.record(z.string(), z.unknown()).optional(),
+  }).strict()).optional(),
   testsPassed: z.boolean().optional(),
   verificationPassed: z.boolean().optional(),
   maxSteps: z.number().int().positive().optional(),
@@ -20,6 +25,14 @@ const expectedSchema = z.object({
   maxTotalTokens: z.number().int().nonnegative().optional(),
   summaryContains: z.array(z.string()).optional(),
   summaryNotContains: z.array(z.string()).optional(),
+  summaryMatches: z.array(z.string().refine((value) => {
+    try {
+      new RegExp(value, "iu");
+      return true;
+    } catch {
+      return false;
+    }
+  }, "Invalid regular expression")).optional(),
 }).strict();
 
 const scenarioSchema = z.object({

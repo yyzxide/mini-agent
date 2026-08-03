@@ -30,6 +30,7 @@ import { ScriptedLlmClient } from "./ScriptedLlmClient.js";
 import type { MultiAgentPolicy, SubAgentCoordinator } from "../agent/SubAgentTypes.js";
 import type { TaskFrame } from "../runtime/TaskFrame.js";
 import { RagStore } from "../rag/RagStore.js";
+import type { JsonObject } from "../session/SessionTypes.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,9 +54,11 @@ export interface AgentHarnessScenario {
     success?: boolean;
     diffContains?: string[];
     diffNotContains?: string[];
+    filesExist?: string[];
     filesContain?: Record<string, string>;
     filesNotContain?: Record<string, string>;
     toolsCalled?: string[];
+    toolCallsInOrder?: AgentHarnessToolCallExpectation[];
     testsPassed?: boolean;
     verificationPassed?: boolean;
     maxSteps?: number;
@@ -63,7 +66,13 @@ export interface AgentHarnessScenario {
     maxTotalTokens?: number;
     summaryContains?: string[];
     summaryNotContains?: string[];
+    summaryMatches?: string[];
   };
+}
+
+export interface AgentHarnessToolCallExpectation {
+  name: string;
+  inputContains?: JsonObject;
 }
 
 export interface AgentHarnessMetrics {
@@ -169,15 +178,18 @@ export class AgentHarness {
     const events = await eventStore.readEvents(run.sessionId);
     const telemetry = collectHarnessTelemetry(records, events);
     const llmCalls = llmClient.calls + countRecordedSubAgentLlmCalls(records);
+    const parentToolCalls = progress
+      .filter((event): event is Extract<AgentProgressEvent, { type: "tool" }> => event.type === "tool")
+      .map((event) => ({ name: event.toolName, input: event.input }));
     const toolCalls = [
-      ...progress.filter((event): event is Extract<AgentProgressEvent, { type: "tool" }> => event.type === "tool")
-        .map((event) => event.toolName),
+      ...parentToolCalls.map((event) => event.name),
       ...collectRecordedSubAgentTools(records),
     ];
 
     const expectationFailures = await evaluateScenarioExpectation(repoPath, run, scenario.expected, {
       llmCalls,
-      toolCalls,
+      toolNames: toolCalls,
+      toolCalls: parentToolCalls,
       metrics: { durationMs, ...telemetry },
     });
     const metrics: AgentHarnessMetrics = {
@@ -401,27 +413,35 @@ async function evaluateScenarioExpectation(
   expected: AgentHarnessScenario["expected"],
   observed: {
     llmCalls: number;
-    toolCalls: string[];
+    toolNames: string[];
+    toolCalls: Array<{ name: string; input: JsonObject }>;
     metrics: Pick<
       AgentHarnessMetrics,
       "durationMs" | "totalTokens" | "testsPassed" | "testsFailed" | "verificationsPassed" | "verificationsFailed"
     >;
   },
 ): Promise<string[]> {
-  if (!expected) {
-    return [];
-  }
-
   const failures: string[] = [];
+  const expectedSuccess = expected?.success ?? true;
 
-  if (expected.success !== undefined && run.success !== expected.success) {
-    failures.push(`Expected success=${String(expected.success)} but got ${String(run.success)}`);
+  if (run.success !== expectedSuccess) {
+    failures.push(`Expected success=${String(expectedSuccess)} but got ${String(run.success)}`);
   }
+  if (!expected) return failures;
   for (const text of expected.summaryContains ?? []) {
     if (!run.summary.includes(text)) failures.push(`Expected final summary to contain ${JSON.stringify(text)}`);
   }
   for (const text of expected.summaryNotContains ?? []) {
     if (run.summary.includes(text)) failures.push(`Expected final summary not to contain ${JSON.stringify(text)}`);
+  }
+  for (const pattern of expected.summaryMatches ?? []) {
+    try {
+      if (!new RegExp(pattern, "iu").test(run.summary)) {
+        failures.push(`Expected final summary to match /${pattern}/iu`);
+      }
+    } catch {
+      failures.push(`Invalid final summary regular expression: ${JSON.stringify(pattern)}`);
+    }
   }
 
   for (const text of expected.diffContains ?? []) {
@@ -435,6 +455,10 @@ async function evaluateScenarioExpectation(
     }
   }
 
+  for (const relativePath of expected.filesExist ?? []) {
+    const exists = await fs.stat(path.join(repoPath, relativePath)).then((stat) => stat.isFile()).catch(() => false);
+    if (!exists) failures.push(`Expected file to exist: ${relativePath}`);
+  }
   for (const [relativePath, text] of Object.entries(expected.filesContain ?? {})) {
     const content = await fs.readFile(path.join(repoPath, relativePath), "utf8").catch(() => undefined);
     if (content === undefined) {
@@ -451,7 +475,22 @@ async function evaluateScenarioExpectation(
   }
 
   for (const tool of expected.toolsCalled ?? []) {
-    if (!observed.toolCalls.includes(tool)) failures.push(`Expected tool to be called: ${tool}`);
+    if (!observed.toolNames.includes(tool)) failures.push(`Expected tool to be called: ${tool}`);
+  }
+  let callCursor = 0;
+  for (const expectedCall of expected.toolCallsInOrder ?? []) {
+    const relativeIndex = observed.toolCalls.slice(callCursor).findIndex((actual) => (
+      actual.name === expectedCall.name
+      && (expectedCall.inputContains === undefined || containsPartialValue(actual.input, expectedCall.inputContains))
+    ));
+    if (relativeIndex < 0) {
+      failures.push([
+        `Expected ordered tool call: ${expectedCall.name}`,
+        expectedCall.inputContains === undefined ? "" : ` with input containing ${JSON.stringify(expectedCall.inputContains)}`,
+      ].join(""));
+      continue;
+    }
+    callCursor += relativeIndex + 1;
   }
   if (expected.maxSteps !== undefined && run.steps > expected.maxSteps) {
     failures.push(`Expected at most ${expected.maxSteps} steps but got ${run.steps}`);
@@ -476,6 +515,18 @@ async function evaluateScenarioExpectation(
   }
 
   return failures;
+}
+
+function containsPartialValue(actual: unknown, expected: unknown): boolean {
+  if (expected === null || typeof expected !== "object") return Object.is(actual, expected);
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual)
+      && expected.length <= actual.length
+      && expected.every((value, index) => containsPartialValue(actual[index], value));
+  }
+  if (typeof actual !== "object" || actual === null || Array.isArray(actual)) return false;
+  const record = actual as Record<string, unknown>;
+  return Object.entries(expected).every(([key, value]) => containsPartialValue(record[key], value));
 }
 
 class InstrumentedLlmClient implements LlmClient {

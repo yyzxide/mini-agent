@@ -6,7 +6,7 @@ import { MemoryContextService } from "../memory/MemoryContextService.js";
 import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { readSessionMemoryWithTrace } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import { formatSkillCatalogForContext, formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
+import { formatSkillCatalogForContext, SkillStore } from "../skills/SkillStore.js";
 import { ContextPlanner } from "./ContextPlanner.js";
 import {
   formatCurrentFileReadCoverage,
@@ -94,7 +94,6 @@ export class ContextBuilder {
       sessionMemoryResult,
       longTermMemory,
       skillCatalog,
-      selectedSkills,
     ] = await Promise.all([
       hydrateRepositoryContext ? git.isGitRepository().catch(() => false) : Promise.resolve(false),
       hydrateRepositoryContext
@@ -133,8 +132,6 @@ export class ContextBuilder {
             : "(not requested for the current task)"),
       skillStore.list().then(formatSkillCatalogForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
-      skillStore.select(goal, 3).then(formatSkillsForContext)
-        .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
 
     const sessionMemory = sessionMemoryResult.memory;
@@ -158,7 +155,6 @@ export class ContextBuilder {
       sessionMemory,
       longTermMemory,
       skillCatalog,
-      selectedSkills,
       diagnostics,
       recentEvidence,
       activeFileChunk,
@@ -202,7 +198,6 @@ function buildCandidates(input: {
   sessionMemory: string;
   longTermMemory: string;
   skillCatalog: string;
-  selectedSkills: string;
   diagnostics: string;
   recentEvidence: string;
   activeFileChunk: string;
@@ -218,7 +213,6 @@ function buildCandidates(input: {
   const hasDiagnostics = input.state.lastError !== null || input.workingSet.latestFailures.length > 0;
   const hasDiff = input.diff.trim().length > 0 && input.diff !== "(none)";
   const hasSessionMemory = input.sessionMemory !== "(none)";
-  const hasSelectedSkills = input.selectedSkills.trim().length > 0 && !input.selectedSkills.startsWith("(none");
   const hasSkillCatalog = input.skillCatalog.trim().length > 0 && !input.skillCatalog.startsWith("(no skills");
   const hasLongTermMemory = input.needsLongTermMemory
     && input.longTermMemory !== "(none)"
@@ -357,17 +351,6 @@ function buildCandidates(input: {
       maxTokens: 1_800,
       retention: "head_tail",
       reason: "Parallel child investigations are advisory evidence for the parent; the parent remains responsible for validation and all mutations.",
-    },
-    {
-      id: "selected_skills",
-      title: "Selected skills",
-      content: input.selectedSkills,
-      priority: 92,
-      enabled: hasSelectedSkills,
-      stable: true,
-      maxTokens: 1_200,
-      retention: "head_tail",
-      reason: "Only skills selected for the current goal are relevant.",
     },
     {
       id: "conversation_memory",

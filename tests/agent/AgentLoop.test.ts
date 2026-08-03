@@ -527,6 +527,188 @@ describe("AgentLoop", () => {
     expect(client.getCallInputs()).toHaveLength(3);
   });
 
+  it("falls back to verify_file after an unavailable unclassified verifier for one HTML target", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create the standalone HTML artifact",
+        patch: [
+          "diff --git a/snake-v2.html b/snake-v2.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/snake-v2.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head><title>Snake</title></head><body><script>const score = 0;</script></body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: "missing-mini-agent-html-verifier",
+        args: ["snake-v2.html"],
+        description: "Attempt an unavailable HTML verifier",
+      },
+      { type: "FINAL", success: true, summary: "Created and verified snake-v2.html." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建并验证 snake-v2.html",
+      taskContract: createTestTaskContract({
+        objective: "Create and verify snake-v2.html.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success, result.error).toBe(true);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "VERIFIER_AUTO_FALLBACK",
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool",
+      toolName: "verify_file",
+      input: { path: "snake-v2.html" },
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool_result",
+      toolName: "verify_file",
+      success: true,
+    }));
+    expect(client.getCallInputs()).toHaveLength(4);
+  });
+
+  it("redirects node --check on HTML to verify_file before running the incompatible command", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create an HTML page",
+        patch: [
+          "diff --git a/page.html b/page.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/page.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head></head><body><script>let ready = true;</script></body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: "node",
+        args: ["--check", "page.html"],
+        description: "Check HTML syntax",
+      },
+      { type: "FINAL", success: true, summary: "Created and verified page.html." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建并验证 page.html",
+      taskContract: createTestTaskContract({
+        objective: "Create and verify page.html.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success, result.error).toBe(true);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool",
+      toolName: "verify_file",
+      input: { path: "page.html" },
+    }));
+    expect(progress.some((event) => event.type === "command" && event.command.includes("node --check"))).toBe(false);
+  });
+
+  it("does not hide an ordinary non-zero command failure behind the HTML fallback", async () => {
+    const failingScript = path.join(repoPath, "fail-command.mjs");
+    await fs.writeFile(failingScript, "process.exit(2);\n", "utf8");
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create an HTML page",
+        patch: [
+          "diff --git a/failed-page.html b/failed-page.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/failed-page.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head></head><body>Page</body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: process.execPath,
+        args: [failingScript],
+        description: "Run a command that exits non-zero",
+      },
+      { type: "FAILED", error: "The requested command failed." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建 failed-page.html 并执行指定命令",
+      taskContract: createTestTaskContract({
+        objective: "Create failed-page.html and run the requested command.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(progress.some((event) => event.type === "tool" && event.toolName === "verify_file")).toBe(false);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "command_result",
+      success: false,
+      exitCode: 2,
+    }));
+  });
+
   it("recovers from a placeholder patch using a precise no-changes diagnostic", async () => {
     await fs.writeFile(path.join(repoPath, "game.html"), "<title>Old game</title>\n", "utf8");
     const client = new ScriptedLlmClient([

@@ -31,11 +31,13 @@ describe("GitManager", () => {
     await fs.writeFile(path.join(repoPath, "unstaged.txt"), "after\n", "utf8");
     await fs.writeFile(path.join(repoPath, "untracked.txt"), "one\ntwo\n", "utf8");
     const statusBefore = await execFileAsync("git", ["status", "--short"], { cwd: repoPath });
+    const objectsBefore = await execFileAsync("git", ["count-objects", "-v"], { cwd: repoPath });
 
     const manager = new GitManager({ repoPath });
     const files = await manager.getChangedFiles();
     const summary = await manager.generateDiffSummary();
     const statusAfter = await execFileAsync("git", ["status", "--short"], { cwd: repoPath });
+    const objectsAfter = await execFileAsync("git", ["count-objects", "-v"], { cwd: repoPath });
 
     expect(files).toEqual(["staged.txt", "unstaged.txt", "untracked.txt"]);
     expect(summary).toMatchObject({
@@ -46,5 +48,6 @@ describe("GitManager", () => {
     });
     expect(summary.stat).toContain("3 files changed");
     expect(statusAfter.stdout).toBe(statusBefore.stdout);
+    expect(objectsAfter.stdout).toBe(objectsBefore.stdout);
   });
 });

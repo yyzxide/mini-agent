@@ -29,8 +29,13 @@
       "expected": {
         "success": true,
         "toolsCalled": ["knowledge_search", "knowledge_index"],
-        "summaryContains": ["SHA-512", "docs/policy.md#L"],
-        "summaryNotContains": ["SHA-256"],
+        "toolCallsInOrder": [
+          { "name": "knowledge_search" },
+          { "name": "knowledge_index", "inputContains": { "paths": ["docs/policy.md"] } },
+          { "name": "knowledge_search" }
+        ],
+        "summaryContains": ["SHA-512"],
+        "summaryMatches": ["docs/policy\\.md(?:(?:#L\\d+(?:-L\\d+)?)|(?::\\d+)|(?:\\s*第\\s*\\d+(?:\\s*[-–—至到]\\s*\\d+)?\\s*行))"],
         "maxSteps": 8,
         "maxLlmCalls": 10
       }
@@ -47,6 +52,10 @@
       "expected": {
         "success": true,
         "toolsCalled": ["skill_read"],
+        "toolCallsInOrder": [
+          { "name": "skill_read", "inputContains": { "name": "release-audit" } },
+          { "name": "skill_read", "inputContains": { "name": "release-audit", "resource": "references/checklist.md" } }
+        ],
         "summaryContains": ["测试", "CLI", "Git"],
         "maxSteps": 6,
         "maxLlmCalls": 8
@@ -63,10 +72,11 @@
       "expected": {
         "success": true,
         "toolsCalled": ["verify_file"],
+        "toolCallsInOrder": [
+          { "name": "verify_file", "inputContains": { "path": "snake-v2.html" } }
+        ],
         "verificationPassed": true,
-        "filesContain": {
-          "snake-v2.html": "<html"
-        },
+        "filesExist": ["snake-v2.html"],
         "filesNotContain": {
           "snake.html": "snake-v2"
         },

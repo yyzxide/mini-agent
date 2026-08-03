@@ -147,7 +147,7 @@ describe("ContextBuilder", () => {
     expect(context).not.toContain("旧任务错误地声称");
   });
 
-  it("selects matching repository skills into bounded context", async () => {
+  it("keeps matching skill instructions out of base context until skill_read", async () => {
     const skillPath = path.join(repoPath, "skills", "testing", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });
     await fs.writeFile(skillPath, [
@@ -163,9 +163,10 @@ describe("ContextBuilder", () => {
     const state = new AgentState({ sessionId: session.sessionId, repoPath, userGoal: "run vitest regression" });
 
     const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
-    expect(context).toContain("Selected skills:");
-    expect(context).toContain("Skill: testing");
-    expect(context).toContain("Run targeted Vitest tests");
+    expect(context).toContain("Skill catalog:");
+    expect(context).toContain("testing: Run Vitest regression tests");
+    expect(context).toContain("Use skill_read");
+    expect(context).not.toContain("Run targeted Vitest tests before the full suite");
   });
 
   it("exposes a bounded skill catalog even when lexical preselection does not match", async () => {

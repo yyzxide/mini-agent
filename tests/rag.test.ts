@@ -133,6 +133,29 @@ describe("RAG knowledge base", () => {
     expect(refreshed.context).toContain("SHA-512");
   });
 
+  it("uses conservative bilingual aliases for cross-language local-hash retrieval", async () => {
+    await fs.writeFile(
+      path.join(repoPath, "docs", "policy.md"),
+      "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n",
+      "utf8",
+    );
+    const store = new RagStore({ repoPath, embeddingProvider: new LocalHashEmbeddingProvider() });
+    await store.ingest(["docs/policy.md"]);
+
+    await expect(store.search("上传校验策略 checksum 校验")).resolves.toMatchObject({
+      found: true,
+      citations: ["docs/policy.md#L1-L3"],
+    });
+    await expect(store.search("上传校验策略")).resolves.toMatchObject({
+      found: true,
+      citations: ["docs/policy.md#L1-L3"],
+    });
+    await expect(store.search("天文学设备")).resolves.toMatchObject({
+      found: false,
+      reason: "INSUFFICIENT_EVIDENCE",
+    });
+  });
+
   it("requires lexical evidence when the offline hash embedding collides", async () => {
     const collisionProvider: EmbeddingProvider = { id: "local-hash-v2", embed: async () => [1] };
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks are merged after validation.\n", "utf8");
