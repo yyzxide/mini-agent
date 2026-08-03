@@ -47,6 +47,7 @@ describe("AgentConfig", () => {
         model: "agent-model",
         temperature: 0.1,
         maxTokens: 2048,
+        thinkingMode: "disabled",
         timeoutMs: 30000,
       },
     });
@@ -63,6 +64,7 @@ describe("AgentConfig", () => {
         model: "agent-model",
         temperature: 0.1,
         maxTokens: 2048,
+        thinkingMode: "disabled",
         timeoutMs: 30000,
       },
     });

@@ -34,6 +34,7 @@ export const TaskFrameSchema = z.object({
     knowledgeEvidence: z.boolean().default(false),
     commandExecution: z.boolean().default(false),
     verification: z.enum(["NONE", "SYNTAX", "STATIC", "TEST"]).default("NONE"),
+    verificationBasis: z.enum(["TASK_INFERRED", "USER_REQUIRED"]).default("TASK_INFERRED"),
     delegation: z.boolean().default(false),
     mcp: z.boolean().default(false),
   }),

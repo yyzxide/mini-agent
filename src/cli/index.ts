@@ -79,6 +79,7 @@ import {
   parsePositiveInteger,
   parsePositiveNumber,
   parseProbability,
+  parseThinkingMode,
   readPatchInput,
 } from "./CliParsers.js";
 
@@ -169,6 +170,7 @@ interface ConfigInitOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  thinkingMode?: "auto" | "enabled" | "disabled";
   timeoutMs?: number;
 }
 
@@ -266,6 +268,7 @@ export function createProgram(): Command {
     .option("--model <model>", "OpenAI-compatible model name")
     .option("--temperature <number>", "Model temperature", parseNumber)
     .option("--max-tokens <number>", "Maximum output tokens", parsePositiveInteger)
+    .option("--thinking-mode <mode>", "Provider thinking mode: auto, enabled, or disabled", parseThinkingMode)
     .option("--timeout-ms <number>", "LLM request timeout in milliseconds", parsePositiveInteger)
     .action(async (options: ConfigInitOptions) => {
       await runJsonAction(async () => {
@@ -278,6 +281,7 @@ export function createProgram(): Command {
             ...(options.model ? { model: options.model } : {}),
             ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
             ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+            ...(options.thinkingMode === undefined ? {} : { thinkingMode: options.thinkingMode }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
           },
         });

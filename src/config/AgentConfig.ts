@@ -7,6 +7,7 @@ import { DEFAULT_MULTI_AGENT_POLICY, type MultiAgentPolicy } from "../agent/SubA
 export const USER_CONFIG_FILE = "mini-agent.config.json";
 
 export type LlmMode = "real";
+export type ThinkingMode = "auto" | "enabled" | "disabled";
 
 export interface LlmConfig {
   mode?: LlmMode | undefined;
@@ -16,6 +17,7 @@ export interface LlmConfig {
   model?: string | undefined;
   temperature?: number | undefined;
   maxTokens?: number | undefined;
+  thinkingMode?: ThinkingMode | undefined;
   timeoutMs?: number | undefined;
 }
 
@@ -63,6 +65,7 @@ export interface ResolvedLlmConfig {
     model?: string;
     temperature?: number;
     maxTokens?: number;
+    thinkingMode?: ThinkingMode;
     timeoutMs?: number;
   };
 }
@@ -75,6 +78,7 @@ const llmConfigSchema = z.object({
   model: z.string().trim().min(1).optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().positive().optional(),
+  thinkingMode: z.enum(["auto", "enabled", "disabled"]).optional(),
   timeoutMs: z.number().int().positive().optional(),
 }).passthrough();
 
@@ -187,6 +191,10 @@ export function resolveLlmConfig(config: AgentConfig, overrides: LlmCliOverrides
 
   if (configured.maxTokens !== undefined) {
     openai.maxTokens = configured.maxTokens;
+  }
+
+  if (configured.thinkingMode !== undefined) {
+    openai.thinkingMode = configured.thinkingMode;
   }
 
   if (configured.timeoutMs !== undefined) {

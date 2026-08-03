@@ -6,7 +6,8 @@
     "apiKey": "replace-with-your-api-key",
     "model": "replace-with-your-model",
     "temperature": 0.2,
-    "maxTokens": 4096,
+    "maxTokens": 16384,
+    "thinkingMode": "auto",
     "timeoutMs": 60000
   },
   "rag": {

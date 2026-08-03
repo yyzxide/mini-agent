@@ -260,6 +260,7 @@ function createScriptedScenarioTaskFrame(scenario: AgentHarnessScenario): TaskFr
       ),
       commandExecution: decisions.some((decision) => decision.type === "RUN_COMMAND"),
       verification,
+      verificationBasis: "TASK_INFERRED",
       delegation: decisions.some((decision) =>
         decision.type === "DELEGATE",
       ),

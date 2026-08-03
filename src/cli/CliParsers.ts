@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import process from "node:process";
 import type { LogLevel } from "../utils/logger.js";
 import { resolveRepoPath } from "../utils/fs.js";
+import type { ThinkingMode } from "../config/AgentConfig.js";
 
 export function parseOptionalLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -43,6 +44,14 @@ export function parseLogLevel(value: string): LogLevel {
     return normalized;
   }
   throw new Error(`Expected log level debug, info, warn, or error, got: ${value}`);
+}
+
+export function parseThinkingMode(value: string): ThinkingMode {
+  const normalized = value.toLowerCase();
+  if (normalized === "auto" || normalized === "enabled" || normalized === "disabled") {
+    return normalized;
+  }
+  throw new Error(`Expected thinking mode auto, enabled, or disabled, got: ${value}`);
 }
 
 export function parseNumber(value: string): number {

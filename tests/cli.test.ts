@@ -499,6 +499,10 @@ describe("mini-agent CLI", () => {
         "secret-key",
         "--model",
         "agent-model",
+        "--max-tokens",
+        "16384",
+        "--thinking-mode",
+        "disabled",
       ], { from: "user" });
     });
     const initialized = JSON.parse(initOutput) as {
@@ -507,6 +511,8 @@ describe("mini-agent CLI", () => {
         baseUrl?: string;
         apiKey?: string;
         model?: string;
+        maxTokens?: number;
+        thinkingMode?: string;
       };
     };
 
@@ -515,6 +521,8 @@ describe("mini-agent CLI", () => {
       baseUrl: "https://llm.example/v1",
       apiKey: "<redacted>",
       model: "agent-model",
+      maxTokens: 16384,
+      thinkingMode: "disabled",
     });
 
     const showOutput = await captureStdout(async () => {

@@ -39,6 +39,7 @@ export function createTestTaskFrame(options: TestTaskFrameOptions): TaskFrame {
       knowledgeEvidence: options.effects?.knowledgeEvidence ?? false,
       commandExecution: options.effects?.commandExecution ?? false,
       verification: options.effects?.verification ?? "NONE",
+      verificationBasis: options.effects?.verificationBasis ?? "TASK_INFERRED",
       delegation: options.effects?.delegation ?? false,
       mcp: options.effects?.mcp ?? false,
     },
