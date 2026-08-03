@@ -145,6 +145,7 @@ Writer 在 disposable worktree 中修改和验证；Reviewer 读取包含 Writer
 - 搜索效果受提供商召回影响；
 - 子 Agent 不是强安全沙箱；
 - MCP 覆盖 tools 与静态 resources/prompts 子集，不是完整协议；
+- MCP list 支持 cursor 分页和 capability 局部降级；
 - 本地文件存储适合单用户，不适合多租户服务；
 - 没有 IDE 集成和商业产品级交互体验。
 

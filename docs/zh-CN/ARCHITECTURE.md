@@ -94,7 +94,9 @@ MCP TOOL_CALL             -> 只授权所选 <server>__<tool/read_resource/get_p
 
 授权后仍是同一个 State、Session 和 AgentLoop。不存在 `WEB_RESEARCH -> REPOSITORY_TASK` 之类的模式迁移。
 
-RAG 与 Skill 也遵循同一原则。`knowledge_search` 返回空索引后，模型可以调用会改变派生知识状态的 `knowledge_index`，然后再次执行同参数搜索；重复调用守卫会把成功的非只读工具视为状态失效点。Skill 不再只靠本地关键词预选：Context 始终提供有界名称/描述目录，模型根据当前目标语义选择后，通过 `skill_read` 分页读取完整 `SKILL.md` 或已校验的随附文本资源。目录、MCP resource 和 MCP prompt 都是不可信数据，不能覆盖系统指令或权限。
+RAG 与 Skill 也遵循同一原则。`knowledge_search` 返回候选前核对所选源文件的实时哈希；空索引或 `STALE_INDEX` 后，模型可以调用会改变派生知识状态的 `knowledge_index`，然后再次执行同参数搜索；重复调用守卫会把成功的非只读工具视为状态失效点。Skill 不再只靠本地关键词预选：Context 始终提供有界名称/描述目录，模型根据当前目标语义选择后，通过 `skill_read` 分页读取完整 `SKILL.md` 或已校验的随附文本资源。目录、MCP resource 和 MCP prompt 都是不可信数据，不能覆盖系统指令或权限。
+
+MCP Client 对 tools/resources/prompts 的 list 使用统一有界分页：跟随 `nextCursor`，拒绝重复 cursor 和超出最大页数。Registry Loader 按 capability 分别加载并记录错误，因此 `prompts/list` 失败不会撤销同一 Server 已成功注册的 tools/resources；只有 initialize、协议版本或最终名称冲突等 Server 级错误才整体失败。
 
 ## 4. AI 负责什么，本地代码负责什么
 

@@ -214,11 +214,12 @@ mini-agent git ...                 Debug Git integration
 Repeated real-model sampling should be saved and compared instead of judged from one successful run:
 
 ```bash
+mini-agent bench accept --repetitions 3
 mini-agent bench run benchmarks/agent-bench-v1.json --mode real --repetitions 5 --output .mini-agent/bench/current.json
 mini-agent bench compare .mini-agent/bench/current.json .mini-agent/bench/baseline.json
 ```
 
-Reports separate first-run success, at-least-one success, all-runs success, flaky scenarios, run-level pass rate with a 95% Wilson interval, cost, latency, tool choice, and failure categories. Live evaluation remains opt-in because it consumes model credentials and is not deterministic.
+`bench accept` runs the versioned real-model profile for stale-RAG recovery, progressive Skill loading, and artifact provenance. It writes `.mini-agent/bench/real-model-acceptance-latest.json` plus a human-readable Markdown report. Reports separate first-run success, at-least-one success, all-runs success, flaky scenarios, run-level pass rate with a 95% Wilson interval, cost, latency, tool choice, and failure categories. Live evaluation remains opt-in because it consumes model credentials and is not deterministic.
 
 Useful runtime options:
 

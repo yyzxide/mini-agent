@@ -72,9 +72,9 @@ mini-agent tool run knowledge_index '{"paths":["README.md","docs/zh-CN"],"tags":
 mini-agent tool run knowledge_search '{"query":"RAG 的评测指标是什么","topK":3}'
 ```
 
-返回结果包含 `context`、`citations` 和逐条 `score`。引用格式为 `path#Lx-Ly`。如果查询为空、索引为空、embedding provider 不匹配或相关度不足，结果会返回 `found: false` 和明确 `reason`，而不是生成看似合理的答案。
+返回结果包含 `context`、`citations` 和逐条 `score`。引用格式为 `path#Lx-Ly`。检索会在返回候选证据前重新加载被选中的源文件并比较 `sourceHash`；文件变化、删除、变成空文件或不再可加载时返回 `found: false`、`reason: STALE_INDEX` 和 `staleSources`，不会引用旧内容。如果查询为空、索引为空、embedding provider 不匹配或相关度不足，也会返回明确 `reason`，而不是生成看似合理的答案。
 
-在普通 Agent 对话中，模型应先调用 `knowledge_search`。当结果是 `EMPTY_INDEX` 或索引需要刷新时，它可以在同一个 `AGENT_TASK` 中申请 `knowledge_index`，索引相关路径后再次执行原查询。重复调用守卫会把成功的非只读工具视为可观察状态变化，因此不会把“建索引后的再次搜索”误判为无意义重复。最终知识回答仍必须来自成功搜索返回的真实 citation；仅仅成功建索引不满足回答证据门禁。
+在普通 Agent 对话中，模型应先调用 `knowledge_search`。当结果是 `EMPTY_INDEX`、`STALE_INDEX` 或 provider 不匹配时，它可以在同一个 `AGENT_TASK` 中申请 `knowledge_index`，索引相关路径后再次执行原查询。重复调用守卫会把成功的非只读工具视为可观察状态变化，因此不会把“建索引后的再次搜索”误判为无意义重复。最终知识回答仍必须来自刷新后成功搜索返回的真实 citation；仅仅成功建索引不满足回答证据门禁。
 
 ## 4. Embedding 配置
 

@@ -98,7 +98,7 @@ node dist/cli/index.js doctor
 
 自动化测试不依赖真实 API。真实模型和实时 Web 的质量需要单独的 opt-in 抽样评测，不能用一次成功对话代替稳定性结论。
 
-真实模型重复评测可使用 `mini-agent bench run <dataset> --mode real --repetitions 5 --output <report>` 保存结果，再通过 `mini-agent bench compare <current> <baseline>` 离线比较；报告会显式显示 flaky 场景和 95% Wilson 区间。
+真实模型收口验收可直接运行 `mini-agent bench accept --repetitions 3`：它使用版本化数据集检查陈旧 RAG 恢复、Skill 渐进读取和旧文件产物溯源，并在 `.mini-agent/bench` 生成 JSON 与 Markdown 报告。自定义重复评测仍可使用 `mini-agent bench run <dataset> --mode real --repetitions 5 --output <report>`，再通过 `mini-agent bench compare <current> <baseline>` 离线比较；报告会显式显示 flaky 场景和 95% Wilson 区间。
 
 ## 文档事实维护规则
 

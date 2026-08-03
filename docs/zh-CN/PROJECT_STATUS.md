@@ -181,10 +181,10 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 
 ### 模型与评测
 
-- 真实模型评测已支持重复采样、首轮成功率、至少一次成功率、全轮通过率、flaky 场景数、run pass rate 的 95% Wilson 区间、成本/延迟与失败分类，并可保存报告后离线比较；AgentLoop 终止结果携带结构化 `failureCode`，Harness 不再通过英文错误文本猜模型、权限、循环或步数失败。当前仍未积累足够大的公开真实模型样本。
+- 真实模型评测已支持重复采样、首轮成功率、至少一次成功率、全轮通过率、flaky 场景数、run pass rate 的 95% Wilson 区间、成本/延迟与失败分类，并可保存报告后离线比较；版本化 `real-model-acceptance-v1` 固定检查陈旧 RAG 恢复、Skill 渐进读取和旧文件产物溯源，`bench accept` 同时输出 JSON 与 Markdown。当前仍未积累足够大的公开真实模型样本。
 - 自动化测试主要证明运行时确定性，不代表所有模型都能稳定规划。
 - TaskFrame 和动作选择仍依赖模型质量；语义编译器不可用时 AgentLoop 会明确失败，因此不会误执行，但也不能在模型服务中断时完成任务。
-- 已具备报告持久化与 `bench compare` 结构化差值入口；仓库尚未提交按模型和长期日期维护的真实调用结果，因为这些结果依赖个人凭据、成本和外部服务波动。
+- 已具备报告持久化、可读验收报告与 `bench compare` 结构化差值入口；真实调用结果默认写入 `.mini-agent/bench` 而不提交仓库，因为它们依赖个人凭据、成本和外部服务波动。
 
 ### 语义与控制边界
 
@@ -205,7 +205,7 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 - 没有专业体育、金融、新闻等垂直实时 API。
 - 严格 Web 终局已经要求结构化 `webClaims`，本地验证每条映射引用本轮成功抓取的精确 URL，并要求结论和来源在最终摘要中可见；这完成了可审计的 claim-source 关联，但尚未实现基于 NLI/LLM Judge 的逐条语义蕴含核验。
 - `fetch_url` 会拒绝 HTTP 200 的 WAF/CAPTCHA、登录壳、空正文和高置信软 404；无正文 SPA、订阅墙和站点特有错误模板仍可能需要更多适配。
-- MCP 初始化结果会保留协议版本、服务端信息与 capability keys；状态诊断分别显示 tools、resources、prompts 的发现数量、注册适配器数量、已桥接与仍未桥接能力。它不会把“服务端已声明”伪装成“客户端已实现”。
+- MCP 初始化结果会保留协议版本、服务端信息与 capability keys；tools、resources、prompts 的 list 调用会持续跟随 `nextCursor`，并拒绝重复 cursor 或超过有界页数。状态诊断分别显示发现数量、注册适配器、已桥接/未桥接能力和逐 capability 错误；某一 list 失败只进入 degraded 状态，不会移除同一 Server 已成功加载的其他能力。
 - MCP 已覆盖静态 resources/list/read 与 prompts/list/get，但未覆盖 resource templates、订阅、completion、认证和服务端主动请求场景。
 - MCP Runtime 对应 `2025-11-25` 的 initialize/session 形态，尚未兼容正式 `2026-07-28` 无状态 core、`server/discover`、每请求 `_meta`、InputRequiredResult 和扩展机制。
 

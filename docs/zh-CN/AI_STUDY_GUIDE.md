@@ -327,7 +327,7 @@ RAG 不是“接一个向量数据库”。完整链路是：
 - answerability accuracy、hit rate、Recall@K、MRR 离线评测。
 - 中英文关键词和本地离线 embedding。
 - 可选 OpenAI-compatible embedding provider。
-- Agent 原生空索引恢复：先 search，收到 `EMPTY_INDEX` 后对相关仓库路径执行受权的 `knowledge_index`，再 search，并用真实 citation 完成回答。
+- Agent 原生空索引与陈旧索引恢复：search 返回候选前重新核对选中源文件的实时 `sourceHash`；收到 `EMPTY_INDEX` 或 `STALE_INDEX/staleSources` 后，对相关仓库路径执行受权的 `knowledge_index`，再 search，并用刷新后的真实 citation 完成回答。
 - query building、候选召回、rerank、evidence selection。
 - TTL、confidence 和同主题记忆替代。
 - Web 回答在没有可读正文时拒绝给出确定性实时结论。
@@ -389,6 +389,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - `AgentHarness`：创建临时 git 仓库、运行 AgentLoop、检查 diff 和文件。
 - `runSuite`：汇总成功率、平均步骤、工具选择准确率和失败分类。
 - `AgentBench`：重复真实模型采样，报告全轮通过率、flaky 场景、Wilson 区间、成本与延迟，并通过 `bench compare` 比较历史报告。
+- `real-model-acceptance-v1` 与 `bench accept`：固定三类真实模型验收目标，默认重复三轮，同时生成机器可读 JSON 和面试/复盘可读 Markdown；报告文件不作为跨模型永久基线自动提交。
 - Vitest：固定语义/契约、Web、Review、Patch、Command、Context、子 Agent、Memory、RAG、Skill 和 MCP 回归。
 - `CapabilityNegotiator.test.ts`：验证动作驱动升级、可申请工具发现和固定只读边界。
 - `AgentLoop.test.ts` / `cli-regression.test.ts`：覆盖 Web 到写入的同循环升级、短追问和真实文件结果。
@@ -451,7 +452,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 
 ### 当前实现边界
 
-项目当前以 `2025-11-25` 协议形态支持 stdio 和 Streamable HTTP 下的 initialize、tools/list/call、静态 resources/list/read 与 prompts/list/get。远端工具按 `<server>__<tool>` 注册；同一 Server 已发现的 resource URI 和 prompt name 分别通过 `<server>__read_resource`、`<server>__get_prompt` 只读适配器进入统一 ToolRegistry。Client 会保留协商出的协议版本、服务端信息和 capability keys，Registry 诊断分别显示发现数量、注册 adapter、已桥接和未桥接能力；不支持的协议版本会在注册前失败。TaskFrame 只接收有界 MCP 元数据目录，并把工具描述、资源内容和 prompt message 都视为不可信外部数据，而不是系统指令。
+项目当前以 `2025-11-25` 协议形态支持 stdio 和 Streamable HTTP 下的 initialize、tools/list/call、静态 resources/list/read 与 prompts/list/get。三类 list 会持续跟随 `nextCursor`，同时用重复 cursor 检测和最大页数阻止异常 Server 制造无限循环。远端工具按 `<server>__<tool>` 注册；同一 Server 已发现的 resource URI 和 prompt name 分别通过 `<server>__read_resource`、`<server>__get_prompt` 只读适配器进入统一 ToolRegistry。Client 会保留协商出的协议版本、服务端信息和 capability keys；Registry 按 capability 独立加载，单项失败记录 degraded 诊断但保留其他成功 adapter。不支持的协议版本仍会在注册前整体失败。TaskFrame 只接收有界 MCP 元数据目录，并把工具描述、资源内容和 prompt message 都视为不可信外部数据，而不是系统指令。
 
 授权精确到模型实际选择的单个 MCP Tool。获得 `server__tool_a` 不会同时获得 `server__tool_b`，也不会隐式获得仓库写入或命令权限；每个新增 Tool 都必须重新申请。安全只读 MCP 可以在 Plan/固定只读合同中发现和授权，修改型 MCP 会被隐藏或拒绝；在普通自适应任务中，修改型 MCP 即使获得精确能力授权，每次实际调用仍需交互式显式批准，不能被全局自动批准静默放行。
 

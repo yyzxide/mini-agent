@@ -58,7 +58,7 @@
 
 不要用一次成功对话替代指标。
 
-评测框架已经能够通过 `--output` 保存报告，并用 `mini-agent bench compare <current> <baseline>` 比较总体指标与逐场景 pass rate。Roadmap 剩余工作是积累真实模型样本和解释趋势，不是继续发明另一套统计入口。
+评测框架已经能够通过 `--output` 保存报告，并用 `mini-agent bench compare <current> <baseline>` 比较总体指标与逐场景 pass rate。`mini-agent bench accept` 进一步固定真实模型验收数据集，默认重复三轮并生成 JSON/Markdown 报告。Roadmap 剩余工作只是按真实使用积累样本和解释趋势，不再增加另一套评测入口。
 
 ### 文档事实检查
 
@@ -111,7 +111,7 @@ Search Provider 配置链已完成：运行时可以按配置组合 Brave Search
 
 ### MCP 协议演进
 
-当前实现保留 `2025-11-25` 的 tools、静态 resources/list/read 和 prompts/list/get 子集。resource templates、订阅、completion、OAuth 与服务端主动请求仍未实现。只有出现真实互操作需求时，才评估迁移到 `2026-07-28` 的无状态 core、`server/discover`、每请求 `_meta`、InputRequiredResult 和 Extensions；迁移必须通过版本协商与双版本 fixture 证明，不能只改协议版本字符串。
+当前实现保留 `2025-11-25` 的 tools、静态 resources/list/read 和 prompts/list/get 子集；三类 list 均支持有界 cursor 分页，单项加载失败会局部降级并保留其他已桥接能力。resource templates、订阅、completion、OAuth 与服务端主动请求仍未实现。只有出现真实互操作需求时，才评估迁移到 `2026-07-28` 的无状态 core、`server/discover`、每请求 `_meta`、InputRequiredResult 和 Extensions；迁移必须通过版本协商与双版本 fixture 证明，不能只改协议版本字符串。
 
 ### 终端体验
 

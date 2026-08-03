@@ -41,9 +41,9 @@
 - `apply_patch` 等修改型工具带 `destructiveHint`。
 - MCP server config schema 校验 command/url、args、enabled。
 - initialize 结果保存协议版本、服务端信息和 capability keys；不支持的协议版本在注册工具前精确失败。
-- stdio fixture 能完成 initialize、tools/list 和 tools/call；HTTP client 还覆盖 resources/list/read 与 prompts/list/get 的解析和调用。
+- stdio fixture 能完成 initialize、tools/list 和 tools/call；HTTP client 还覆盖 tools/resources/prompts 三类 list 的 `nextCursor` 分页、重复 cursor 循环拒绝，以及 resources/read 与 prompts/get 的解析和调用。
 - Streamable HTTP fixture 能处理 JSON response、session header 和 close。
-- Loader 只查询 Server 明确声明的 capability；状态诊断分别记录 tool/resource/prompt 数量、注册 adapter 数量、已桥接与未桥接 capability。
+- Loader 只查询 Server 明确声明的 capability；状态诊断分别记录 tool/resource/prompt 数量、注册 adapter 数量、已桥接与未桥接 capability。任一 list 失败时记录 `degraded/capabilityErrors`，同时保留其他成功 capability 的 adapter。
 - 远端工具名称隔离、permission mapping、错误包装和 Registry dispose。
 - 已发现的 resource URI 与 prompt name 分别通过 `<server>__read_resource`、`<server>__get_prompt` 进入 Registry；未发现目标必须拒绝，返回内容标记为 untrusted。
 - 任何 MCP 远端工具、resource reader 或 prompt reader 在缺少权限管理器时默认拒绝，不允许程序化调用绕过检查。
@@ -253,8 +253,9 @@
 - 重复采样同时统计 pass@1、pass@k、run pass rate、all-runs pass rate、flaky 场景数和 95% Wilson 区间，不能用“至少一次成功”掩盖波动。
 - baseline 门禁可以约束全轮通过率、flaky 数量和工具选择回退；`bench compare` 对两份同数据集、同模式报告输出总体与逐场景差值。
 - stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call；HTTP fixture 还端到端执行 resources/list/read 与 prompts/list/get adapter。
-- RAG 场景覆盖 `EMPTY_INDEX -> knowledge_index -> knowledge_search -> citation`，并验证索引写入会使同参数只读搜索缓存失效。
+- RAG 场景覆盖 `EMPTY_INDEX/STALE_INDEX -> knowledge_index -> knowledge_search -> citation`，验证被选中源文件的实时 hash 检查，以及索引写入会使同参数只读搜索缓存失效。
 - Skill 场景覆盖无关键词命中时仍暴露有界目录、`skill_read` 分页读取完整指令/资源，以及二进制、超大文件和路径逃逸拒绝。
+- `real-model-acceptance-v1` 以 opt-in 真实模型模式重复检查陈旧 RAG 恢复、Skill 渐进读取和旧文件产物溯源；`bench accept` 必须同时生成 JSON 指标报告和 Markdown 人类可读报告。
 - 普通 Web 问题没有可读正文时进入证据不足回答；普通等级映射为单来源，当前等级要求多搜索视角与精确权威来源，明确多源和高风险等级才要求双来源/双域名。最终综合阶段即使模型继续提交不合规成功答案，也必须一次降级结束。
 - Web 答案必须引用本轮真正抓取的 URL；不满足时 Guardrail 把具体缺口反馈给同一 AgentLoop，最终仍不合规则失败或进入证据不足终局。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
