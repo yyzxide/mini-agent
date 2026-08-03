@@ -25,7 +25,9 @@ User request + Conversation
 
 不存在 Direct、Web、Review、Edit 等互斥运行模式，也不存在根据用户问句先选择执行器的 `TaskRouter`。普通回答是在 AgentLoop 第一次决策返回 `FINAL`；文件分析会选择 `read_file`；Web 研究会选择 `web_search` / `fetch_url`；写代码会选择 `APPLY_PATCH`。这些动作可以在同一次运行中连续出现。
 
-Capability Registry 明确区分两类协议：`tools` 只包含可用于 `TOOL_CALL` 的注册工具，`actions` 只包含顶层 `AgentDecision`（如 `APPLY_PATCH`、`RUN_COMMAND`、`DELEGATE`）。Patch 和命令执行动作不会再以 `apply_patch` / `run_command` 工具名出现在模型可见工具清单中，避免模型把动作误发成不存在的 Tool Call。
+Capability Registry 是产品能力的唯一事实源，并明确区分三类机制：`tools` 是可用于 `TOOL_CALL` 的真实注册工具，`actions` 是顶层 `AgentDecision`（如 `APPLY_PATCH`、`RUN_COMMAND`、`DELEGATE`），`surfaces` 是 CLI、Slash Command 或声明文件入口。Registry 当前同时登记核心执行能力以及 MCP、Session、Long-term Memory、Skills、AgentBench，不再由不同模块各写一份能力说明。
+
+产品能力问题也走 AI 语义链：TaskFrame 的 `productCapability.act/capabilityIds` 表达用户是在询问能力清单、可用性还是边界，`CapabilityTruthGuard` 再从 Registry 生成最终事实回答。Guard 不扫描原始问句或最终文本，也没有“联网/写文件/子代理”三套专项正则；新增表达方式不需要修改本地问句规则。
 
 因此：
 
@@ -44,6 +46,7 @@ TaskFrame 由模型结合当前请求与最近 Conversation 生成，并由 Zod 
 |---|---|
 | `objective` | 当前任务目标 |
 | `target` | `REPOSITORY`、`WORLD`、`PRODUCT`、`SESSION`、`DERIVATION` 或 `MIXED` |
+| `productCapability` | 产品能力元问题的结构化意图，以及从 Registry 选择的能力 ID；普通任务为 `NONE` |
 | `answer` | 答案形态与深度 |
 | `effects` | 回答、仓库读写、Web、知识库、命令、验证、委派、MCP |
 | `webEvidencePolicy` | 模型选择的 `ORDINARY / CORROBORATED / CURRENT / HIGH_STAKES` 证据等级、语义依据，以及 `REPRESENTATIVE / SUPERLATIVE` 查询范围 |
@@ -82,14 +85,16 @@ TaskFrame 解析与失败策略：
 ```text
 TOOL_CALL read_file       -> repositoryRead
 TOOL_CALL web_search      -> webAccess + Web evidence
-TOOL_CALL knowledge_search -> knowledgeAccess
+TOOL_CALL knowledge_search/index -> knowledgeAccess
 APPLY_PATCH               -> repositoryWrite
 RUN_COMMAND               -> commandExecution
 DELEGATE                  -> delegation
-MCP TOOL_CALL             -> 只授权所选 <server>__<tool>
+MCP TOOL_CALL             -> 只授权所选 <server>__<tool/read_resource/get_prompt>
 ```
 
 授权后仍是同一个 State、Session 和 AgentLoop。不存在 `WEB_RESEARCH -> REPOSITORY_TASK` 之类的模式迁移。
+
+RAG 与 Skill 也遵循同一原则。`knowledge_search` 返回空索引后，模型可以调用会改变派生知识状态的 `knowledge_index`，然后再次执行同参数搜索；重复调用守卫会把成功的非只读工具视为状态失效点。Skill 不再只靠本地关键词预选：Context 始终提供有界名称/描述目录，模型根据当前目标语义选择后，通过 `skill_read` 分页读取完整 `SKILL.md` 或已校验的随附文本资源。目录、MCP resource 和 MCP prompt 都是不可信数据，不能覆盖系统指令或权限。
 
 ## 4. AI 负责什么，本地代码负责什么
 
@@ -184,7 +189,11 @@ TaskFrame(target=MIXED, webEvidence=true, repositoryWrite=REQUIRED)
 
 `WebResearchProgress` 把当前证据阶段返回 Context，Agent 可以看到下一步应搜索、抓取、比较还是综合。接近步数上限时预留最终综合步骤；若模型仍提交不满足门槛的成功结论，运行时确定性返回“部分结论、具体证据缺口、已检查来源”，不再继续循环。普通任务有可引用资料时可以透明降级；严格任务保持 `success=false`，但仍向用户交付限制性总结。
 
-`fetch_url` 根据 HTTP `charset` 或 HTML `<meta charset>` 选择解码器，兼容 GB2312 / GBK / GB18030 等旧中文网页，同时继续保持大小、超时、重定向与 SSRF 边界。
+`CURRENT`、`CORROBORATED` 和 `HIGH_STAKES` 的成功终局还必须提交结构化 `webClaims`：每条重要事实结论关联一个或多个本轮成功抓取的精确 URL，并且结论与 URL 都要出现在用户可见摘要中。本地门禁验证结构、抓取血缘和可见性，不使用问句关键词推断，也不把字符串关联夸大为语义蕴含证明。
+
+`webSearch.providerOrder` 决定 Provider 链。默认链是免凭据的 DuckDuckGo HTML/Lite；配置 Brave Search API 后可以把 `brave` 放在首位，并在失败时继续尝试后续 Provider。配置加载、默认 Registry、CLI 初始化和 `doctor` 共用同一份解析结果，避免“配置写了但运行时没接上”。
+
+`fetch_url` 根据 HTTP `charset` 或 HTML `<meta charset>` 选择解码器，兼容 GB2312 / GBK / GB18030 等旧中文网页，同时继续保持大小、超时、重定向与 SSRF 边界。HTTP 200 并不自动算成功证据：WAF/CAPTCHA、登录壳、空正文以及带强错误标题或短错误正文的软 404 会返回结构化 `FETCH_URL_CONTENT_UNUSABLE`。
 
 ## 8. 仓库工具与 `read_file`
 

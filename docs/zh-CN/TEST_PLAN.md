@@ -32,7 +32,7 @@
 - tool manifest 输出 source、category 和能力标注。
 - MCP 风格 tool descriptor 输出 inputSchema、annotations 和 permission metadata。
 
-### 1.1.1 MCP Tools Runtime
+### 1.1.1 MCP Runtime
 
 覆盖：
 
@@ -40,10 +40,13 @@
 - `fetch_url`、`web_search` 等外部世界工具带 `openWorldHint`。
 - `apply_patch` 等修改型工具带 `destructiveHint`。
 - MCP server config schema 校验 command/url、args、enabled。
-- stdio fixture 能完成 initialize、tools/list 和 tools/call。
+- initialize 结果保存协议版本、服务端信息和 capability keys；不支持的协议版本在注册工具前精确失败。
+- stdio fixture 能完成 initialize、tools/list 和 tools/call；HTTP client 还覆盖 resources/list/read 与 prompts/list/get 的解析和调用。
 - Streamable HTTP fixture 能处理 JSON response、session header 和 close。
+- Loader 只查询 Server 明确声明的 capability；状态诊断分别记录 tool/resource/prompt 数量、注册 adapter 数量、已桥接与未桥接 capability。
 - 远端工具名称隔离、permission mapping、错误包装和 Registry dispose。
-- 任何 MCP 远端工具在缺少权限管理器时默认拒绝，不允许程序化调用绕过检查。
+- 已发现的 resource URI 与 prompt name 分别通过 `<server>__read_resource`、`<server>__get_prompt` 进入 Registry；未发现目标必须拒绝，返回内容标记为 untrusted。
+- 任何 MCP 远端工具、resource reader 或 prompt reader 在缺少权限管理器时默认拒绝，不允许程序化调用绕过检查。
 - `mini-agent mcp tools/status/call` 能输出结构化结果。
 
 ### 1.2 CommandRunner
@@ -115,7 +118,7 @@
 
 覆盖：
 
-- Markdown/TXT 安全加载、按行分块、来源哈希和增量重建。
+- 文档、源码和配置文本按扩展名白名单安全加载；二进制拒绝、按行分块、来源哈希和增量重建。
 - `.mini-agent/rag/index.jsonl` 与 `.mini-agent/memory/index.jsonl` 相互独立。
 - 并发 `ingest/remove/clear` 通过写锁内重新读取与原子替换避免丢失更新。
 - 关键词与向量混合检索、来源/标签过滤、Top-K、多来源和上下文预算。
@@ -153,7 +156,8 @@
 
 - CLI 和 AgentHarness 请求受 Schema 约束的 `TaskFrame`；程序化 `AgentLoop` 可传入已验证 Task Contract，也可走相同编译链。没有公开控制面开关。
 - 旧配置中的 `controlPlane` 字段只会被丢弃，不能启用另一条路由或运行时。
-- `TaskFrame` 包含 objective、target、answer、effects、`webEvidencePolicy`、constraints、collaboration、conversation evidence、completion criteria、confidence 和 rationale。
+- `TaskFrame` 包含 objective、target、`productCapability`、answer、effects、`webEvidencePolicy`、constraints、collaboration、conversation evidence、completion criteria、confidence 和 rationale。
+- 产品能力元问题由模型选择 `productCapability.act/capabilityIds`；Guard 只消费结构化 ID 并从 Registry 生成答案，不得重新扫描原始问句或模型回答文本。Registry 中每个 ID 都必须出现在权威 Prompt 清单，MCP、Session、Memory、Skills 和 AgentBench 与核心工具能力使用同一数据源。
 - TaskFrame 的模型资源偏好越界时在本地做边界归一化；结构错误先执行一次有界模型自修。仍失败时 AgentLoop 必须在任何 AgentDecision 或 Tool 前返回 `TASK_FRAME_UNRESOLVED`，不能回退到自然语言正则路由或猜测合同。
 - bootstrap 和编译后的合同都保持 `AGENT_TASK`；Web、知识库、仓库读写、命令和委派是可组合效果。
 - `CapabilityNegotiator` 可以在一次 `AGENT_TASK` 中依次授权 Web、读取、Patch、Command 和精确 MCP Tool。
@@ -206,9 +210,12 @@
 - `fetch_url` 只接受用户给出的 URL 或成功搜索返回的精确 URL；搜索失败后猜测来源地址必须在执行前拦截。
 - `fetch_url` 对非 2xx、WAF JSON、CAPTCHA、安全验证和登录壳返回结构化失败，不能让 HTTP 200 的反爬页面满足证据门槛；HTTP / HTML 声明的 GB2312、GBK、GB18030 页面必须正确解码。
 - Web 最终引用必须至少包含一个真正抓取过的页面；只在搜索结果出现的候选 URL 不算已检查来源。
+- `CURRENT`、`CORROBORATED` 和 `HIGH_STAKES` 成功终局必须提供结构化 `webClaims`；每条来源必须真正抓取过，映射的结论和 URL 必须在用户可见摘要中出现。
+- HTTP 200 的 WAF/CAPTCHA、登录壳、空正文和高置信软 404 不得计为成功抓取证据。
 - 搜索或抓取证据不足时必须确定性进入限制性终局，不允许编造实时事实，也不能因模型反复提交 `success=true` 而耗尽最大步数。
 - 证据不足终局必须由结构化 `FINAL.evidenceStatus=INSUFFICIENT` 表达；仅在自然语言里出现“无法核验”不能绕过完成门禁。
 - 重复的相同 Web 工具调用、provider/transport 失败后的等价换词重试由运行时拦截。
+- Provider 顺序从配置端到端进入 `web_search`；Brave 请求的认证头、查询参数、响应映射、缺少凭据和 DuckDuckGo 降级均有确定性 fixture。
 
 ### 1.8 AgentLoop
 
@@ -239,9 +246,15 @@
 
 - scripted LLM 能按预设 `AgentDecision` 驱动 AgentLoop。
 - Harness 能创建临时 git 仓库、写入初始文件、执行 patch、读取 diff。
+- Harness 能显式创建未跟踪初始文件，证明工作区存在性与 Git index 相互独立。
 - Harness 能校验成功状态、diff 内容和文件内容。
 - Harness 能统计步骤、LLM 调用、工具选择、工具选择准确率和失败类别。
-- stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call。
+- Harness 把成功的 `verify_file` 和成功的验证命令统一计入 verification 指标。
+- 重复采样同时统计 pass@1、pass@k、run pass rate、all-runs pass rate、flaky 场景数和 95% Wilson 区间，不能用“至少一次成功”掩盖波动。
+- baseline 门禁可以约束全轮通过率、flaky 数量和工具选择回退；`bench compare` 对两份同数据集、同模式报告输出总体与逐场景差值。
+- stdio 与 Streamable HTTP MCP fixture 能完成 initialize、tools/list 和 tools/call；HTTP fixture 还端到端执行 resources/list/read 与 prompts/list/get adapter。
+- RAG 场景覆盖 `EMPTY_INDEX -> knowledge_index -> knowledge_search -> citation`，并验证索引写入会使同参数只读搜索缓存失效。
+- Skill 场景覆盖无关键词命中时仍暴露有界目录、`skill_read` 分页读取完整指令/资源，以及二进制、超大文件和路径逃逸拒绝。
 - 普通 Web 问题没有可读正文时进入证据不足回答；普通等级映射为单来源，当前等级要求多搜索视角与精确权威来源，明确多源和高风险等级才要求双来源/双域名。最终综合阶段即使模型继续提交不合规成功答案，也必须一次降级结束。
 - Web 答案必须引用本轮真正抓取的 URL；不满足时 Guardrail 把具体缺口反馈给同一 AgentLoop，最终仍不合规则失败或进入证据不足终局。
 - 长期记忆会排除过期和已被替代的条目，并支持可替换 embedding provider。
@@ -251,10 +264,10 @@
 
 覆盖：
 
-- `doctor` 检查 Node、Git、ripgrep、包管理器、Git 仓库、配置、Session、日志和变更记录。
+- `doctor` 检查 Node、Git、ripgrep、包管理器、Git 仓库、配置、Web Provider/Brave 凭据、Session、日志和变更记录。
 - 配置与 MCP 加载失败保留具体错误并脱敏。
 - AgentLoop 的命令、工具、协议与 Guardrail 错误保持结构化代码和原始上下文。
-- 项目不再维护基于自然语言错误文本的 `ErrorClassifier`；评测失败类别只依据实际运行记录和明确错误代码。
+- AgentLoop 终止结果和 `TASK_FAILED` 事件携带结构化 `failureCode`；评测失败类别只依据该代码和期望断言，不扫描自然语言错误文本。
 
 ### 1.10 对话级回归集
 

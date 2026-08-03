@@ -129,9 +129,9 @@ Long-term Memory 保存受策略约束的用户偏好、项目约定、架构决
 
 ## Q21：MCP 做到了什么？
 
-当前实现 stdio 和 Streamable HTTP 的 MCP tools runtime，包括初始化、`tools/list`、`tools/call`、名称隔离、权限映射、统一 Tool Registry 和生命周期关闭。
+当前实现 stdio 和 Streamable HTTP 的 MCP runtime，包括初始化、`tools/list`、`tools/call`，以及静态 `resources/list/read`、`prompts/list/get` 的只读适配；还包括名称隔离、发现目标 allowlist、权限映射、untrusted 数据标记、统一 Tool Registry 和生命周期关闭。
 
-没有声称完整覆盖 resources、prompts、OAuth、服务端主动请求和所有兼容场景。
+没有声称完整覆盖 resource templates、订阅、completion、OAuth、服务端主动请求和所有兼容场景，也没有声称兼容 `2026-07-28` 无状态规范。
 
 ## Q22：如何测试 Agent，而不是只测试函数？
 

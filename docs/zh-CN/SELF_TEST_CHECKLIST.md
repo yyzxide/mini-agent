@@ -256,9 +256,10 @@ mini-agent memory stats
 mini-agent rag stats
 mini-agent rag ingest README.md docs/zh-CN --tag project
 mini-agent rag search "Task Contract 如何限制权限" --top-k 3
+mini-agent tool run knowledge_index '{"paths":["README.md","docs/zh-CN"]}'
 ```
 
-确认自动 Memory 写入只接受允许的语义类型和有证据结果；RAG 引用包含来源与行号，证据不足时拒答。
+确认自动 Memory 写入只接受允许的语义类型和有证据结果；RAG 引用包含来源与行号，证据不足时拒答；用新仓库验证 Agent 能从 `EMPTY_INDEX` 自主执行 `knowledge_index` 后再次搜索。
 
 Skill/MCP：
 
@@ -268,7 +269,7 @@ mini-agent mcp status
 mini-agent mcp tools
 ```
 
-确认 Skill 和 MCP 不能绕过当前 Task Contract；远端工具名称隔离，权限映射正确，Server 生命周期关闭。
+创建一个带 `references/*.md` 的临时 Skill，确认无关键词命中时 Context 仍含有界 catalog，模型可用 `skill_read` 分页读取完整说明与文本资源，且二进制/路径逃逸被拒绝。确认 Skill 和 MCP 不能绕过当前 Task Contract；远端工具/resource/prompt adapter 名称隔离、目标 allowlist、权限映射和 untrusted 标记正确，Server 生命周期关闭。
 
 ## 11. Session 与恢复
 

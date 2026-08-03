@@ -2,7 +2,7 @@
 
 ## 1. 能力边界
 
-当前 RAG 面向仓库内的 Markdown 和纯文本知识文档，不负责 PDF/OCR、网页抓取或多租户知识库。它与长期记忆分开存储：
+当前 RAG 面向仓库内的文本知识、源码和配置文件，不负责 PDF/OCR、网页抓取或多租户知识库。加载器使用明确的扩展名白名单，并对含 NUL 字节的内容按二进制拒绝。它与长期记忆分开存储：
 
 - `.mini-agent/rag/index.jsonl`：稳定文档知识，按来源增量更新。
 - `.mini-agent/memory/index.jsonl`：受治理的偏好、项目约定、架构决策、显式记忆和已验证结果，具有类型、范围、TTL、置信度和替代关系。
@@ -12,7 +12,7 @@
 ## 2. 完整链路
 
 ```text
-Markdown/TXT
+文档 / 源码 / 配置文本
 -> 仓库路径和文件类型校验
 -> 标题提取、文本规范化、source hash
 -> 按行分块和 overlap
@@ -29,9 +29,10 @@ Markdown/TXT
 
 `src/rag` 的主要职责：
 
-- `DocumentLoader`：只允许读取仓库内 `.md`、`.markdown`、`.txt`，跳过内部目录、符号链接、超大文件和不支持类型。
+- `DocumentLoader`：允许仓库内常见文档（Markdown、TXT、AsciiDoc、reStructuredText）、源码、脚本、Web 标记和 JSON/YAML/TOML 等配置文本；跳过内部目录、符号链接、二进制、超大文件和不支持类型。扩展名事实源是 `RAG_TEXT_EXTENSIONS`。
 - `TextChunker`：保留起止行号和 Markdown 标题，支持可配置 chunk size 与 overlap。
 - `RagStore`：增量索引、跨进程写锁、原子替换、混合检索、过滤、证据选择和索引维护。
+- `KnowledgeIndexTool`：让 Agent 在索引为空、provider 不一致或文档需要刷新时，对选定仓库路径建立派生索引；该操作走 REVIEW 权限。
 - `KnowledgeSearchTool`：把检索能力注册为只读 `SAFE` Agent 工具。
 - `RagEvaluator`：计算 answerability accuracy、hit rate、Recall@K 和 MRR。
 
@@ -67,10 +68,13 @@ mini-agent rag clear
 Agent 可通过统一工具执行：
 
 ```bash
+mini-agent tool run knowledge_index '{"paths":["README.md","docs/zh-CN"],"tags":["project"]}'
 mini-agent tool run knowledge_search '{"query":"RAG 的评测指标是什么","topK":3}'
 ```
 
 返回结果包含 `context`、`citations` 和逐条 `score`。引用格式为 `path#Lx-Ly`。如果查询为空、索引为空、embedding provider 不匹配或相关度不足，结果会返回 `found: false` 和明确 `reason`，而不是生成看似合理的答案。
+
+在普通 Agent 对话中，模型应先调用 `knowledge_search`。当结果是 `EMPTY_INDEX` 或索引需要刷新时，它可以在同一个 `AGENT_TASK` 中申请 `knowledge_index`，索引相关路径后再次执行原查询。重复调用守卫会把成功的非只读工具视为可观察状态变化，因此不会把“建索引后的再次搜索”误判为无意义重复。最终知识回答仍必须来自成功搜索返回的真实 citation；仅仅成功建索引不满足回答证据门禁。
 
 ## 4. Embedding 配置
 

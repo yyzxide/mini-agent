@@ -123,7 +123,7 @@ RAG、Memory、MCP、Skill 可以作为追问时的扩展能力，不建议在�
 准确说法：
 
 - 应用层最小权限与副作用控制；
-- MCP tools runtime；
+- MCP tools 与静态 resources/prompts runtime；
 - 任务相关 Web 证据闭环；
 - 确定性回归完整，真实模型评测仍需扩大；
 - 可审计结构化决策，不展示私有推理；
