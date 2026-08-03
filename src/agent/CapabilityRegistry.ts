@@ -90,8 +90,8 @@ export const PRODUCT_CAPABILITY_REGISTRY: Readonly<Record<ProductCapabilityId, P
     tools: ["knowledge_index", "knowledge_search"],
     actions: [],
     surfaces: ["mini-agent rag"],
-    zh: { name: "仓库文档 RAG", description: "Agent 可按需索引并查询仓库文本、源码与配置文档，同时保留文件与行号引用。" },
-    en: { name: "Repository document RAG", description: "Lets the Agent index and query repository text, source-code, and configuration documents while preserving file-and-line citations." },
+    zh: { name: "仓库文档 RAG", description: "Agent 可按需索引并查询仓库文本、源码与配置文档；候选证据返回前会检测源文件陈旧状态，并保留文件与行号引用。" },
+    en: { name: "Repository document RAG", description: "Lets the Agent index and query repository text, source-code, and configuration documents, detects stale selected sources before returning evidence, and preserves file-and-line citations." },
   }),
   READ_ONLY_PLAN: capability({
     id: "READ_ONLY_PLAN",
@@ -127,12 +127,12 @@ export const PRODUCT_CAPABILITY_REGISTRY: Readonly<Record<ProductCapabilityId, P
     surfaces: ["mini-agent mcp tools", "mini-agent mcp status", "mini-agent mcp call"],
     zh: {
       name: "MCP 外部能力运行时",
-      description: "发现配置的 MCP Server 工具，并为已发现的 resources 与 prompts 注册只读适配器；所有能力均命名空间化并通过同一精确权限链调用。",
+      description: "分页发现配置的 MCP Server 工具，并为已发现的 resources 与 prompts 注册只读适配器；单项失败局部降级，所有能力均命名空间化并通过同一精确权限链调用。",
       limitation: "当前实现 2025-11-25 initialize/session 下的 tools、静态 resources/list/read 和 prompts/list/get 子集；不包含 resource templates、订阅、OAuth、服务端主动请求或更新协议的全部能力。",
     },
     en: {
       name: "MCP external-capability runtime",
-      description: "Discovers configured MCP tools and registers read-only adapters for discovered resources and prompts; every capability is namespaced and invoked through the same exact permission chain.",
+      description: "Discovers paginated MCP tools and registers read-only adapters for discovered resources and prompts; individual capability failures degrade locally, and every capability is namespaced and invoked through the same exact permission chain.",
       limitation: "This implements the tools, static resources/list/read, and prompts/list/get subsets of the 2025-11-25 initialize/session shape, not resource templates, subscriptions, OAuth, server-initiated requests, or complete newer-protocol coverage.",
     },
   }),

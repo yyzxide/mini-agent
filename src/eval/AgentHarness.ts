@@ -29,6 +29,7 @@ import type { LlmCallMetrics } from "../llm/OpenAICompatibleClient.js";
 import { ScriptedLlmClient } from "./ScriptedLlmClient.js";
 import type { MultiAgentPolicy, SubAgentCoordinator } from "../agent/SubAgentTypes.js";
 import type { TaskFrame } from "../runtime/TaskFrame.js";
+import { RagStore } from "../rag/RagStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,6 +42,10 @@ export interface AgentHarnessScenario {
   files?: Record<string, string>;
   /** Files present in the workspace but intentionally absent from the Git index. */
   untrackedFiles?: Record<string, string>;
+  /** Optional knowledge sources indexed before postIndexFiles mutate the fixture. */
+  ragIndexPaths?: string[];
+  /** File contents written after the initial RAG index, for stale-index recovery scenarios. */
+  postIndexFiles?: Record<string, string>;
   decisions?: AgentDecision[];
   maxSteps?: number;
   operatingMode?: AgentOperatingMode;
@@ -56,6 +61,8 @@ export interface AgentHarnessScenario {
     maxSteps?: number;
     maxLlmCalls?: number;
     maxTotalTokens?: number;
+    summaryContains?: string[];
+    summaryNotContains?: string[];
   };
 }
 
@@ -375,6 +382,16 @@ async function createScenarioRepo(scenario: AgentHarnessScenario): Promise<strin
     await fs.writeFile(filePath, content, "utf8");
   }
 
+  if ((scenario.ragIndexPaths?.length ?? 0) > 0) {
+    await new RagStore({ repoPath }).ingest(scenario.ragIndexPaths ?? []);
+  }
+
+  for (const [relativePath, content] of Object.entries(scenario.postIndexFiles ?? {})) {
+    const filePath = path.join(repoPath, relativePath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content, "utf8");
+  }
+
   return repoPath;
 }
 
@@ -399,6 +416,12 @@ async function evaluateScenarioExpectation(
 
   if (expected.success !== undefined && run.success !== expected.success) {
     failures.push(`Expected success=${String(expected.success)} but got ${String(run.success)}`);
+  }
+  for (const text of expected.summaryContains ?? []) {
+    if (!run.summary.includes(text)) failures.push(`Expected final summary to contain ${JSON.stringify(text)}`);
+  }
+  for (const text of expected.summaryNotContains ?? []) {
+    if (run.summary.includes(text)) failures.push(`Expected final summary not to contain ${JSON.stringify(text)}`);
   }
 
   for (const text of expected.diffContains ?? []) {

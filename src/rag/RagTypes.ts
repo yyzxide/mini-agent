@@ -65,7 +65,7 @@ export interface RagSearchResult {
   excerpt: string;
 }
 
-export type RagNoEvidenceReason = "EMPTY_QUERY" | "EMPTY_INDEX" | "EMBEDDING_PROVIDER_MISMATCH" | "INSUFFICIENT_EVIDENCE";
+export type RagNoEvidenceReason = "EMPTY_QUERY" | "EMPTY_INDEX" | "STALE_INDEX" | "EMBEDDING_PROVIDER_MISMATCH" | "INSUFFICIENT_EVIDENCE";
 
 export interface RagSearchResponse {
   query: string;
@@ -74,6 +74,7 @@ export interface RagSearchResponse {
   results: RagSearchResult[];
   context: string;
   citations: string[];
+  staleSources?: string[];
   embeddingProvider: string;
 }
 

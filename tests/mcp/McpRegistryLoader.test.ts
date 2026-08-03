@@ -105,4 +105,60 @@ describe("McpRegistryLoader diagnostics", () => {
       await fs.rm(repoPath, { recursive: true, force: true });
     }
   });
+
+  it("keeps healthy MCP capabilities available when one advertised list endpoint fails", async () => {
+    const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "mini-agent-mcp-degraded-"));
+    await fs.writeFile(path.join(repoPath, "mini-agent.config.json"), JSON.stringify({
+      version: 1,
+      mcp: { servers: [{ name: "partial", url: "https://mcp.example.test/mcp" }] },
+    }), "utf8");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const message = JSON.parse(String(init?.body)) as { id?: number; method: string };
+      if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (message.method === "initialize") {
+        return jsonRpc(message.id, {
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {}, resources: {} },
+          serverInfo: { name: "partial-server", version: "1" },
+        });
+      }
+      if (message.method === "tools/list") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32000, message: "tool catalog unavailable" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (message.method === "resources/list") {
+        return jsonRpc(message.id, { resources: [{ uri: "docs://healthy", name: "Healthy" }] });
+      }
+      return jsonRpc(message.id, {});
+    }));
+
+    const loaded = await createConfiguredToolRegistry(repoPath);
+    try {
+      expect(loaded.registry.get("partial__read_resource")).toBeDefined();
+      expect(loaded.diagnostics).toEqual([expect.objectContaining({
+        server: "partial",
+        success: true,
+        degraded: true,
+        toolCount: 0,
+        resourceCount: 1,
+        registeredAdapterCount: 1,
+        capabilityErrors: { tools: "MCP -32000: tool catalog unavailable" },
+        bridgedCapabilities: ["resources"],
+        unbridgedCapabilities: ["tools"],
+      })]);
+    } finally {
+      await loaded.registry.dispose();
+      await fs.rm(repoPath, { recursive: true, force: true });
+    }
+  });
 });
+
+function jsonRpc(id: number | undefined, result: unknown): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}

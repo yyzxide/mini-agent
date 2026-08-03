@@ -113,6 +113,26 @@ describe("RAG knowledge base", () => {
     expect((await mismatched.search("upload")).reason).toBe("EMBEDDING_PROVIDER_MISMATCH");
   });
 
+  it("refuses stale selected evidence until the changed source is reindexed", async () => {
+    const sourcePath = path.join(repoPath, "docs", "policy.md");
+    await fs.writeFile(sourcePath, "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n", "utf8");
+    const store = new RagStore({ repoPath });
+    await store.ingest(["docs/policy.md"]);
+
+    await fs.writeFile(sourcePath, "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n", "utf8");
+    await expect(store.search("upload policy checksum verification")).resolves.toMatchObject({
+      found: false,
+      reason: "STALE_INDEX",
+      staleSources: ["docs/policy.md"],
+      citations: [],
+    });
+
+    await store.ingest(["docs/policy.md"]);
+    const refreshed = await store.search("upload policy SHA-512 checksum");
+    expect(refreshed.found).toBe(true);
+    expect(refreshed.context).toContain("SHA-512");
+  });
+
   it("requires lexical evidence when the offline hash embedding collides", async () => {
     const collisionProvider: EmbeddingProvider = { id: "local-hash-v2", embed: async () => [1] };
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks are merged after validation.\n", "utf8");

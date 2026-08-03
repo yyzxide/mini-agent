@@ -16,6 +16,8 @@ export interface McpLoadDiagnostic {
   resourceCount?: number;
   promptCount?: number;
   registeredAdapterCount?: number;
+  degraded?: boolean;
+  capabilityErrors?: Record<string, string>;
   protocolVersion?: string;
   serverInfo?: { name: string; version: string };
   advertisedCapabilities?: string[];
@@ -40,12 +42,16 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
       await client.connect();
       const metadata = client.getServerMetadata?.();
       const advertisedCapabilities = Object.keys(metadata?.capabilities ?? {}).sort();
-      const tools = advertisedCapabilities.includes("tools") ? await client.listTools() : [];
+      const bridgedCapabilities: string[] = [];
+      const capabilityErrors: Record<string, string> = {};
+      const tools = advertisedCapabilities.includes("tools")
+        ? await loadCapability("tools", async () => await client.listTools(), bridgedCapabilities, capabilityErrors)
+        : [];
       const resources = advertisedCapabilities.includes("resources") && client.listResources
-        ? await client.listResources()
+        ? await loadCapability("resources", async () => await client.listResources!(), bridgedCapabilities, capabilityErrors)
         : [];
       const prompts = advertisedCapabilities.includes("prompts") && client.listPrompts
-        ? await client.listPrompts()
+        ? await loadCapability("prompts", async () => await client.listPrompts!(), bridgedCapabilities, capabilityErrors)
         : [];
       const staged = [
         ...tools.map((tool) => new McpRemoteTool(server, tool, client)),
@@ -61,11 +67,7 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
       }
       for (const tool of staged) registry.register(tool);
       registry.addDisposer(async () => await client.close());
-      const bridgedCapabilities = [
-        ...(advertisedCapabilities.includes("tools") ? ["tools"] : []),
-        ...(advertisedCapabilities.includes("resources") ? ["resources"] : []),
-        ...(advertisedCapabilities.includes("prompts") ? ["prompts"] : []),
-      ];
+      const degraded = Object.keys(capabilityErrors).length > 0;
       diagnostics.push({
         server: server.name,
         success: true,
@@ -73,6 +75,7 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
         resourceCount: resources.length,
         promptCount: prompts.length,
         registeredAdapterCount: staged.length,
+        ...(degraded ? { degraded: true, capabilityErrors } : {}),
         ...(metadata ? { protocolVersion: metadata.protocolVersion } : {}),
         ...(metadata?.serverInfo ? { serverInfo: metadata.serverInfo } : {}),
         advertisedCapabilities,
@@ -91,6 +94,22 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
   }
 
   return { registry, diagnostics };
+}
+
+async function loadCapability<T>(
+  name: string,
+  load: () => Promise<T[]>,
+  bridgedCapabilities: string[],
+  capabilityErrors: Record<string, string>,
+): Promise<T[]> {
+  try {
+    const values = await load();
+    bridgedCapabilities.push(name);
+    return values;
+  } catch (error) {
+    capabilityErrors[name] = error instanceof Error ? error.message : String(error);
+    return [];
+  }
 }
 
 function createClient(config: McpServerConfig): McpClient {

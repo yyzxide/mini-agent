@@ -18,6 +18,8 @@ const expectedSchema = z.object({
   maxSteps: z.number().int().positive().optional(),
   maxLlmCalls: z.number().int().positive().optional(),
   maxTotalTokens: z.number().int().nonnegative().optional(),
+  summaryContains: z.array(z.string()).optional(),
+  summaryNotContains: z.array(z.string()).optional(),
 }).strict();
 
 const scenarioSchema = z.object({
@@ -28,6 +30,8 @@ const scenarioSchema = z.object({
   userGoal: z.string().trim().min(1),
   files: z.record(z.string(), z.string()).optional(),
   untrackedFiles: z.record(z.string(), z.string()).optional(),
+  ragIndexPaths: z.array(z.string().trim().min(1)).min(1).optional(),
+  postIndexFiles: z.record(z.string(), z.string()).optional(),
   decisions: z.array(AgentDecisionSchema).min(1).optional(),
   maxSteps: z.number().int().positive().optional(),
   operatingMode: z.enum(["EXECUTE", "PLAN"]).optional(),

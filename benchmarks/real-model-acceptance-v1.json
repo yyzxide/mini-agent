@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "name": "mini-agent-real-acceptance-v1",
+  "description": "Opt-in repeated real-model acceptance for stale RAG recovery, progressive Skill loading, and new-artifact provenance.",
+  "repetitions": 3,
+  "thresholds": {
+    "minPassAt1": 0.8,
+    "minRunPassRate": 0.8,
+    "minToolChoiceAccuracy": 0.9,
+    "minAllRunsPassRate": 0.66,
+    "maxFlakyScenarios": 1,
+    "maxAverageSteps": 8,
+    "maxAverageLlmCalls": 10,
+    "maxContextTruncationRate": 0.35
+  },
+  "scenarios": [
+    {
+      "id": "refresh-stale-rag-before-answer",
+      "name": "Refresh stale RAG evidence before answering",
+      "tags": ["rag", "stale-index", "tool-recovery"],
+      "userGoal": "请只根据仓库知识库说明当前上传校验策略。必须先调用 knowledge_search；如果索引过期，使用 knowledge_index 更新相关文档后重新搜索，并在答案中保留文件行号引用。",
+      "files": {
+        "docs/policy.md": "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n"
+      },
+      "ragIndexPaths": ["docs/policy.md"],
+      "postIndexFiles": {
+        "docs/policy.md": "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n"
+      },
+      "expected": {
+        "success": true,
+        "toolsCalled": ["knowledge_search", "knowledge_index"],
+        "summaryContains": ["SHA-512", "docs/policy.md#L"],
+        "summaryNotContains": ["SHA-256"],
+        "maxSteps": 8,
+        "maxLlmCalls": 10
+      }
+    },
+    {
+      "id": "progressively-read-skill-resource",
+      "name": "Progressively read a selected Skill resource",
+      "tags": ["skill", "progressive-disclosure", "context"],
+      "userGoal": "使用 $release-audit Skill 回答发布前必须完成哪些检查。请通过 skill_read 读取完整 SKILL.md 和 references/checklist.md，只根据其中内容回答，不要修改文件。",
+      "files": {
+        "skills/release-audit/SKILL.md": "---\nname: release-audit\ndescription: Verify release readiness\ntriggers: release, publish\n---\n\n# Release audit\n\nRead references/checklist.md before answering.\n",
+        "skills/release-audit/references/checklist.md": "# Checklist\n\nRun the full test suite, verify the CLI entry, and confirm the Git worktree is clean.\n"
+      },
+      "expected": {
+        "success": true,
+        "toolsCalled": ["skill_read"],
+        "summaryContains": ["测试", "CLI", "Git"],
+        "maxSteps": 6,
+        "maxLlmCalls": 8
+      }
+    },
+    {
+      "id": "create-new-artifact-with-existing-similar-file",
+      "name": "Create a new artifact without claiming the old file",
+      "tags": ["artifact", "provenance", "write", "verification"],
+      "userGoal": "仓库已有 snake.html，但它不是本轮产物。请新建一个独立的 snake-v2.html 贪吃蛇小游戏，不要修改 snake.html，并验证新 HTML。",
+      "files": {
+        "snake.html": "<!doctype html><title>Existing snake game</title>\n"
+      },
+      "expected": {
+        "success": true,
+        "toolsCalled": ["verify_file"],
+        "verificationPassed": true,
+        "filesContain": {
+          "snake-v2.html": "<html"
+        },
+        "filesNotContain": {
+          "snake.html": "snake-v2"
+        },
+        "diffContains": ["snake-v2.html"],
+        "diffNotContains": ["--- a/snake.html"],
+        "maxSteps": 8,
+        "maxLlmCalls": 10
+      }
+    }
+  ]
+}

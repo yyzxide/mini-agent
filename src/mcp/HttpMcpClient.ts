@@ -1,14 +1,15 @@
 import type { McpCallToolResult, McpGetPromptResult, McpReadResourceResult, McpRemotePrompt, McpRemoteResource, McpRemoteTool, McpServerConfig, McpServerMetadata } from "./McpTypes.js";
 import {
   initializeRequest,
+  collectMcpPages,
   MCP_PROTOCOL_VERSION,
   parseCallResult,
   parseInitializeResult,
   parseGetPromptResult,
-  parsePromptsList,
+  parsePromptsListPage,
   parseReadResourceResult,
-  parseResourcesList,
-  parseToolsList,
+  parseResourcesListPage,
+  parseToolsListPage,
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpClient,
@@ -46,7 +47,9 @@ export class HttpMcpClient implements McpClient {
 
   async listTools(): Promise<McpRemoteTool[]> {
     await this.connect();
-    return parseToolsList(await this.request(this.makeRequest("tools/list")));
+    return await collectMcpPages(async (cursor) =>
+      parseToolsListPage(await this.request(this.makeRequest("tools/list", cursor ? { cursor } : undefined))),
+    );
   }
 
   async callTool(name: string, input: unknown): Promise<McpCallToolResult> {
@@ -59,7 +62,9 @@ export class HttpMcpClient implements McpClient {
 
   async listResources(): Promise<McpRemoteResource[]> {
     await this.connect();
-    return parseResourcesList(await this.request(this.makeRequest("resources/list")));
+    return await collectMcpPages(async (cursor) =>
+      parseResourcesListPage(await this.request(this.makeRequest("resources/list", cursor ? { cursor } : undefined))),
+    );
   }
 
   async readResource(uri: string): Promise<McpReadResourceResult> {
@@ -69,7 +74,9 @@ export class HttpMcpClient implements McpClient {
 
   async listPrompts(): Promise<McpRemotePrompt[]> {
     await this.connect();
-    return parsePromptsList(await this.request(this.makeRequest("prompts/list")));
+    return await collectMcpPages(async (cursor) =>
+      parsePromptsListPage(await this.request(this.makeRequest("prompts/list", cursor ? { cursor } : undefined))),
+    );
   }
 
   async getPrompt(name: string, args: Record<string, string>): Promise<McpGetPromptResult> {

@@ -6,7 +6,7 @@ import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
 import { McpRemoteTool as McpRemoteToolAdapter } from "../../src/mcp/McpRemoteTool.js";
 import { PermissionManager } from "../../src/permission/PermissionManager.js";
-import { parseInitializeResult } from "../../src/mcp/McpClient.js";
+import { collectMcpPages, parseInitializeResult } from "../../src/mcp/McpClient.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,6 +60,11 @@ describe("MCP tool bridge", () => {
       protocolVersion: "2026-07-28",
       capabilities: { tools: {} },
     })).toThrow(/protocol version unsupported/i);
+  });
+
+  it("rejects repeated pagination cursors instead of looping forever", async () => {
+    await expect(collectMcpPages(async () => ({ items: ["item"], nextCursor: "same" })))
+      .rejects.toThrow(/repeated cursor/i);
   });
 
   it("requires an exact interactive approval for a mutating MCP tool", async () => {
@@ -164,7 +169,7 @@ describe("MCP tool bridge", () => {
       const message = JSON.parse(String(init?.body)) as {
         id?: number;
         method: string;
-        params?: { arguments?: unknown };
+        params?: { arguments?: unknown; cursor?: string };
       };
       if (message.method === "notifications/initialized") {
         return new Response(null, { status: 202 });
@@ -173,13 +178,19 @@ describe("MCP tool bridge", () => {
       if (message.method === "initialize") {
         result = { protocolVersion: "2025-11-25", capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: "http", version: "1" } };
       } else if (message.method === "tools/list") {
-        result = { tools: [{ name: "echo", inputSchema: { type: "object" } }] };
+        result = message.params?.cursor === "tools-2"
+          ? { tools: [{ name: "clock", inputSchema: { type: "object" } }] }
+          : { tools: [{ name: "echo", inputSchema: { type: "object" } }], nextCursor: "tools-2" };
       } else if (message.method === "resources/list") {
-        result = { resources: [{ uri: "docs://guide", name: "Guide" }] };
+        result = message.params?.cursor === "resources-2"
+          ? { resources: [{ uri: "docs://faq", name: "FAQ" }] }
+          : { resources: [{ uri: "docs://guide", name: "Guide" }], nextCursor: "resources-2" };
       } else if (message.method === "resources/read") {
         result = { contents: [{ uri: "docs://guide", mimeType: "text/plain", text: "External guide" }] };
       } else if (message.method === "prompts/list") {
-        result = { prompts: [{ name: "review", arguments: [{ name: "target", required: true }] }] };
+        result = message.params?.cursor === "prompts-2"
+          ? { prompts: [{ name: "summarize" }] }
+          : { prompts: [{ name: "review", arguments: [{ name: "target", required: true }] }], nextCursor: "prompts-2" };
       } else if (message.method === "prompts/get") {
         result = { description: "Review prompt", messages: [{ role: "user", content: { type: "text", text: "Review target" } }] };
       } else {
@@ -199,11 +210,20 @@ describe("MCP tool bridge", () => {
       timeoutMs: 5_000,
     }));
     try {
-      await expect(client.listTools()).resolves.toEqual([expect.objectContaining({ name: "echo" })]);
+      await expect(client.listTools()).resolves.toEqual([
+        expect.objectContaining({ name: "echo" }),
+        expect.objectContaining({ name: "clock" }),
+      ]);
       await expect(client.callTool("echo", { value: 42 })).resolves.toMatchObject({ structuredContent: { value: 42 } });
-      await expect(client.listResources()).resolves.toEqual([expect.objectContaining({ uri: "docs://guide" })]);
+      await expect(client.listResources()).resolves.toEqual([
+        expect.objectContaining({ uri: "docs://guide" }),
+        expect.objectContaining({ uri: "docs://faq" }),
+      ]);
       await expect(client.readResource("docs://guide")).resolves.toMatchObject({ contents: [{ text: "External guide" }] });
-      await expect(client.listPrompts()).resolves.toEqual([expect.objectContaining({ name: "review" })]);
+      await expect(client.listPrompts()).resolves.toEqual([
+        expect.objectContaining({ name: "review" }),
+        expect.objectContaining({ name: "summarize" }),
+      ]);
       await expect(client.getPrompt("review", { target: "src" })).resolves.toMatchObject({ description: "Review prompt" });
       expect(seenSessions.slice(1)).toEqual(expect.arrayContaining(["fixture-session"]));
       expect(client.getServerMetadata()).toMatchObject({

@@ -177,8 +177,11 @@ export class RagStore {
       .map((chunk) => scoreChunk(chunk, trimmedQuery, queryKeywords, queryVector))
       .filter((result) => result.score >= minScore && (!this.embeddingProvider.id.startsWith("local-hash-") || passesLocalHashEvidenceGate(result, queryKeywords)))
       .sort((left, right) => right.score - left.score || left.chunk.source.localeCompare(right.chunk.source));
-    const results = selectDiverseResults(scored, topK, maxContextChars).map(toPublicSearchResult);
-    if (results.length === 0) return this.emptyResponse(trimmedQuery, "INSUFFICIENT_EVIDENCE");
+    const selected = selectDiverseResults(scored, topK, maxContextChars);
+    if (selected.length === 0) return this.emptyResponse(trimmedQuery, "INSUFFICIENT_EVIDENCE");
+    const staleSources = await this.findStaleSources(selected);
+    if (staleSources.length > 0) return this.emptyResponse(trimmedQuery, "STALE_INDEX", staleSources);
+    const results = selected.map(toPublicSearchResult);
 
     return {
       query: trimmedQuery,
@@ -225,8 +228,34 @@ export class RagStore {
     };
   }
 
-  private emptyResponse(query: string, reason: NonNullable<RagSearchResponse["reason"]>): RagSearchResponse {
-    return { query, found: false, reason, results: [], context: "", citations: [], embeddingProvider: this.embeddingProvider.id };
+  private emptyResponse(
+    query: string,
+    reason: NonNullable<RagSearchResponse["reason"]>,
+    staleSources: string[] = [],
+  ): RagSearchResponse {
+    return {
+      query,
+      found: false,
+      reason,
+      results: [],
+      context: "",
+      citations: [],
+      ...(staleSources.length > 0 ? { staleSources } : {}),
+      embeddingProvider: this.embeddingProvider.id,
+    };
+  }
+
+  private async findStaleSources(results: InternalSearchResult[]): Promise<string[]> {
+    const indexedHashes = new Map<string, string>();
+    for (const result of results) indexedHashes.set(result.chunk.source, result.chunk.sourceHash);
+    const loader = new RagDocumentLoader({ repoPath: this.repoPath });
+    const stale: string[] = [];
+    for (const [source, indexedHash] of indexedHashes) {
+      const loaded = await loader.load([source]).catch(() => undefined);
+      const document = loaded?.documents.find((candidate) => candidate.source === source);
+      if (!document || document.sourceHash !== indexedHash) stale.push(source);
+    }
+    return stale.sort();
   }
 
   private async readAll(): Promise<RagChunk[]> {

@@ -248,6 +248,65 @@ export function compareAgentBenchReports(
   };
 }
 
+export function renderAgentBenchMarkdownReport(report: AgentBenchReport): string {
+  const summary = report.summary;
+  const lines = [
+    "# Mini Agent 真实模型验收报告",
+    "",
+    `- 数据集：\`${report.dataset}\``,
+    `- 模式：\`${report.mode}\``,
+    `- 模型：\`${report.model ?? "未记录"}\``,
+    `- 重复次数：${String(report.repetitions)}`,
+    `- 时间：${report.startedAt} ～ ${report.finishedAt}`,
+    `- 门禁：${report.gate.passed ? "通过" : "未通过"}`,
+    "",
+    "## 总体指标",
+    "",
+    "| 指标 | 结果 |",
+    "| --- | ---: |",
+    `| Pass@1 | ${formatPercent(summary.passAt1)} |`,
+    `| Pass@K | ${formatPercent(summary.passAtK)} |`,
+    `| Run pass rate | ${formatPercent(summary.runPassRate)} |`,
+    `| All-runs pass rate | ${formatPercent(summary.allRunsPassRate)} |`,
+    `| Tool choice accuracy | ${formatPercent(summary.toolChoiceAccuracy)} |`,
+    `| Flaky scenarios | ${String(summary.flakyScenarios)} |`,
+    `| 平均步骤 | ${summary.averageSteps.toFixed(2)} |`,
+    `| 平均 LLM 调用 | ${summary.averageLlmCalls.toFixed(2)} |`,
+    `| 平均 Token | ${summary.averageTotalTokens.toFixed(0)} |`,
+    `| 平均耗时 | ${summary.averageDurationMs.toFixed(0)} ms |`,
+    `| Context 截断率 | ${formatPercent(summary.contextTruncationRate)} |`,
+    "",
+    "## 场景结果",
+    "",
+    "| 场景 | 通过率 | 首轮 | 全轮 | Flaky |",
+    "| --- | ---: | --- | --- | --- |",
+    ...report.scenarios.map((scenario) =>
+      `| ${escapeMarkdownTable(scenario.scenarioName)} | ${formatPercent(scenario.passRate)} | ${scenario.firstRunPassed ? "通过" : "失败"} | ${scenario.allRunsPassed ? "通过" : "失败"} | ${scenario.flaky ? "是" : "否"} |`,
+    ),
+  ];
+  const failedRuns = report.runs.filter((run) => !run.passed);
+  if (failedRuns.length > 0 || report.gate.failures.length > 0) {
+    lines.push("", "## 失败与门禁", "");
+    for (const failure of report.gate.failures) lines.push(`- 门禁：${failure}`);
+    for (const run of failedRuns) {
+      const details = run.expectationFailures.length > 0
+        ? run.expectationFailures.join("；")
+        : run.error ?? run.failureCode ?? "未知失败";
+      lines.push(`- ${run.scenarioName} #${String(run.repetition)}：${details}`);
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function escapeMarkdownTable(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
 function readAllRunsPassRate(report: AgentBenchReport): number {
   return report.summary.allRunsPassRate ?? ratio(
     report.scenarios.filter((scenario) => scenario.allRunsPassed ?? scenario.passRate === 1).length,

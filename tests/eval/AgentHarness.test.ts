@@ -65,6 +65,36 @@ describe("AgentHarness", () => {
     expect(result.llmCalls).toBeGreaterThanOrEqual(3);
   });
 
+  it("creates a stale RAG fixture and verifies the Agent refresh path", async () => {
+    const result = await new AgentHarness().runScenario({
+      name: "refresh stale policy",
+      userGoal: "Use repository knowledge to answer the current upload policy and refresh stale evidence.",
+      files: {
+        "docs/policy.md": "# Policy\n\nUpload policy requires SHA-256 checksum verification.\n",
+      },
+      ragIndexPaths: ["docs/policy.md"],
+      postIndexFiles: {
+        "docs/policy.md": "# Policy\n\nUpload policy now requires SHA-512 checksum verification.\n",
+      },
+      decisions: [
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs/policy.md"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "FINAL", success: true, summary: "Policy requires SHA-512 (docs/policy.md#L1-L3)." },
+      ],
+      expected: {
+        success: true,
+        toolsCalled: ["knowledge_search", "knowledge_index"],
+        summaryContains: ["SHA-512", "docs/policy.md#L"],
+        summaryNotContains: ["SHA-256"],
+      },
+    });
+    createdRepos.push(result.repoPath);
+
+    expect(result.passed, result.expectationFailures.join("\n")).toBe(true);
+    expect(result.metrics.toolCalls.filter((tool) => tool === "knowledge_search")).toHaveLength(2);
+  });
+
   it("aggregates suite metrics and failure categories", async () => {
     const harness = new AgentHarness();
     const suite = await harness.runSuite([

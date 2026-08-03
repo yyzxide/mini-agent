@@ -44,6 +44,7 @@ export class KnowledgeSearchTool implements Tool<KnowledgeSearchInput, RagSearch
       found: response.found,
       reason: response.reason ?? null,
       citations: response.citations,
+      staleSources: response.staleSources ?? [],
       embeddingCache: store.getEmbeddingCacheStats() ?? null,
     });
   }

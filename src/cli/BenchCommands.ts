@@ -1,7 +1,8 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 import type { Command } from "commander";
 import { loadAgentConfig, resolveLlmConfig } from "../config/AgentConfig.js";
-import { AgentBench, compareAgentBenchReports } from "../eval/AgentBench.js";
+import { AgentBench, compareAgentBenchReports, renderAgentBenchMarkdownReport } from "../eval/AgentBench.js";
 import { loadAgentBenchDataset, loadAgentBenchReport } from "../eval/AgentBenchDataset.js";
 import type { AgentBenchMode } from "../eval/AgentBenchTypes.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
@@ -22,6 +23,20 @@ interface BenchCompareOptions {
   output?: string;
 }
 
+interface BenchAcceptOptions {
+  repetitions?: number;
+  output: string;
+  markdown: string;
+  model?: string;
+  baseUrl?: string;
+  keepRepos?: boolean;
+  failOnRegression: boolean;
+}
+
+const REAL_ACCEPTANCE_DATASET = "benchmarks/real-model-acceptance-v1.json";
+const REAL_ACCEPTANCE_JSON = ".mini-agent/bench/real-model-acceptance-latest.json";
+const REAL_ACCEPTANCE_MARKDOWN = ".mini-agent/bench/real-model-acceptance-latest.md";
+
 export function registerBenchCommands(program: Command): void {
   const bench = program.command("bench").description("Run repeatable AgentBench quality and cost evaluations");
 
@@ -38,29 +53,36 @@ export function registerBenchCommands(program: Command): void {
     .option("--no-fail-on-regression", "Return success even when the quality gate fails")
     .action(async (datasetPath: string, options: BenchRunOptions) => {
       const repoPath = process.cwd();
-      const dataset = await loadAgentBenchDataset(resolveRepoPath(repoPath, datasetPath));
-      const baseline = options.baseline
-        ? await loadAgentBenchReport(resolveRepoPath(repoPath, options.baseline))
-        : undefined;
-      const resolved = options.mode === "real"
-        ? resolveLlmConfig(await loadAgentConfig(repoPath), { model: options.model, baseUrl: options.baseUrl }).openai
-        : undefined;
-      const report = await new AgentBench().run(dataset, {
-        mode: options.mode,
-        ...(options.repetitions !== undefined ? { repetitions: options.repetitions } : {}),
-        ...(resolved?.model ? { model: resolved.model } : {}),
-        ...(baseline ? { baseline } : {}),
-        keepRepos: options.keepRepos === true,
-        ...(resolved ? { createLlmClient: () => new OpenAICompatibleClient(resolved) } : {}),
-      });
+      const report = await runBench(repoPath, datasetPath, options);
+      if (options.output) await writeJsonReport(repoPath, options.output, report);
+      finishBenchRun(report, options.failOnRegression);
+    });
 
-      if (options.output) {
-        const outputPath = resolveRepoPath(repoPath, options.output);
-        await ensureDir(path.dirname(outputPath));
-        await writeJsonFileAtomic(outputPath, report);
-      }
-      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-      if (!report.gate.passed && options.failOnRegression) process.exitCode = 1;
+  bench.command("accept")
+    .description("Run the versioned real-model acceptance suite and write JSON plus Markdown reports")
+    .option("--repetitions <number>", "Runs per scenario (1-20)", parseRepetitions, 3)
+    .option("--output <path>", "Write the JSON acceptance report", REAL_ACCEPTANCE_JSON)
+    .option("--markdown <path>", "Write the human-readable Markdown acceptance report", REAL_ACCEPTANCE_MARKDOWN)
+    .option("--model <model>", "Override the configured model")
+    .option("--base-url <url>", "Override the configured OpenAI-compatible base URL")
+    .option("--keep-repos", "Keep temporary scenario repositories for debugging")
+    .option("--no-fail-on-regression", "Return success even when the acceptance gate fails")
+    .action(async (options: BenchAcceptOptions) => {
+      const repoPath = process.cwd();
+      const report = await runBench(repoPath, REAL_ACCEPTANCE_DATASET, {
+        mode: "real",
+        output: options.output,
+        failOnRegression: options.failOnRegression,
+        ...(options.repetitions !== undefined ? { repetitions: options.repetitions } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+        ...(options.keepRepos !== undefined ? { keepRepos: options.keepRepos } : {}),
+      });
+      await writeJsonReport(repoPath, options.output, report);
+      const markdownPath = resolveRepoPath(repoPath, options.markdown);
+      await ensureDir(path.dirname(markdownPath));
+      await fs.writeFile(markdownPath, renderAgentBenchMarkdownReport(report), "utf8");
+      finishBenchRun(report, options.failOnRegression);
     });
 
   bench.command("compare")
@@ -80,6 +102,35 @@ export function registerBenchCommands(program: Command): void {
       }
       process.stdout.write(`${JSON.stringify(comparison, null, 2)}\n`);
     });
+}
+
+async function runBench(repoPath: string, datasetPath: string, options: BenchRunOptions) {
+  const dataset = await loadAgentBenchDataset(resolveRepoPath(repoPath, datasetPath));
+  const baseline = options.baseline
+    ? await loadAgentBenchReport(resolveRepoPath(repoPath, options.baseline))
+    : undefined;
+  const resolved = options.mode === "real"
+    ? resolveLlmConfig(await loadAgentConfig(repoPath), { model: options.model, baseUrl: options.baseUrl }).openai
+    : undefined;
+  return await new AgentBench().run(dataset, {
+    mode: options.mode,
+    ...(options.repetitions !== undefined ? { repetitions: options.repetitions } : {}),
+    ...(resolved?.model ? { model: resolved.model } : {}),
+    ...(baseline ? { baseline } : {}),
+    keepRepos: options.keepRepos === true,
+    ...(resolved ? { createLlmClient: () => new OpenAICompatibleClient(resolved) } : {}),
+  });
+}
+
+async function writeJsonReport(repoPath: string, output: string, report: unknown): Promise<void> {
+  const outputPath = resolveRepoPath(repoPath, output);
+  await ensureDir(path.dirname(outputPath));
+  await writeJsonFileAtomic(outputPath, report);
+}
+
+function finishBenchRun(report: Awaited<ReturnType<typeof runBench>>, failOnRegression: boolean): void {
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (!report.gate.passed && failOnRegression) process.exitCode = 1;
 }
 
 function parseBenchMode(value: string): AgentBenchMode {

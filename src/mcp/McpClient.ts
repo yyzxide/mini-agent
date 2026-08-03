@@ -27,6 +27,12 @@ export interface JsonRpcResponse {
 }
 
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
+const MAX_MCP_LIST_PAGES = 100;
+
+export interface McpListPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
 
 export function initializeRequest(id: number): JsonRpcRequest {
   return {
@@ -41,12 +47,12 @@ export function initializeRequest(id: number): JsonRpcRequest {
   };
 }
 
-export function parseToolsList(value: unknown): McpRemoteTool[] {
+export function parseToolsListPage(value: unknown): McpListPage<McpRemoteTool> {
   if (!isObject(value) || !Array.isArray(value.tools)) {
     throw new Error("MCP tools/list returned an invalid result");
   }
 
-  return value.tools.map((tool) => {
+  const items = value.tools.map((tool) => {
     if (!isObject(tool) || typeof tool.name !== "string" || !("inputSchema" in tool)) {
       throw new Error("MCP tools/list returned an invalid tool descriptor");
     }
@@ -57,6 +63,7 @@ export function parseToolsList(value: unknown): McpRemoteTool[] {
       ...(isObject(tool.annotations) ? { annotations: tool.annotations } : {}),
     } as McpRemoteTool;
   });
+  return { items, ...parseNextCursor(value) };
 }
 
 export function parseInitializeResult(value: unknown): McpServerMetadata {
@@ -88,9 +95,9 @@ export function parseCallResult(value: unknown): McpCallToolResult {
   return value as McpCallToolResult;
 }
 
-export function parseResourcesList(value: unknown): McpRemoteResource[] {
+export function parseResourcesListPage(value: unknown): McpListPage<McpRemoteResource> {
   if (!isObject(value) || !Array.isArray(value.resources)) throw new Error("MCP resources/list returned an invalid result");
-  return value.resources.map((resource) => {
+  const items = value.resources.map((resource) => {
     if (!isObject(resource) || typeof resource.uri !== "string") throw new Error("MCP resources/list returned an invalid descriptor");
     return {
       uri: resource.uri,
@@ -99,6 +106,7 @@ export function parseResourcesList(value: unknown): McpRemoteResource[] {
       ...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
     };
   });
+  return { items, ...parseNextCursor(value) };
 }
 
 export function parseReadResourceResult(value: unknown): McpReadResourceResult {
@@ -116,9 +124,9 @@ export function parseReadResourceResult(value: unknown): McpReadResourceResult {
   };
 }
 
-export function parsePromptsList(value: unknown): McpRemotePrompt[] {
+export function parsePromptsListPage(value: unknown): McpListPage<McpRemotePrompt> {
   if (!isObject(value) || !Array.isArray(value.prompts)) throw new Error("MCP prompts/list returned an invalid result");
-  return value.prompts.map((prompt) => {
+  const items = value.prompts.map((prompt) => {
     if (!isObject(prompt) || typeof prompt.name !== "string") throw new Error("MCP prompts/list returned an invalid descriptor");
     const args = Array.isArray(prompt.arguments)
       ? prompt.arguments.filter(isObject).map((argument) => ({
@@ -133,6 +141,7 @@ export function parsePromptsList(value: unknown): McpRemotePrompt[] {
       ...(args ? { arguments: args } : {}),
     };
   });
+  return { items, ...parseNextCursor(value) };
 }
 
 export function parseGetPromptResult(value: unknown): McpGetPromptResult {
@@ -145,4 +154,29 @@ export function parseGetPromptResult(value: unknown): McpGetPromptResult {
 
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export async function collectMcpPages<T>(
+  fetchPage: (cursor?: string) => Promise<McpListPage<T>>,
+): Promise<T[]> {
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_MCP_LIST_PAGES; page += 1) {
+    const result = await fetchPage(cursor);
+    items.push(...result.items);
+    if (!result.nextCursor) return items;
+    if (seenCursors.has(result.nextCursor)) {
+      throw new Error(`MCP list pagination repeated cursor: ${result.nextCursor}`);
+    }
+    seenCursors.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
+  throw new Error(`MCP list pagination exceeded ${String(MAX_MCP_LIST_PAGES)} pages`);
+}
+
+function parseNextCursor(value: Record<string, unknown>): { nextCursor?: string } {
+  if (value.nextCursor === undefined || value.nextCursor === null || value.nextCursor === "") return {};
+  if (typeof value.nextCursor !== "string") throw new Error("MCP list returned an invalid nextCursor");
+  return { nextCursor: value.nextCursor };
 }

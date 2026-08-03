@@ -51,7 +51,8 @@ afterEach(async () => {
 
 describe("mini-agent CLI", () => {
   it("registers the phase 1 commands", () => {
-    const commandNames = createProgram()
+    const program = createProgram();
+    const commandNames = program
       .commands.map((command) => command.name())
       .sort();
 
@@ -79,6 +80,8 @@ describe("mini-agent CLI", () => {
       "status",
       "tool",
     ]);
+    expect(program.commands.find((command) => command.name() === "bench")
+      ?.commands.map((command) => command.name()).sort()).toEqual(["accept", "compare", "run"]);
   });
 
   it("uses the expected binary name", () => {

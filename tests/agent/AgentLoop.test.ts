@@ -27,6 +27,7 @@ import type { SubAgentCoordinator } from "../../src/agent/SubAgentTypes.js";
 import { DEFAULT_MULTI_AGENT_POLICY } from "../../src/agent/SubAgentTypes.js";
 import { fingerprintWorkingTree } from "../../src/agent/SubAgentWorktree.js";
 import { createTaskFrameBootstrapContract } from "../../src/runtime/TaskFrameContract.js";
+import { RagStore } from "../../src/rag/RagStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -2013,6 +2014,47 @@ describe("AgentLoop", () => {
     expect(serialized).toContain("knowledge_index");
     expect(serialized.match(/knowledge_search/g)?.length).toBeGreaterThanOrEqual(2);
     expect(serialized).toContain("EMPTY_INDEX");
+  });
+
+  it("can refresh stale knowledge evidence before answering", async () => {
+    await fs.mkdir(path.join(repoPath, "docs"), { recursive: true });
+    const policyPath = path.join(repoPath, "docs", "upload-policy.md");
+    await fs.writeFile(policyPath, "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n", "utf8");
+    await new RagStore({ repoPath }).ingest(["docs/upload-policy.md"]);
+    await fs.writeFile(policyPath, "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n", "utf8");
+
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs/upload-policy.md"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "当前上传策略要求 SHA-512 校验（docs/upload-policy.md#L1-L3）。",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "从知识库说明当前上传策略，索引过期时先更新",
+      taskContract: createTestTaskContract({
+        objective: "Ground the current upload policy in fresh repository knowledge.",
+        target: "REPOSITORY",
+        effects: { knowledgeEvidence: true },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(result.success, `${result.error ?? ""}\n${records.map((record) => JSON.stringify(record.payload)).join("\n")}`).toBe(true);
+    expect(result.summary).toContain("SHA-512");
+    const serialized = records.map((record) => JSON.stringify(record.payload)).join("\n");
+    expect(serialized).toContain("STALE_INDEX");
+    expect(serialized).toContain("knowledge_index");
   });
 
   it("can use web_search for non-code research tasks", async () => {

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentBench, compareAgentBenchReports, evaluateAgentBenchGate } from "../../src/eval/AgentBench.js";
+import { AgentBench, compareAgentBenchReports, evaluateAgentBenchGate, renderAgentBenchMarkdownReport } from "../../src/eval/AgentBench.js";
 import { loadAgentBenchDataset, loadAgentBenchReport } from "../../src/eval/AgentBenchDataset.js";
 import type { AgentBenchSummary } from "../../src/eval/AgentBenchTypes.js";
 import type { AgentBenchDataset } from "../../src/eval/AgentBenchTypes.js";
@@ -32,6 +32,33 @@ describe("AgentBench", () => {
     expect(report.runs.some((run) => run.metrics.verificationsPassed > 0)).toBe(true);
     expect(report.runs.every((run) => run.repoPath === undefined)).toBe(true);
     expect(report.gate).toEqual({ passed: true, failures: [], comparedToBaseline: true });
+  });
+
+  it("loads the opt-in real-model acceptance profile and renders a readable report", async () => {
+    const dataset = await loadAgentBenchDataset(path.resolve("benchmarks/real-model-acceptance-v1.json"));
+    expect(dataset).toMatchObject({
+      name: "mini-agent-real-acceptance-v1",
+      repetitions: 3,
+      scenarios: [
+        expect.objectContaining({
+          id: "refresh-stale-rag-before-answer",
+          ragIndexPaths: ["docs/policy.md"],
+          postIndexFiles: { "docs/policy.md": expect.stringContaining("SHA-512") },
+        }),
+        expect.objectContaining({ id: "progressively-read-skill-resource" }),
+        expect.objectContaining({ id: "create-new-artifact-with-existing-similar-file" }),
+      ],
+    });
+
+    const markdown = renderAgentBenchMarkdownReport(reportWithSummary(summary({
+      scenarios: 3,
+      totalRuns: 9,
+      passedRuns: 8,
+      runPassRate: 8 / 9,
+    })));
+    expect(markdown).toContain("# Mini Agent 真实模型验收报告");
+    expect(markdown).toContain("Run pass rate");
+    expect(markdown).toContain("88.9%");
   });
 
   it("fails the gate on quality regression or excessive cost", () => {
