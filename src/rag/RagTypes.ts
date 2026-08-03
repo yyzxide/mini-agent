@@ -34,7 +34,7 @@ export interface RagChunk extends RagChunkDraft {
 
 export interface RagSkippedPath {
   path: string;
-  reason: "UNSUPPORTED_TYPE" | "IGNORED_PATH" | "FILE_TOO_LARGE";
+  reason: "UNSUPPORTED_TYPE" | "IGNORED_PATH" | "FILE_TOO_LARGE" | "BINARY_CONTENT";
 }
 
 export interface RagLoadResult {

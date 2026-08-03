@@ -133,11 +133,17 @@ export const AskUserDecisionSchema = z.object({
   message: z.string().min(1),
 }).strict();
 
+export const WebClaimSourceSchema = z.object({
+  claim: z.string().trim().min(1).max(2_000),
+  sourceUrls: z.array(z.string().trim().url()).min(1).max(5),
+}).strict();
+
 export const FinalDecisionSchema = z.object({
   type: z.literal("FINAL"),
   summary: z.string().min(1),
   success: z.boolean(),
   evidenceStatus: z.enum(["SATISFIED", "INSUFFICIENT"]).optional(),
+  webClaims: z.array(WebClaimSourceSchema).min(1).max(20).optional(),
 }).strict();
 
 export const FailedDecisionSchema = z.object({

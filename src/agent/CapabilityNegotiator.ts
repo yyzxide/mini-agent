@@ -59,6 +59,7 @@ export function selectToolsForCapabilityNegotiation(
   }
   return callableTools.filter((tool) =>
     isToolAllowedByTaskContract(tool, contract)
+    || tool.name === "knowledge_index"
     || (
       tool.annotations?.readOnlyHint === true
       && tool.annotations.destructiveHint === false
@@ -191,7 +192,7 @@ function inferDecisionRequirement(
       if (tool.name === "web_search" || tool.name === "fetch_url") {
         return { action: "TOOL_CALL", capabilities: ["webAccess"] };
       }
-      if (tool.name === "knowledge_search") {
+      if (tool.name === "knowledge_search" || tool.name === "knowledge_index") {
         return { action: "TOOL_CALL", capabilities: ["knowledgeAccess"] };
       }
       if (tool.source === "mcp") {
@@ -237,10 +238,10 @@ function buildUpgradeContract(
         knowledgeSearch: true,
       },
       maxSteps: Math.max(input.contract.maxSteps, 8),
-      controlReason: appendReason(input.contract, "Model-selected knowledge_search requested indexed knowledge."),
+      controlReason: appendReason(input.contract, "Model-selected repository knowledge tooling requested indexed knowledge."),
       instructions: unique([
         ...input.contract.instructions,
-        "Use knowledge_search evidence and preserve its file-and-line citations.",
+        "If the repository knowledge index is empty or stale, use knowledge_index on relevant paths, then use knowledge_search and preserve its file-and-line citations.",
       ]),
     };
   }

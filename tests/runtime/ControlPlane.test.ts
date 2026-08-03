@@ -508,6 +508,10 @@ function frame(overrides: Partial<TaskFrame> = {}): TaskFrame {
     version: 1,
     objective: "Complete the current request.",
     target: "MIXED",
+    productCapability: {
+      act: "NONE",
+      capabilityIds: [],
+    },
     effects: {
       answer: true,
       repositoryRead: false,

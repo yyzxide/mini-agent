@@ -50,7 +50,7 @@ export interface ToolAnnotations {
 
 export interface ToolMetadata {
   source?: ToolSource;
-  category?: "filesystem" | "search" | "git" | "patch" | "command" | "web" | "external";
+  category?: "filesystem" | "search" | "knowledge" | "skill" | "git" | "patch" | "command" | "web" | "external";
   annotations?: Partial<ToolAnnotations>;
 }
 

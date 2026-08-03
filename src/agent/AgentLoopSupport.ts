@@ -196,6 +196,7 @@ export function isRedundantSuccessfulWebToolCall(
 export function isRedundantSuccessfulIdempotentToolCall(
   state: AgentState,
   tool: ToolSpec | undefined,
+  availableTools: ToolSpec[],
   toolName: string,
   input: JsonObject,
 ): boolean {
@@ -234,7 +235,23 @@ export function isRedundantSuccessfulIdempotentToolCall(
       decision.type === "APPLY_PATCH"
       || decision.type === "APPLY_DELEGATED_PATCH"
       || decision.type === "RUN_COMMAND"
+      || (decision.type === "TOOL_CALL" && successfulStateChangingToolCall(state, availableTools, decision))
     ));
+}
+
+function successfulStateChangingToolCall(
+  state: AgentState,
+  availableTools: ToolSpec[],
+  decision: Extract<AgentDecision, { type: "TOOL_CALL" }>,
+): boolean {
+  const spec = availableTools.find((candidate) => candidate.name === decision.toolName);
+  if (spec?.annotations?.readOnlyHint === true) return false;
+  const inputKey = JSON.stringify(sortJsonValue(decision.input));
+  return state.toolResults.some((result) => (
+    result.toolName === decision.toolName
+    && result.result.success
+    && JSON.stringify(sortJsonValue(result.input)) === inputKey
+  ));
 }
 
 export function isRecoverableLlmProtocolFailure(error: string): boolean {

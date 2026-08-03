@@ -1,11 +1,9 @@
 import { z } from "zod";
+import { WEB_SEARCH_PROVIDER_NAMES } from "../config/AgentConfig.js";
 import { PermissionLevel } from "../permission/PermissionLevel.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure, toolSuccess } from "./Tool.js";
-import {
-  createDuckDuckGoSearchProvider,
-  type DuckDuckGoProviderName,
-} from "./DuckDuckGoSearchProvider.js";
+import { createDuckDuckGoSearchProvider } from "./DuckDuckGoSearchProvider.js";
 import type {
   WebSearchProviderAdapter,
   WebSearchResult,
@@ -24,7 +22,7 @@ const DEFAULT_MAX_RESULTS = 5;
 const HARD_MAX_RESULTS = 10;
 const CANDIDATE_POOL_MAX = 30;
 
-const WEB_SEARCH_PROVIDERS = ["auto", "duckduckgo_html", "duckduckgo_lite"] as const;
+const WEB_SEARCH_PROVIDERS = ["auto", ...WEB_SEARCH_PROVIDER_NAMES] as const;
 type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
 const webSearchInputSchema = z.object({
@@ -46,6 +44,7 @@ export interface WebSearchData {
 
 export interface WebSearchToolOptions {
   providers?: WebSearchProviderAdapter[];
+  providerOrder?: string[];
 }
 
 /**
@@ -69,6 +68,7 @@ export class WebSearchTool implements Tool<WebSearchInput, WebSearchData> {
   };
 
   private readonly providers: Map<string, WebSearchProviderAdapter>;
+  private readonly providerOrder: string[];
 
   constructor(options: WebSearchToolOptions = {}) {
     const configured = options.providers ?? [
@@ -76,10 +76,11 @@ export class WebSearchTool implements Tool<WebSearchInput, WebSearchData> {
       createDuckDuckGoSearchProvider("duckduckgo_lite"),
     ];
     this.providers = new Map(configured.map((provider) => [provider.name, provider]));
+    this.providerOrder = options.providerOrder ?? configured.map((provider) => provider.name);
   }
 
   async execute(input: WebSearchInput, _context: ToolContext): Promise<ToolResult<WebSearchData>> {
-    const providerOrder = resolveProviderOrder(input.provider)
+    const providerOrder = resolveProviderOrder(input.provider, this.providerOrder)
       .map((name) => this.providers.get(name))
       .filter((provider): provider is WebSearchProviderAdapter => provider !== undefined);
     const pipeline = await runWebSearchPipeline({
@@ -129,9 +130,9 @@ export class WebSearchTool implements Tool<WebSearchInput, WebSearchData> {
   }
 }
 
-function resolveProviderOrder(provider: WebSearchProvider): DuckDuckGoProviderName[] {
+function resolveProviderOrder(provider: WebSearchProvider, configuredOrder: string[]): string[] {
   return provider === "auto"
-    ? ["duckduckgo_html", "duckduckgo_lite"]
+    ? configuredOrder
     : [provider];
 }
 

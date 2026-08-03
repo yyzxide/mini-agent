@@ -49,3 +49,40 @@ export interface McpCallToolResult {
   isError?: boolean;
   [key: string]: unknown;
 }
+
+export interface McpRemoteResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface McpReadResourceResult {
+  contents: Array<{
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+  }>;
+}
+
+export interface McpRemotePrompt {
+  name: string;
+  description?: string;
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+}
+
+export interface McpGetPromptResult {
+  description?: string;
+  messages: unknown[];
+}
+
+export interface McpServerMetadata {
+  protocolVersion: string;
+  capabilities: Record<string, unknown>;
+  serverInfo?: {
+    name: string;
+    version: string;
+  };
+  instructions?: string;
+}

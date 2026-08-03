@@ -136,6 +136,7 @@ export interface AgentRunResult {
   finalDiff: string;
   steps: number;
   error?: string;
+  failureCode?: string;
   delegationBatches?: number;
   subAgents?: number;
   taskKind: AgentTaskContract["kind"];
@@ -390,7 +391,7 @@ export class AgentLoop {
       ].join(" ");
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
-      return await this.fail(state, error, input);
+      return await this.fail(state, error, input, "TASK_FRAME_UNRESOLVED");
     }
     await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
@@ -507,7 +508,7 @@ export class AgentLoop {
           ? `Agent repeated a decision without resolving the active guardrail: ${state.lastError}`
           : "Agent repeated the same decision too many times";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "REPEATED_DECISION");
       }
 
       const progressBefore = completionProgressFingerprint(state);
@@ -553,7 +554,7 @@ export class AgentLoop {
       if (repeatedFailedDecisionCount >= 2) {
         const error = `Agent repeated a failed decision without resolving the active error. ${state.lastError ?? "No failure detail was recorded."}`;
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "REPEATED_FAILED_DECISION");
       }
 
       if (consecutiveSameGuardrailFailures > MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES) {
@@ -562,7 +563,7 @@ export class AgentLoop {
           state.lastError ?? "No recovery detail was recorded.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "REPEATED_GUARDRAIL");
       }
       const recurringGuardrail = [...recurringGuardrailFailures.entries()]
         .find(([, count]) => count >= MAX_RECURRING_GUARDRAIL_FAILURES_WITHOUT_PROGRESS);
@@ -572,12 +573,12 @@ export class AgentLoop {
           state.lastError ?? "No recovery detail was recorded.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "RECURRING_GUARDRAIL");
       }
       if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
         const error = "Agent failed too many consecutive steps";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "CONSECUTIVE_FAILURES");
       }
 
       state.incrementStep();
@@ -588,7 +589,7 @@ export class AgentLoop {
       ? `Agent stopped after reaching max steps (${state.maxSteps}). Last unresolved issue: ${state.lastError}`
       : `Agent stopped after reaching max steps (${state.maxSteps})`;
     await this.recordError(sessionId, error);
-    return await this.fail(state, error, input);
+    return await this.fail(state, error, input, "STEP_LIMIT_REACHED");
   }
 
   private async handleDecision(
@@ -650,6 +651,7 @@ export class AgentLoop {
         if (isRedundantSuccessfulIdempotentToolCall(
           state,
           this.availableTools.find((tool) => tool.name === decision.toolName),
+          this.availableTools,
           decision.toolName,
           decision.input,
         )) {
@@ -657,7 +659,7 @@ export class AgentLoop {
           return {
             failed: await this.recordCapabilityViolation(
               state,
-              `${code}: ${decision.toolName} already succeeded with the same input and no patch or command has changed the observable state; use the existing result or choose materially different input`,
+              `${code}: ${decision.toolName} already succeeded with the same input and no intervening action has changed observable state; use the existing result or choose materially different input`,
             ),
             failureKind: "GUARDRAIL",
             guardrailCode: code,
@@ -750,7 +752,7 @@ export class AgentLoop {
           ?? { failed: false, result: await this.finish(state, decision.summary, decision.success, input) };
 
       case "FAILED":
-        return { failed: true, result: await this.fail(state, decision.error, input) };
+        return { failed: true, result: await this.fail(state, decision.error, input, "MODEL_REPORTED_FAILURE") };
     }
   }
 
@@ -953,7 +955,7 @@ export class AgentLoop {
           "The parent worktree was not modified as a fallback.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
-        return { failed: true, result: await this.fail(state, error, input) };
+        return { failed: true, result: await this.fail(state, error, input, "REQUIRED_DELEGATION_EXHAUSTED") };
       }
       return { failed };
     }
@@ -1169,7 +1171,7 @@ export class AgentLoop {
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
       if (result.error?.code === "PATCH_PERMISSION_DENIED") {
-        return { failed: true, result: await this.fail(state, error, input) };
+        return { failed: true, result: await this.fail(state, error, input, "PATCH_PERMISSION_DENIED") };
       }
       return { failed: true };
     }
@@ -1213,7 +1215,15 @@ export class AgentLoop {
       const message = error.message;
       state.setLastError(message);
       await this.recordError(state.sessionId, message, error);
-      return { failed: true, result: await this.fail(state, message, input) };
+      return {
+        failed: true,
+        result: await this.fail(
+          state,
+          message,
+          input,
+          permission.mode === "BLOCKED" ? "COMMAND_BLOCKED" : "COMMAND_PERMISSION_DENIED",
+        ),
+      };
     }
 
     const timeoutMs = commandInput.timeoutMs ?? this.commandRunner.defaultTimeoutMs;
@@ -1274,7 +1284,7 @@ export class AgentLoop {
       state.status = "WAITING_USER";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
-      return { failed: true, result: await this.fail(state, error, input) };
+      return { failed: true, result: await this.fail(state, error, input, "USER_INPUT_REQUIRED") };
     }
 
     state.status = "WAITING_USER";
@@ -1392,7 +1402,12 @@ export class AgentLoop {
     };
   }
 
-  private async fail(state: AgentState, error: string, input?: AgentRunInput): Promise<AgentRunResult> {
+  private async fail(
+    state: AgentState,
+    error: string,
+    input?: AgentRunInput,
+    failureCode = "UNKNOWN_FAILURE",
+  ): Promise<AgentRunResult> {
     state.markFailed(error);
     const finalDiff = state.operatingMode === "PLAN" || !state.taskContract.capabilities.repositoryWrite
       ? ""
@@ -1428,13 +1443,14 @@ export class AgentLoop {
       type: "TASK_FAILED",
       payload: {
         error,
+        failureCode,
         steps: state.step,
       },
     });
     if (input?.keepSessionActive !== true) {
       await this.sessionStore.updateSessionStatus(state.sessionId, "FAILED");
     }
-    await this.emit({ type: "error", message: error });
+    await this.emit({ type: "error", code: failureCode, message: error });
 
     return {
       sessionId: state.sessionId,
@@ -1443,6 +1459,7 @@ export class AgentLoop {
       finalDiff,
       steps: state.step,
       error,
+      failureCode,
       taskKind: state.taskContract.kind,
       outputKind: state.taskContract.outputKind,
       resultMode: state.taskContract.resultMode,
@@ -1590,11 +1607,13 @@ export class AgentLoop {
       answer: text,
     });
     if (!correction.corrected) return text;
-    const capabilities = correction.conflicts.join(",");
-    const message = `Model capability claim contradicted the local Capability Registry and was replaced (${capabilities}).`;
+    const capabilities = correction.capabilities.length > 0
+      ? correction.capabilities.join(",")
+      : "ALL";
+    const message = `Product capability answer was grounded in the local Capability Registry (${capabilities}).`;
     await this.eventStore.appendEvent(state.sessionId, {
       type: "CAPABILITY_CLAIM_CORRECTED",
-      payload: { capabilities: correction.conflicts, message },
+      payload: { capabilities: correction.capabilities, message },
     });
     await this.emit({ type: "guardrail", code: "CAPABILITY_CLAIM_CORRECTED", message });
     return correction.text;

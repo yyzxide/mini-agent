@@ -27,6 +27,26 @@ export interface RagConfig {
   maxContextChars?: number | undefined;
 }
 
+export const WEB_SEARCH_PROVIDER_NAMES = [
+  "brave",
+  "duckduckgo_html",
+  "duckduckgo_lite",
+] as const;
+
+export type WebSearchProviderName = typeof WEB_SEARCH_PROVIDER_NAMES[number];
+
+export interface WebSearchConfig {
+  providerOrder?: WebSearchProviderName[] | undefined;
+  brave?: {
+    apiKey?: string | undefined;
+    apiKeyEnv?: string | undefined;
+    endpoint?: string | undefined;
+    country?: string | undefined;
+    searchLang?: string | undefined;
+    safeSearch?: "off" | "moderate" | "strict" | undefined;
+  } | undefined;
+}
+
 export interface MultiAgentConfig {
   mode?: "off" | "auto" | undefined;
   maxConcurrency?: number | undefined;
@@ -44,12 +64,14 @@ export interface AgentConfig {
   createdAt?: string | undefined;
   llm?: LlmConfig | undefined;
   mcp?: { servers: McpServerConfig[] } | undefined;
+  webSearch?: WebSearchConfig | undefined;
   rag?: RagConfig | undefined;
   multiAgent?: MultiAgentConfig | undefined;
 }
 
 export interface InitAgentConfigInput {
   llm?: LlmConfig;
+  webSearch?: WebSearchConfig;
 }
 
 export interface LlmCliOverrides {
@@ -68,6 +90,17 @@ export interface ResolvedLlmConfig {
     thinkingMode?: ThinkingMode;
     timeoutMs?: number;
   };
+}
+
+export function resolveWebSearchProviderOrder(config: AgentConfig): WebSearchProviderName[] {
+  return config.webSearch?.providerOrder ?? ["duckduckgo_html", "duckduckgo_lite"];
+}
+
+export function resolveBraveSearchApiKey(config: AgentConfig): string | undefined {
+  const brave = config.webSearch?.brave;
+  return brave?.apiKey
+    ?? (brave?.apiKeyEnv ? process.env[brave.apiKeyEnv] : undefined)
+    ?? process.env.BRAVE_SEARCH_API_KEY;
 }
 
 const llmConfigSchema = z.object({
@@ -89,6 +122,19 @@ const agentConfigSchema = z.object({
   llm: llmConfigSchema.optional(),
   mcp: z.object({
     servers: z.array(McpServerConfigSchema).default([]),
+  }).strict().optional(),
+  webSearch: z.object({
+    providerOrder: z.array(z.enum(WEB_SEARCH_PROVIDER_NAMES)).min(1)
+      .refine((value) => new Set(value).size === value.length, "Web search providerOrder entries must be unique")
+      .optional(),
+    brave: z.object({
+      apiKey: z.string().min(1).optional(),
+      apiKeyEnv: z.string().trim().min(1).optional(),
+      endpoint: z.string().url().optional(),
+      country: z.string().regex(/^[A-Za-z]{2}$/).transform((value) => value.toUpperCase()).optional(),
+      searchLang: z.string().regex(/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{2,8})?$/).optional(),
+      safeSearch: z.enum(["off", "moderate", "strict"]).optional(),
+    }).strict().optional(),
   }).strict().optional(),
   rag: z.object({
     topK: z.number().int().min(1).max(20).optional(),
@@ -159,6 +205,15 @@ export async function initAgentConfig(repoPath: string, input: InitAgentConfigIn
     repoPath: existing.repoPath ?? repoPath,
     createdAt: existing.createdAt ?? now,
     ...(input.llm ? { llm: normalizeLlmConfig({ ...existing.llm, ...input.llm }) } : {}),
+    ...(input.webSearch ? {
+      webSearch: normalizeWebSearchConfig({
+        ...existing.webSearch,
+        ...input.webSearch,
+        ...(input.webSearch.brave || existing.webSearch?.brave ? {
+          brave: { ...existing.webSearch?.brave, ...input.webSearch.brave },
+        } : {}),
+      }),
+    } : {}),
   };
 
   await writeJsonFileAtomic(resolveRepoPath(repoPath, USER_CONFIG_FILE), config);
@@ -208,16 +263,27 @@ export function resolveLlmConfig(config: AgentConfig, overrides: LlmCliOverrides
 }
 
 export function redactAgentConfig(config: AgentConfig): AgentConfig {
-  if (!config.llm?.apiKey) {
+  if (!config.llm?.apiKey && !config.webSearch?.brave?.apiKey) {
     return config;
   }
 
   return {
     ...config,
-    llm: {
-      ...config.llm,
-      apiKey: "<redacted>",
-    },
+    ...(config.llm?.apiKey ? {
+      llm: {
+        ...config.llm,
+        apiKey: "<redacted>",
+      },
+    } : {}),
+    ...(config.webSearch?.brave?.apiKey ? {
+      webSearch: {
+        ...config.webSearch,
+        brave: {
+          ...config.webSearch.brave,
+          apiKey: "<redacted>",
+        },
+      },
+    } : {}),
   };
 }
 
@@ -229,6 +295,16 @@ function normalizeLlmConfig(config: LlmConfig): LlmConfig {
   }
 
   return parsed.data as LlmConfig;
+}
+
+function normalizeWebSearchConfig(config: WebSearchConfig): WebSearchConfig {
+  const schema = agentConfigSchema.shape.webSearch.unwrap();
+  const parsed = schema.safeParse(config);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`Invalid Web Search config${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}`);
+  }
+  return parsed.data as WebSearchConfig;
 }
 
 async function findAgentConfigPath(repoPath: string): Promise<string | undefined> {

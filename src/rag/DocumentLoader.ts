@@ -10,7 +10,16 @@ import {
 } from "../utils/fs.js";
 import type { RagDocument, RagLoadResult, RagSkippedPath } from "./RagTypes.js";
 
-const SUPPORTED_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
+export const RAG_TEXT_EXTENSIONS = [
+  ".md", ".markdown", ".txt", ".adoc", ".rst",
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".go", ".rs", ".java", ".kt", ".kts", ".cs",
+  ".c", ".cc", ".cpp", ".h", ".hpp",
+  ".sh", ".bash", ".zsh", ".sql", ".graphql", ".gql", ".proto",
+  ".html", ".htm", ".css", ".scss", ".xml",
+  ".json", ".jsonc", ".yaml", ".yml", ".toml",
+] as const;
+const SUPPORTED_EXTENSIONS = new Set<string>(RAG_TEXT_EXTENSIONS);
 const DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 export class RagDocumentLoader {
@@ -45,11 +54,17 @@ export class RagDocumentLoader {
         skipped.push({ path: relativePath, reason: "FILE_TOO_LARGE" });
         continue;
       }
-      const text = (await fs.readFile(filePath, "utf8")).replace(/\r\n?/g, "\n").trim();
+      const content = await fs.readFile(filePath);
+      if (content.includes(0)) {
+        skipped.push({ path: relativePath, reason: "BINARY_CONTENT" });
+        continue;
+      }
+      const text = content.toString("utf8").replace(/\r\n?/g, "\n").trim();
       if (!text) continue;
+      const extension = path.extname(relativePath).toLowerCase();
       documents.push({
         source: relativePath,
-        title: extractTitle(text, relativePath),
+        title: extractTitle(text, relativePath, extension),
         text,
         sourceHash: hashText(text),
         tags: normalizedTags,
@@ -83,8 +98,10 @@ export class RagDocumentLoader {
   }
 }
 
-function extractTitle(text: string, source: string): string {
-  const heading = text.split("\n").map((line) => /^#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.trim()).find(Boolean);
+function extractTitle(text: string, source: string, extension: string): string {
+  const heading = extension === ".md" || extension === ".markdown"
+    ? text.split("\n").map((line) => /^#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.trim()).find(Boolean)
+    : undefined;
   return heading ?? path.basename(source, path.extname(source));
 }
 

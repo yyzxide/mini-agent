@@ -51,6 +51,8 @@ describe("CapabilityNegotiator", () => {
       "web_search",
       "fetch_url",
       "knowledge_search",
+      "knowledge_index",
+      "skill_read",
     ]));
     expect(names).not.toContain("apply_patch");
   });

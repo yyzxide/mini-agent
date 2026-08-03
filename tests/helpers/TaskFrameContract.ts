@@ -9,6 +9,7 @@ import { compileTaskFrameContract } from "../../src/runtime/TaskFrameContract.js
 export interface TestTaskFrameOptions {
   objective: string;
   target?: TaskFrame["target"];
+  productCapability?: Partial<TaskFrame["productCapability"]>;
   answer?: Partial<TaskFrame["answer"]>;
   effects?: Partial<TaskFrame["effects"]>;
   webEvidencePolicy?: Partial<TaskFrame["webEvidencePolicy"]>;
@@ -27,6 +28,10 @@ export function createTestTaskFrame(options: TestTaskFrameOptions): TaskFrame {
     version: 1,
     objective: options.objective,
     target: options.target ?? "DERIVATION",
+    productCapability: {
+      act: options.productCapability?.act ?? "NONE",
+      capabilityIds: options.productCapability?.capabilityIds ?? [],
+    },
     answer: {
       shape: options.answer?.shape ?? "FREEFORM",
       depth: options.answer?.depth ?? "BALANCED",

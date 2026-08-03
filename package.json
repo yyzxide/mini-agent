@@ -20,16 +20,16 @@
     "check:docs": "node scripts/check-docs.mjs",
     "check:cli": "node scripts/check-cli-entry.mjs",
     "check:bench": "node dist/cli/index.js bench run benchmarks/agent-bench-v1.json --baseline benchmarks/baselines/core-v1.json",
-    "build": "npm run clean --silent && tsc -p tsconfig.json && node scripts/finalize-build.mjs",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/finalize-build.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:regression": "vitest run tests/cli-regression.test.ts tests/cli-real-api-regressions.test.ts",
-    "bench": "npm run build --silent && npm run check:bench --silent",
+    "bench": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/finalize-build.mjs && node dist/cli/index.js bench run benchmarks/agent-bench-v1.json --baseline benchmarks/baselines/core-v1.json",
     "start": "node dist/cli/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:unused": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
-    "verify": "npm run check:architecture && npm run check:exports && npm run check:docs && npm run build && npm run check:cli && npm run check:bench && npm run lint:unused && npm test",
-    "verify:regression": "npm run check:architecture && npm run check:exports && npm run check:docs && npm run build && npm run check:cli && npm run test:regression"
+    "verify": "node scripts/check-architecture.mjs && node scripts/check-exports.mjs && node scripts/check-docs.mjs && node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/finalize-build.mjs && node scripts/check-cli-entry.mjs && node dist/cli/index.js bench run benchmarks/agent-bench-v1.json --baseline benchmarks/baselines/core-v1.json && tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters && vitest run",
+    "verify:regression": "node scripts/check-architecture.mjs && node scripts/check-exports.mjs && node scripts/check-docs.mjs && node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/finalize-build.mjs && node scripts/check-cli-entry.mjs && vitest run tests/cli-regression.test.ts tests/cli-real-api-regressions.test.ts"
   },
   "keywords": [
     "agent",

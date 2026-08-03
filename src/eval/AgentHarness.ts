@@ -39,6 +39,8 @@ export interface AgentHarnessScenario {
   tags?: string[];
   userGoal: string;
   files?: Record<string, string>;
+  /** Files present in the workspace but intentionally absent from the Git index. */
+  untrackedFiles?: Record<string, string>;
   decisions?: AgentDecision[];
   maxSteps?: number;
   operatingMode?: AgentOperatingMode;
@@ -180,7 +182,7 @@ export class AgentHarness {
       durationMs,
       ...telemetry,
       ...(!run.success || expectationFailures.length > 0
-        ? { failureCategory: classifyFailure(run.error, expectationFailures) }
+        ? { failureCategory: classifyFailure(run.failureCode, expectationFailures) }
         : {}),
     };
 
@@ -243,6 +245,10 @@ function createScriptedScenarioTaskFrame(scenario: AgentHarnessScenario): TaskFr
     version: 1,
     objective: scenario.userGoal,
     target: repositoryWrite || repositoryRead ? "REPOSITORY" : "DERIVATION",
+    productCapability: {
+      act: "NONE",
+      capabilityIds: [],
+    },
     answer: {
       shape: "FREEFORM",
       depth: "BALANCED",
@@ -361,6 +367,12 @@ async function createScenarioRepo(scenario: AgentHarnessScenario): Promise<strin
 
   if (Object.keys(scenario.files ?? {}).length > 0) {
     await execFileAsync("git", ["add", "."], { cwd: repoPath });
+  }
+
+  for (const [relativePath, content] of Object.entries(scenario.untrackedFiles ?? {})) {
+    const filePath = path.join(repoPath, relativePath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content, "utf8");
   }
 
   return repoPath;
@@ -502,6 +514,10 @@ function collectHarnessTelemetry(
     && typeof record.payload.command === "string"
     && isVerificationCommand(record.payload.command)
   ));
+  const fileVerificationResults = records.filter((record) => (
+    record.type === "TOOL_RESULT"
+    && record.payload.toolName === "verify_file"
+  ));
   return {
     promptTokens: sumPayloadNumber(usage, "promptTokens"),
     completionTokens: sumPayloadNumber(usage, "completionTokens"),
@@ -515,8 +531,10 @@ function collectHarnessTelemetry(
     contextTruncationRate: ratio(contextSectionsTruncated, contextSectionsSelected),
     testsPassed,
     testsFailed,
-    verificationsPassed: verificationResults.filter((record) => record.payload.success === true).length,
-    verificationsFailed: verificationResults.filter((record) => record.payload.success !== true).length,
+    verificationsPassed: verificationResults.filter((record) => record.payload.success === true).length
+      + fileVerificationResults.filter((record) => record.payload.success === true).length,
+    verificationsFailed: verificationResults.filter((record) => record.payload.success !== true).length
+      + fileVerificationResults.filter((record) => record.payload.success !== true).length,
   };
 }
 
@@ -536,15 +554,16 @@ function ratio(numerator: number, denominator: number): number {
 }
 
 function classifyFailure(
-  error: string | undefined,
+  failureCode: string | undefined,
   expectationFailures: string[],
 ): NonNullable<AgentHarnessMetrics["failureCategory"]> {
+  if (failureCode) {
+    if (["TASK_FRAME_UNRESOLVED", "MODEL_REPORTED_FAILURE"].includes(failureCode)) return "MODEL";
+    if (["COMMAND_BLOCKED", "COMMAND_PERMISSION_DENIED", "PATCH_PERMISSION_DENIED"].includes(failureCode)) return "PERMISSION";
+    if (["REPEATED_DECISION", "REPEATED_FAILED_DECISION", "REPEATED_GUARDRAIL", "RECURRING_GUARDRAIL", "CONSECUTIVE_FAILURES"].includes(failureCode)) return "LOOP_GUARD";
+    if (failureCode === "STEP_LIMIT_REACHED") return "STEP_LIMIT";
+    if (failureCode === "REQUIRED_DELEGATION_EXHAUSTED") return "TOOL";
+  }
   if (expectationFailures.length > 0) return "EXPECTATION";
-  const normalized = error?.toLowerCase() ?? "";
-  if (normalized.includes("permission") || normalized.includes("denied")) return "PERMISSION";
-  if (normalized.includes("repeated") || normalized.includes("consecutive")) return "LOOP_GUARD";
-  if (normalized.includes("max steps") || normalized.includes("reaching max")) return "STEP_LIMIT";
-  if (normalized.includes("tool")) return "TOOL";
-  if (normalized.includes("model") || normalized.includes("llm")) return "MODEL";
   return "UNKNOWN";
 }

@@ -6,6 +6,7 @@ import { HttpMcpClient } from "../../src/mcp/HttpMcpClient.js";
 import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
 import { McpRemoteTool as McpRemoteToolAdapter } from "../../src/mcp/McpRemoteTool.js";
 import { PermissionManager } from "../../src/permission/PermissionManager.js";
+import { parseInitializeResult } from "../../src/mcp/McpClient.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -43,6 +44,22 @@ describe("MCP tool bridge", () => {
     });
 
     expect(() => McpServerConfigSchema.parse({ name: "broken" })).toThrow();
+  });
+
+  it("validates the negotiated initialize result and rejects unsupported protocol versions", () => {
+    expect(parseInitializeResult({
+      protocolVersion: "2025-11-25",
+      capabilities: { tools: {}, resources: {} },
+      serverInfo: { name: "fixture", version: "1" },
+    })).toMatchObject({
+      protocolVersion: "2025-11-25",
+      capabilities: { tools: {}, resources: {} },
+      serverInfo: { name: "fixture", version: "1" },
+    });
+    expect(() => parseInitializeResult({
+      protocolVersion: "2026-07-28",
+      capabilities: { tools: {} },
+    })).toThrow(/protocol version unsupported/i);
   });
 
   it("requires an exact interactive approval for a mutating MCP tool", async () => {
@@ -128,6 +145,11 @@ describe("MCP tool bridge", () => {
       await expect(client.callTool("echo", { text: "hello" })).resolves.toMatchObject({
         structuredContent: { echo: "hello" },
       });
+      expect(client.getServerMetadata()).toMatchObject({
+        protocolVersion: "2025-11-25",
+        capabilities: { tools: {} },
+        serverInfo: { name: "fixture", version: "1" },
+      });
     } finally {
       await client.close();
     }
@@ -147,11 +169,22 @@ describe("MCP tool bridge", () => {
       if (message.method === "notifications/initialized") {
         return new Response(null, { status: 202 });
       }
-      const result = message.method === "initialize"
-        ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "http", version: "1" } }
-        : message.method === "tools/list"
-          ? { tools: [{ name: "echo", inputSchema: { type: "object" } }] }
-          : { structuredContent: message.params?.arguments };
+      let result: unknown;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-11-25", capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: "http", version: "1" } };
+      } else if (message.method === "tools/list") {
+        result = { tools: [{ name: "echo", inputSchema: { type: "object" } }] };
+      } else if (message.method === "resources/list") {
+        result = { resources: [{ uri: "docs://guide", name: "Guide" }] };
+      } else if (message.method === "resources/read") {
+        result = { contents: [{ uri: "docs://guide", mimeType: "text/plain", text: "External guide" }] };
+      } else if (message.method === "prompts/list") {
+        result = { prompts: [{ name: "review", arguments: [{ name: "target", required: true }] }] };
+      } else if (message.method === "prompts/get") {
+        result = { description: "Review prompt", messages: [{ role: "user", content: { type: "text", text: "Review target" } }] };
+      } else {
+        result = { structuredContent: message.params?.arguments };
+      }
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
         status: 200,
         headers: {
@@ -168,7 +201,15 @@ describe("MCP tool bridge", () => {
     try {
       await expect(client.listTools()).resolves.toEqual([expect.objectContaining({ name: "echo" })]);
       await expect(client.callTool("echo", { value: 42 })).resolves.toMatchObject({ structuredContent: { value: 42 } });
+      await expect(client.listResources()).resolves.toEqual([expect.objectContaining({ uri: "docs://guide" })]);
+      await expect(client.readResource("docs://guide")).resolves.toMatchObject({ contents: [{ text: "External guide" }] });
+      await expect(client.listPrompts()).resolves.toEqual([expect.objectContaining({ name: "review" })]);
+      await expect(client.getPrompt("review", { target: "src" })).resolves.toMatchObject({ description: "Review prompt" });
       expect(seenSessions.slice(1)).toEqual(expect.arrayContaining(["fixture-session"]));
+      expect(client.getServerMetadata()).toMatchObject({
+        protocolVersion: "2025-11-25",
+        capabilities: { tools: {}, resources: {}, prompts: {} },
+      });
     } finally {
       await client.close();
     }

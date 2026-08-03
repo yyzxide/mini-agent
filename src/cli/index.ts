@@ -80,6 +80,7 @@ import {
   parsePositiveNumber,
   parseProbability,
   parseThinkingMode,
+  parseWebSearchProviders,
   readPatchInput,
 } from "./CliParsers.js";
 
@@ -172,6 +173,12 @@ interface ConfigInitOptions {
   maxTokens?: number;
   thinkingMode?: "auto" | "enabled" | "disabled";
   timeoutMs?: number;
+  webProviders?: Array<"brave" | "duckduckgo_html" | "duckduckgo_lite">;
+  braveApiKey?: string;
+  braveApiKeyEnv?: string;
+  braveCountry?: string;
+  braveSearchLang?: string;
+  braveSafeSearch?: "off" | "moderate" | "strict";
 }
 
 export function createProgram(): Command {
@@ -270,6 +277,12 @@ export function createProgram(): Command {
     .option("--max-tokens <number>", "Maximum output tokens", parsePositiveInteger)
     .option("--thinking-mode <mode>", "Provider thinking mode: auto, enabled, or disabled", parseThinkingMode)
     .option("--timeout-ms <number>", "LLM request timeout in milliseconds", parsePositiveInteger)
+    .option("--web-providers <providers>", "Comma-separated Web Search provider order", parseWebSearchProviders)
+    .option("--brave-api-key <key>", "Brave Search API key stored in mini-agent.config.json")
+    .option("--brave-api-key-env <name>", "Environment variable name that stores the Brave Search API key")
+    .option("--brave-country <code>", "Brave Search two-letter country code")
+    .option("--brave-search-lang <language>", "Brave Search language code")
+    .option("--brave-safe-search <mode>", "Brave safe search: off, moderate, or strict")
     .action(async (options: ConfigInitOptions) => {
       await runJsonAction(async () => {
         const config = await initAgentConfig(process.cwd(), {
@@ -284,6 +297,27 @@ export function createProgram(): Command {
             ...(options.thinkingMode === undefined ? {} : { thinkingMode: options.thinkingMode }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
           },
+          ...(
+            options.webProviders
+            || options.braveApiKey
+            || options.braveApiKeyEnv
+            || options.braveCountry
+            || options.braveSearchLang
+            || options.braveSafeSearch
+              ? {
+                  webSearch: {
+                    ...(options.webProviders ? { providerOrder: options.webProviders } : {}),
+                    brave: {
+                      ...(options.braveApiKey ? { apiKey: options.braveApiKey } : {}),
+                      ...(options.braveApiKeyEnv ? { apiKeyEnv: options.braveApiKeyEnv } : {}),
+                      ...(options.braveCountry ? { country: options.braveCountry } : {}),
+                      ...(options.braveSearchLang ? { searchLang: options.braveSearchLang } : {}),
+                      ...(options.braveSafeSearch ? { safeSearch: options.braveSafeSearch } : {}),
+                    },
+                  },
+                }
+              : {}
+          ),
         });
 
         writeJson(redactAgentConfig(config));

@@ -189,6 +189,9 @@ describe("OpenAICompatibleClient", () => {
     };
     expect(body.messages[0]?.content).toContain("semantic TaskFrame compiler");
     expect(body.messages[0]?.content).toContain("Return one JSON object only");
+    expect(body.messages[0]?.content).toContain("productCapability.act");
+    expect(body.messages[0]?.content).toContain("MCP_TOOL_RUNTIME");
+    expect(body.messages[0]?.content).toContain("AGENT_EVALUATION");
   });
 
   it("preserves recent conversation as role-separated messages", async () => {

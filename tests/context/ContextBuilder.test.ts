@@ -168,6 +168,28 @@ describe("ContextBuilder", () => {
     expect(context).toContain("Run targeted Vitest tests");
   });
 
+  it("exposes a bounded skill catalog even when lexical preselection does not match", async () => {
+    const skillPath = path.join(repoPath, "skills", "release-audit", "SKILL.md");
+    await fs.mkdir(path.dirname(skillPath), { recursive: true });
+    await fs.writeFile(skillPath, [
+      "---",
+      "name: release-audit",
+      "description: Verify package publication readiness",
+      "triggers: publish",
+      "---",
+      "",
+      "Inspect the release checklist.",
+    ].join("\n"), "utf8");
+    const session = await new SessionStore({ repoPath }).createSession({ title: "skill discovery" });
+    const state = new AgentState({ sessionId: session.sessionId, repoPath, userGoal: "检查交付前的准备情况" });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
+    expect(context).toContain("Skill catalog:");
+    expect(context).toContain("release-audit: Verify package publication readiness");
+    expect(context).toContain("Use skill_read");
+    expect(context).not.toContain("Selected skills:");
+  });
+
   it("keeps task diagnostics and diff under tight context budgets", async () => {
     const state = new AgentState({
       sessionId: "tight-budget-session",

@@ -478,6 +478,37 @@ describe("read-only repository tools", () => {
     expect(captcha).toMatchObject({ success: false, error: { code: "FETCH_URL_CONTENT_UNUSABLE" } });
   });
 
+  it("fetch_url rejects HTTP-200 soft 404 and empty pages as unusable evidence", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const registry = createDefaultToolRegistry();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        "<html><head><title>404 - Page Not Found</title></head><body>The page has moved.</body></html>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        "<html><head></head><body><script>renderApp()</script></body></html>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const soft404 = await registry.execute("fetch_url", {
+      url: "https://example.com/missing-soft",
+    }, fetchUrlContext());
+    const empty = await registry.execute("fetch_url", {
+      url: "https://example.com/empty",
+    }, fetchUrlContext());
+
+    expect(soft404).toMatchObject({
+      success: false,
+      error: { code: "FETCH_URL_CONTENT_UNUSABLE", details: { reason: "soft 404 or removed-content page" } },
+    });
+    expect(empty).toMatchObject({
+      success: false,
+      error: { code: "FETCH_URL_CONTENT_UNUSABLE", details: { reason: "empty readable response" } },
+    });
+  });
+
   it("fetch_url rejects non-success HTTP responses as evidence", async () => {
     vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", {

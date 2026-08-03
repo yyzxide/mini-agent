@@ -86,7 +86,8 @@ describe("AgentHarness", () => {
     expect(suite.total).toBe(2);
     expect(suite.passed).toBe(1);
     expect(suite.successRate).toBe(0.5);
-    expect(suite.failuresByCategory.EXPECTATION).toBe(1);
+    expect(suite.failuresByCategory.MODEL).toBe(1);
+    expect(suite.scenarios[1]?.run.failureCode).toBe("MODEL_REPORTED_FAILURE");
   });
 
   it("includes delegated child calls in cost metrics", async () => {

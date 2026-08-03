@@ -7,6 +7,7 @@ import { RagDocumentLoader } from "../src/rag/DocumentLoader.js";
 import { evaluateRag } from "../src/rag/RagEvaluator.js";
 import { RagStore } from "../src/rag/RagStore.js";
 import { createDefaultToolRegistry } from "../src/tools/ToolRegistry.js";
+import { PermissionManager } from "../src/permission/PermissionManager.js";
 
 class TestEmbeddingProvider implements EmbeddingProvider {
   constructor(readonly id = "test-embedding-v1") {}
@@ -129,6 +130,26 @@ describe("RAG knowledge base", () => {
     await expect(loader.load([path.dirname(repoPath)])).rejects.toThrow(/outside repository/i);
   });
 
+  it("loads source and configuration text while rejecting binary content with a supported extension", async () => {
+    await fs.mkdir(path.join(repoPath, "src"));
+    await fs.writeFile(
+      path.join(repoPath, "src", "policy.ts"),
+      "export function authorizeAction(capability: string): boolean {\n  return capability.length > 0;\n}\n",
+      "utf8",
+    );
+    await fs.writeFile(path.join(repoPath, "agent.yaml"), "agent:\n  mode: bounded\n", "utf8");
+    await fs.writeFile(path.join(repoPath, "src", "binary.ts"), Buffer.from([0, 1, 2, 3]));
+
+    const loaded = await new RagDocumentLoader({ repoPath }).load(["src", "agent.yaml"]);
+
+    expect(loaded.documents.map((document) => ({ source: document.source, title: document.title }))).toEqual([
+      { source: "agent.yaml", title: "agent" },
+      { source: "src/policy.ts", title: "policy" },
+    ]);
+    expect(loaded.documents[1]?.text).toContain("authorizeAction");
+    expect(loaded.skipped).toEqual([{ path: "src/binary.ts", reason: "BINARY_CONTENT" }]);
+  });
+
   it("evaluates answerability, hit rate, recall, and reciprocal rank", async () => {
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks can resume after interruption.\n", "utf8");
     const store = createStore();
@@ -148,6 +169,19 @@ describe("RAG knowledge base", () => {
       category: "search",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     });
+  });
+
+  it("lets the Agent build a derived index and then search it through registered tools", async () => {
+    await fs.writeFile(path.join(repoPath, "docs", "agent-rag.md"), "# Agent RAG\n\nAutonomous indexing enables grounded retrieval.\n", "utf8");
+    const registry = createDefaultToolRegistry();
+    const indexed = await registry.execute("knowledge_index", { paths: ["docs"] }, {
+      repoPath,
+      permissionManager: new PermissionManager({ prompt: async () => "yes" }),
+      autoApprove: true,
+    });
+    expect(indexed).toMatchObject({ success: true, data: { indexedFiles: 1 } });
+    const searched = await registry.execute("knowledge_search", { query: "autonomous indexing grounded retrieval" }, { repoPath });
+    expect(searched).toMatchObject({ success: true, data: { found: true } });
   });
 
   it("executes knowledge_search through the tool registry", async () => {

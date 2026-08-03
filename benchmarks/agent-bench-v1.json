@@ -1,12 +1,14 @@
 {
   "version": 1,
   "name": "mini-agent-core-v1",
-  "description": "Deterministic core benchmark for editing, recovery, guardrails, verification, and read-only planning.",
+  "description": "Deterministic core benchmark for editing, artifact provenance, untracked files, recovery, guardrails, verification, and read-only planning.",
   "repetitions": 1,
   "thresholds": {
     "minPassAt1": 1,
     "minRunPassRate": 1,
     "minToolChoiceAccuracy": 1,
+    "minAllRunsPassRate": 1,
+    "maxFlakyScenarios": 0,
     "maxAverageSteps": 5,
     "maxAverageLlmCalls": 6,
     "maxContextTruncationRate": 0.25
@@ -14,6 +16,8 @@
   "baselinePolicy": {
     "maxPassAt1Regression": 0,
     "maxRunPassRateRegression": 0,
+    "maxAllRunsPassRateRegression": 0,
+    "maxToolChoiceAccuracyRegression": 0,
     "maxAverageStepsIncreaseRatio": 0.1,
     "maxAverageLlmCallsIncreaseRatio": 0.1,
     "maxAverageTotalTokensIncreaseRatio": 0.2
@@ -289,6 +293,154 @@
         },
         "maxSteps": 3,
         "maxLlmCalls": 3
+      }
+    },
+    {
+      "id": "create-new-artifact-when-similar-file-exists",
+      "name": "Create a new artifact instead of claiming a pre-existing file",
+      "tags": ["artifact", "provenance", "html", "regression"],
+      "userGoal": "Write a new snake game. The existing snake.html is not an artifact from this turn.",
+      "files": {
+        "snake.html": "<!doctype html>\n<html>\n<head><title>Old Snake</title></head>\n<body><p>Existing game</p></body>\n</html>\n"
+      },
+      "decisions": [
+        {
+          "type": "TOOL_CALL",
+          "toolName": "read_file",
+          "input": {
+            "path": "snake.html"
+          },
+          "reason": "Confirm the existing artifact before choosing a distinct output path"
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Create a distinct new snake game artifact",
+          "patch": "diff --git a/snake-new.html b/snake-new.html\nnew file mode 100644\n--- /dev/null\n+++ b/snake-new.html\n@@ -0,0 +1,5 @@\n+<!doctype html>\n+<html>\n+<head><title>Snake Next</title></head>\n+<body><canvas id=\"game\"></canvas><script>const canvas = document.querySelector(\"#game\"); canvas.width = 400;</script></body>\n+</html>\n"
+        },
+        {
+          "type": "TOOL_CALL",
+          "toolName": "verify_file",
+          "input": {
+            "path": "snake-new.html"
+          },
+          "reason": "Verify the newly created standalone HTML game"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Created and verified the new snake-new.html artifact; the pre-existing snake.html was left unchanged."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "verificationPassed": true,
+        "toolsCalled": ["read_file", "verify_file"],
+        "filesContain": {
+          "snake.html": "Existing game",
+          "snake-new.html": "Snake Next"
+        },
+        "diffContains": ["+++ b/snake-new.html"],
+        "diffNotContains": ["--- a/snake.html"],
+        "maxSteps": 4,
+        "maxLlmCalls": 5
+      }
+    },
+    {
+      "id": "modify-untracked-existing-html",
+      "name": "Modify an existing untracked HTML file as an existing file",
+      "tags": ["untracked", "html", "patch", "regression"],
+      "userGoal": "Optimize the existing 2048.html file in place even though Git does not track it.",
+      "untrackedFiles": {
+        "2048.html": "<!doctype html>\n<html>\n<head><title>2048</title></head>\n<body><h1>2048</h1></body>\n</html>\n"
+      },
+      "decisions": [
+        {
+          "type": "TOOL_CALL",
+          "toolName": "read_file",
+          "input": {
+            "path": "2048.html"
+          },
+          "reason": "Read the existing workspace file independently of Git tracking"
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Incorrectly try to recreate the existing untracked file",
+          "patch": "diff --git a/2048.html b/2048.html\nnew file mode 100644\n--- /dev/null\n+++ b/2048.html\n@@ -0,0 +1,5 @@\n+<!doctype html>\n+<html>\n+<head><title>2048 Game</title></head>\n+<body><h1>2048</h1></body>\n+</html>\n"
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Modify the existing untracked file with an ordinary hunk",
+          "patch": "diff --git a/2048.html b/2048.html\n--- a/2048.html\n+++ b/2048.html\n@@ -1,5 +1,5 @@\n <!doctype html>\n <html>\n-<head><title>2048</title></head>\n+<head><title>2048 Game</title></head>\n <body><h1>2048</h1></body>\n </html>\n"
+        },
+        {
+          "type": "TOOL_CALL",
+          "toolName": "verify_file",
+          "input": {
+            "path": "2048.html"
+          },
+          "reason": "Verify the modified standalone HTML file"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Optimized and verified the existing untracked 2048.html file in place."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "verificationPassed": true,
+        "toolsCalled": ["read_file", "verify_file"],
+        "filesContain": {
+          "2048.html": "<title>2048 Game</title>"
+        },
+        "maxSteps": 5,
+        "maxLlmCalls": 6
+      }
+    },
+    {
+      "id": "recover-from-noop-patch",
+      "name": "Recover from a no-op patch with a real edit",
+      "tags": ["patch", "no-op", "recovery", "regression"],
+      "userGoal": "Change settings.txt from theme=light to theme=dark.",
+      "files": {
+        "settings.txt": "theme=light\n"
+      },
+      "decisions": [
+        {
+          "type": "APPLY_PATCH",
+          "description": "Accidentally submit a no-op patch",
+          "patch": "diff --git a/settings.txt b/settings.txt\n--- a/settings.txt\n+++ b/settings.txt\n@@ -1 +1 @@\n-theme=light\n+theme=light\n"
+        },
+        {
+          "type": "TOOL_CALL",
+          "toolName": "read_file",
+          "input": {
+            "path": "settings.txt"
+          },
+          "reason": "Re-read the target after the rejected no-op patch"
+        },
+        {
+          "type": "APPLY_PATCH",
+          "description": "Apply the requested real setting change",
+          "patch": "diff --git a/settings.txt b/settings.txt\n--- a/settings.txt\n+++ b/settings.txt\n@@ -1 +1 @@\n-theme=light\n+theme=dark\n"
+        },
+        {
+          "type": "FINAL",
+          "success": true,
+          "summary": "Changed settings.txt to theme=dark after recovering from the rejected no-op patch."
+        }
+      ],
+      "expected": {
+        "success": true,
+        "toolsCalled": ["read_file"],
+        "filesContain": {
+          "settings.txt": "theme=dark"
+        },
+        "filesNotContain": {
+          "settings.txt": "theme=light"
+        },
+        "maxSteps": 4,
+        "maxLlmCalls": 5
       }
     }
   ]

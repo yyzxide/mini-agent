@@ -18,7 +18,7 @@ export function registerRagCommands(program: Command): void {
   const rag = program.command("rag").description("Manage and evaluate the repository-local RAG knowledge base");
 
   rag.command("ingest")
-    .description("Index Markdown and text documents")
+    .description("Index supported text, source-code, and configuration documents")
     .argument("<paths...>", "Repository-relative files or directories")
     .option("--chunk-size <number>", "Maximum characters per chunk", parsePositiveInteger)
     .option("--overlap <number>", "Approximate overlapping characters", parseNonNegativeInteger)

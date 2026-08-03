@@ -3,10 +3,15 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
 import { sanitizeChildProcessEnv } from "../command/CommandRunner.js";
-import type { McpCallToolResult, McpRemoteTool, McpServerConfig } from "./McpTypes.js";
+import type { McpCallToolResult, McpGetPromptResult, McpReadResourceResult, McpRemotePrompt, McpRemoteResource, McpRemoteTool, McpServerConfig, McpServerMetadata } from "./McpTypes.js";
 import {
   initializeRequest,
   parseCallResult,
+  parseInitializeResult,
+  parseGetPromptResult,
+  parsePromptsList,
+  parseReadResourceResult,
+  parseResourcesList,
   parseToolsList,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -27,6 +32,7 @@ export class StdioMcpClient implements McpClient {
   private connected = false;
   private connection: Promise<void> | undefined;
   private stderrTail = "";
+  private serverMetadata: McpServerMetadata | undefined;
 
   constructor(private readonly config: McpServerConfig) {}
 
@@ -75,7 +81,9 @@ export class StdioMcpClient implements McpClient {
       this.connection = undefined;
     });
 
-    await this.request(initializeRequest(this.nextId++));
+    this.serverMetadata = parseInitializeResult(
+      await this.request(initializeRequest(this.nextId++)),
+    );
     this.notify("notifications/initialized");
     this.connected = true;
   }
@@ -93,6 +101,30 @@ export class StdioMcpClient implements McpClient {
     })));
   }
 
+  async listResources(): Promise<McpRemoteResource[]> {
+    await this.connect();
+    return parseResourcesList(await this.request(this.makeRequest("resources/list")));
+  }
+
+  async readResource(uri: string): Promise<McpReadResourceResult> {
+    await this.connect();
+    return parseReadResourceResult(await this.request(this.makeRequest("resources/read", { uri })));
+  }
+
+  async listPrompts(): Promise<McpRemotePrompt[]> {
+    await this.connect();
+    return parsePromptsList(await this.request(this.makeRequest("prompts/list")));
+  }
+
+  async getPrompt(name: string, args: Record<string, string>): Promise<McpGetPromptResult> {
+    await this.connect();
+    return parseGetPromptResult(await this.request(this.makeRequest("prompts/get", { name, arguments: args })));
+  }
+
+  getServerMetadata(): McpServerMetadata | undefined {
+    return this.serverMetadata;
+  }
+
   async close(): Promise<void> {
     this.output?.close();
     this.output = undefined;
@@ -100,6 +132,7 @@ export class StdioMcpClient implements McpClient {
     this.process = undefined;
     this.connected = false;
     this.connection = undefined;
+    this.serverMetadata = undefined;
     if (!child || child.exitCode !== null) return;
     child.kill();
     await new Promise<void>((resolve) => {

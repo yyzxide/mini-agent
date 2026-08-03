@@ -3,13 +3,24 @@ import { createDefaultToolRegistry, type ToolRegistry } from "../tools/ToolRegis
 import type { McpClient } from "./McpClient.js";
 import { HttpMcpClient } from "./HttpMcpClient.js";
 import { McpRemoteTool } from "./McpRemoteTool.js";
+import { McpResourceTool } from "./McpResourceTool.js";
+import { McpPromptTool } from "./McpPromptTool.js";
 import { StdioMcpClient } from "./StdioMcpClient.js";
 import type { McpServerConfig } from "./McpTypes.js";
+import { createConfiguredWebSearchOptions } from "../tools/ConfiguredWebSearch.js";
 
 export interface McpLoadDiagnostic {
   server: string;
   success: boolean;
   toolCount: number;
+  resourceCount?: number;
+  promptCount?: number;
+  registeredAdapterCount?: number;
+  protocolVersion?: string;
+  serverInfo?: { name: string; version: string };
+  advertisedCapabilities?: string[];
+  bridgedCapabilities?: string[];
+  unbridgedCapabilities?: string[];
   error?: string;
 }
 
@@ -17,15 +28,30 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
   registry: ToolRegistry;
   diagnostics: McpLoadDiagnostic[];
 }> {
-  const registry = createDefaultToolRegistry();
   const config = await loadAgentConfig(repoPath);
+  const registry = createDefaultToolRegistry({
+    webSearch: createConfiguredWebSearchOptions(config),
+  });
   const diagnostics: McpLoadDiagnostic[] = [];
 
   for (const server of config.mcp?.servers.filter((entry) => entry.enabled) ?? []) {
     const client = createClient(server);
     try {
-      const tools = await client.listTools();
-      const staged = tools.map((tool) => new McpRemoteTool(server, tool, client));
+      await client.connect();
+      const metadata = client.getServerMetadata?.();
+      const advertisedCapabilities = Object.keys(metadata?.capabilities ?? {}).sort();
+      const tools = advertisedCapabilities.includes("tools") ? await client.listTools() : [];
+      const resources = advertisedCapabilities.includes("resources") && client.listResources
+        ? await client.listResources()
+        : [];
+      const prompts = advertisedCapabilities.includes("prompts") && client.listPrompts
+        ? await client.listPrompts()
+        : [];
+      const staged = [
+        ...tools.map((tool) => new McpRemoteTool(server, tool, client)),
+        ...(resources.length > 0 ? [new McpResourceTool(server, resources, client)] : []),
+        ...(prompts.length > 0 ? [new McpPromptTool(server, prompts, client)] : []),
+      ];
       const stagedNames = new Set<string>();
       for (const tool of staged) {
         if (stagedNames.has(tool.name) || registry.get(tool.name)) {
@@ -35,7 +61,24 @@ export async function createConfiguredToolRegistry(repoPath: string): Promise<{
       }
       for (const tool of staged) registry.register(tool);
       registry.addDisposer(async () => await client.close());
-      diagnostics.push({ server: server.name, success: true, toolCount: tools.length });
+      const bridgedCapabilities = [
+        ...(advertisedCapabilities.includes("tools") ? ["tools"] : []),
+        ...(advertisedCapabilities.includes("resources") ? ["resources"] : []),
+        ...(advertisedCapabilities.includes("prompts") ? ["prompts"] : []),
+      ];
+      diagnostics.push({
+        server: server.name,
+        success: true,
+        toolCount: tools.length,
+        resourceCount: resources.length,
+        promptCount: prompts.length,
+        registeredAdapterCount: staged.length,
+        ...(metadata ? { protocolVersion: metadata.protocolVersion } : {}),
+        ...(metadata?.serverInfo ? { serverInfo: metadata.serverInfo } : {}),
+        advertisedCapabilities,
+        bridgedCapabilities,
+        unbridgedCapabilities: advertisedCapabilities.filter((capability) => !bridgedCapabilities.includes(capability)),
+      });
     } catch (error) {
       await client.close().catch(() => undefined);
       diagnostics.push({

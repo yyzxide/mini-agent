@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { Command } from "commander";
 import { loadAgentConfig, resolveLlmConfig } from "../config/AgentConfig.js";
-import { AgentBench } from "../eval/AgentBench.js";
+import { AgentBench, compareAgentBenchReports } from "../eval/AgentBench.js";
 import { loadAgentBenchDataset, loadAgentBenchReport } from "../eval/AgentBenchDataset.js";
 import type { AgentBenchMode } from "../eval/AgentBenchTypes.js";
 import { OpenAICompatibleClient } from "../llm/OpenAICompatibleClient.js";
@@ -16,6 +16,10 @@ interface BenchRunOptions {
   baseUrl?: string;
   keepRepos?: boolean;
   failOnRegression: boolean;
+}
+
+interface BenchCompareOptions {
+  output?: string;
 }
 
 export function registerBenchCommands(program: Command): void {
@@ -57,6 +61,24 @@ export function registerBenchCommands(program: Command): void {
       }
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       if (!report.gate.passed && options.failOnRegression) process.exitCode = 1;
+    });
+
+  bench.command("compare")
+    .description("Compare two stored AgentBench reports without rerunning scenarios")
+    .argument("<current>", "Repository-relative current AgentBench report path")
+    .argument("<baseline>", "Repository-relative baseline AgentBench report path")
+    .option("--output <path>", "Write the comparison JSON to a repository-relative path")
+    .action(async (currentPath: string, baselinePath: string, options: BenchCompareOptions) => {
+      const repoPath = process.cwd();
+      const current = await loadAgentBenchReport(resolveRepoPath(repoPath, currentPath));
+      const baseline = await loadAgentBenchReport(resolveRepoPath(repoPath, baselinePath));
+      const comparison = compareAgentBenchReports(current, baseline);
+      if (options.output) {
+        const outputPath = resolveRepoPath(repoPath, options.output);
+        await ensureDir(path.dirname(outputPath));
+        await writeJsonFileAtomic(outputPath, comparison);
+      }
+      process.stdout.write(`${JSON.stringify(comparison, null, 2)}\n`);
     });
 }
 

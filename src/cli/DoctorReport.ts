@@ -1,6 +1,12 @@
 import process from "node:process";
 import { execa } from "execa";
-import { loadAgentConfig, redactAgentConfig, resolveLlmConfig } from "../config/AgentConfig.js";
+import {
+  loadAgentConfig,
+  redactAgentConfig,
+  resolveBraveSearchApiKey,
+  resolveLlmConfig,
+  resolveWebSearchProviderOrder,
+} from "../config/AgentConfig.js";
 import { RepoStateAnalyzer } from "../context/RepoStateAnalyzer.js";
 import { SessionStore } from "../session/SessionStore.js";
 import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
@@ -60,9 +66,17 @@ async function readDoctorConfig(repoPath: string): Promise<unknown> {
         maxTokens: resolved.openai.maxTokens ?? null,
         timeoutMs: resolved.openai.timeoutMs ?? null,
       },
+      webSearch: {
+        providerOrder: resolveWebSearchProviderOrder(config),
+        braveConfigured: resolveWebSearchProviderOrder(config).includes("brave"),
+        hasBraveApiKey: Boolean(resolveBraveSearchApiKey(config)),
+      },
       warnings: [
         resolved.openai.apiKey ? null : "Missing API key. Configure mini-agent.config.json or MINI_AGENT_API_KEY.",
         resolved.openai.model ? null : "Missing model. Configure mini-agent.config.json or MINI_AGENT_MODEL.",
+        resolveWebSearchProviderOrder(config).includes("brave") && !resolveBraveSearchApiKey(config)
+          ? "Brave Search is enabled but its API key is missing. Configure webSearch.brave.apiKeyEnv or BRAVE_SEARCH_API_KEY."
+          : null,
       ].filter(Boolean),
     };
   } catch (error) {

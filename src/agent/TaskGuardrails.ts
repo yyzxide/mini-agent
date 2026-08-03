@@ -107,7 +107,7 @@ function validateFinalDecision(
 
   const taskContractViolation = validateTaskContractEvidence(
     state,
-    decision.summary,
+    decision,
     evidenceInsufficient,
   );
   if (taskContractViolation) {
@@ -242,9 +242,10 @@ function validateFinalDecision(
 
 function validateTaskContractEvidence(
   state: AgentState,
-  summary: string,
+  decision: Extract<AgentDecision, { type: "FINAL" }>,
   evidenceInsufficient: boolean,
 ): AgentDecisionGuardrailViolation | undefined {
+  const summary = decision.summary;
   const requirements = state.taskContract.evidence;
 
   if (requirements.repositoryRead && !hasSuccessfulRepositoryEvidence(state)) {
@@ -402,7 +403,64 @@ function validateTaskContractEvidence(
     }
   }
 
+  if (!evidenceInsufficient && state.taskContract.taskFrame?.webEvidencePolicy.profile !== "ORDINARY") {
+    if (!decision.webClaims?.length) {
+      return {
+        code: "FINAL_WITHOUT_WEB_CLAIM_SOURCES",
+        message: [
+          "Postcondition failed: strict Web research requires a structured webClaims mapping.",
+          "Map each material factual conclusion to exact successfully fetched sourceUrls and keep both the claim and URLs visible in summary.",
+        ].join(" "),
+      };
+    }
+  }
+
+  if (decision.webClaims?.length) {
+    const fetchedUrls = new Set(successfulFetchedUrls(state)
+      .map(normalizeComparableUrl)
+      .filter((value): value is string => value !== undefined));
+    for (const mapping of decision.webClaims) {
+      if (!normalizeComparableText(summary).includes(normalizeComparableText(mapping.claim))) {
+        return {
+          code: "FINAL_WEB_CLAIM_NOT_VISIBLE",
+          message: `Postcondition failed: mapped Web claim is not present in the user-visible summary: ${mapping.claim}`,
+        };
+      }
+      for (const sourceUrl of mapping.sourceUrls) {
+        const normalizedUrl = normalizeComparableUrl(sourceUrl);
+        if (!normalizedUrl || !fetchedUrls.has(normalizedUrl)) {
+          return {
+            code: "FINAL_WEB_CLAIM_SOURCE_NOT_FETCHED",
+            message: `Postcondition failed: Web claim source was not successfully fetched and inspected: ${sourceUrl}`,
+          };
+        }
+        if (!summary.includes(sourceUrl)) {
+          return {
+            code: "FINAL_WEB_CLAIM_SOURCE_NOT_VISIBLE",
+            message: `Postcondition failed: mapped source URL is missing from the user-visible summary: ${sourceUrl}`,
+          };
+        }
+      }
+    }
+  }
+
   return undefined;
+}
+
+function normalizeComparableText(value: string): string {
+  return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeComparableUrl(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    parsed.hash = "";
+    if (parsed.pathname !== "/") parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function hasSuccessfulRepositoryEvidence(state: AgentState): boolean {

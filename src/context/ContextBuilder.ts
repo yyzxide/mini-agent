@@ -6,7 +6,7 @@ import { MemoryContextService } from "../memory/MemoryContextService.js";
 import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { readSessionMemoryWithTrace } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
+import { formatSkillCatalogForContext, formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
 import { ContextPlanner } from "./ContextPlanner.js";
 import {
   formatCurrentFileReadCoverage,
@@ -93,6 +93,7 @@ export class ContextBuilder {
       diff,
       sessionMemoryResult,
       longTermMemory,
+      skillCatalog,
       selectedSkills,
     ] = await Promise.all([
       hydrateRepositoryContext ? git.isGitRepository().catch(() => false) : Promise.resolve(false),
@@ -130,6 +131,8 @@ export class ContextBuilder {
           : Promise.resolve(knowledgeRequest
             ? "(disabled for indexed knowledge-base requests)"
             : "(not requested for the current task)"),
+      skillStore.list().then(formatSkillCatalogForContext)
+        .catch((error: unknown) => `error: ${errorToText(error)}`),
       skillStore.select(goal, 3).then(formatSkillsForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
@@ -154,6 +157,7 @@ export class ContextBuilder {
       diff,
       sessionMemory,
       longTermMemory,
+      skillCatalog,
       selectedSkills,
       diagnostics,
       recentEvidence,
@@ -197,6 +201,7 @@ function buildCandidates(input: {
   diff: string;
   sessionMemory: string;
   longTermMemory: string;
+  skillCatalog: string;
   selectedSkills: string;
   diagnostics: string;
   recentEvidence: string;
@@ -214,6 +219,7 @@ function buildCandidates(input: {
   const hasDiff = input.diff.trim().length > 0 && input.diff !== "(none)";
   const hasSessionMemory = input.sessionMemory !== "(none)";
   const hasSelectedSkills = input.selectedSkills.trim().length > 0 && !input.selectedSkills.startsWith("(none");
+  const hasSkillCatalog = input.skillCatalog.trim().length > 0 && !input.skillCatalog.startsWith("(no skills");
   const hasLongTermMemory = input.needsLongTermMemory
     && input.longTermMemory !== "(none)"
     && input.longTermMemory !== "(not requested for the current task)";
@@ -222,6 +228,17 @@ function buildCandidates(input: {
   const hasActiveFileChunk = input.activeFileChunk.length > 0;
 
   return [
+    {
+      id: "skill_catalog",
+      title: "Skill catalog",
+      content: input.skillCatalog,
+      priority: 93,
+      enabled: hasSkillCatalog,
+      stable: true,
+      maxTokens: 700,
+      retention: "head",
+      reason: "The bounded catalog lets the model discover relevant skills semantically and load them with skill_read instead of relying only on local keyword selection.",
+    },
     {
       id: "task",
       title: "Task",

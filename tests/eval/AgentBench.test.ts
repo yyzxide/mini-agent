@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentBench, evaluateAgentBenchGate } from "../../src/eval/AgentBench.js";
+import { AgentBench, compareAgentBenchReports, evaluateAgentBenchGate } from "../../src/eval/AgentBench.js";
 import { loadAgentBenchDataset, loadAgentBenchReport } from "../../src/eval/AgentBenchDataset.js";
 import type { AgentBenchSummary } from "../../src/eval/AgentBenchTypes.js";
 import type { AgentBenchDataset } from "../../src/eval/AgentBenchTypes.js";
@@ -17,13 +17,16 @@ describe("AgentBench", () => {
 
     expect(report.runs.filter((run) => !run.passed)).toEqual([]);
     expect(report.summary).toMatchObject({
-      scenarios: 7,
-      totalRuns: 7,
-      passedRuns: 7,
+      scenarios: 10,
+      totalRuns: 10,
+      passedRuns: 10,
       passAt1: 1,
       passAtK: 1,
       toolChoiceAccuracy: 1,
+      allRunsPassRate: 1,
+      flakyScenarios: 0,
     });
+    expect(report.summary.runPassRate95CI).toMatchObject({ confidence: 0.95 });
     expect(report.summary.contextTruncationRate).toBeGreaterThanOrEqual(0);
     expect(report.runs.some((run) => run.metrics.testsPassed > 0)).toBe(true);
     expect(report.runs.some((run) => run.metrics.verificationsPassed > 0)).toBe(true);
@@ -84,6 +87,53 @@ describe("AgentBench", () => {
     expect(report.runs[0]?.metrics).toMatchObject({ promptTokens: 10, completionTokens: 4, usageAvailable: true });
   });
 
+  it("reports flaky repeated real-model scenarios instead of hiding them behind passAtK", async () => {
+    const dataset: AgentBenchDataset = {
+      version: 1,
+      name: "flaky-real-fixture",
+      scenarios: [{ id: "answer", name: "answer", userGoal: "answer", expected: { success: true } }],
+    };
+    const report = await new AgentBench().run(dataset, {
+      mode: "real",
+      repetitions: 2,
+      createLlmClient: (_scenario, repetition) => ({
+        chat: async () => repetition === 1
+          ? { type: "FINAL", success: true, summary: "done" }
+          : { type: "FINAL", success: false, summary: "not done" },
+        compileTaskFrame: async () => ({
+          success: true,
+          text: JSON.stringify(createTestTaskFrame({ objective: "answer" })),
+        }),
+      }),
+    });
+
+    expect(report.summary).toMatchObject({
+      passAt1: 1,
+      passAtK: 1,
+      runPassRate: 0.5,
+      allRunsPassRate: 0,
+      flakyScenarios: 1,
+    });
+    expect(report.scenarios[0]).toMatchObject({
+      passRate: 0.5,
+      allRunsPassed: false,
+      flaky: true,
+      failuresByCategory: { EXPECTATION: 1 },
+    });
+  });
+
+  it("builds structured deltas for stored report comparisons", () => {
+    const baseline = reportWithSummary(summary({ runPassRate: 0.5, allRunsPassRate: 0, flakyScenarios: 1 }));
+    const current = reportWithSummary(summary({ runPassRate: 1, allRunsPassRate: 1, flakyScenarios: 0 }));
+    const comparison = compareAgentBenchReports(current, baseline);
+
+    expect(comparison.metricDeltas).toMatchObject({
+      runPassRate: 0.5,
+      allRunsPassRate: 1,
+      flakyScenarios: -1,
+    });
+  });
+
   it("rejects a baseline from a different dataset", async () => {
     const dataset: AgentBenchDataset = {
       version: 1,
@@ -122,6 +172,9 @@ function summary(overrides: Partial<AgentBenchSummary> = {}): AgentBenchSummary 
     passAtK: 1,
     runPassRate: 1,
     toolChoiceAccuracy: 1,
+    allRunsPassRate: 1,
+    flakyScenarios: 0,
+    runPassRate95CI: { confidence: 0.95, lower: 1, upper: 1 },
     averageSteps: 1,
     averageLlmCalls: 1,
     averageDurationMs: 1,

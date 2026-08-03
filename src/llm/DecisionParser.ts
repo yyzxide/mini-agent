@@ -100,11 +100,13 @@ function normalizeDecisionCandidate(value: unknown): unknown {
       };
     case "FINAL": {
       const evidenceStatus = readEvidenceStatus(value.evidenceStatus);
+      const webClaims = Array.isArray(value.webClaims) ? value.webClaims : undefined;
       return {
         type,
         summary: readString(value.summary) ?? readString(value.message) ?? readString(value.answer),
         success: typeof value.success === "boolean" ? value.success : true,
         ...(evidenceStatus ? { evidenceStatus } : {}),
+        ...(webClaims ? { webClaims } : {}),
       };
     }
     case "FAILED":

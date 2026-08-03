@@ -880,6 +880,10 @@ describe("AgentLoop", () => {
     const taskContract = createTestTaskContract({
       objective: "所以这个助手以后也没法碰外网了吗？",
       target: "PRODUCT",
+      productCapability: {
+        act: "AVAILABILITY",
+        capabilityIds: ["WEB_RESEARCH"],
+      },
     });
     const llmClient: LlmClient = {
       chat: async () => ({
@@ -1967,6 +1971,48 @@ describe("AgentLoop", () => {
     const records = await sessionStore.readRecords(result.sessionId);
     expect(records.some((record) => JSON.stringify(record.payload)
       .includes("FINAL_IGNORES_INSUFFICIENT_KNOWLEDGE"))).toBe(true);
+  });
+
+  it("can recover from an empty knowledge index by indexing repository documents and searching again", async () => {
+    await fs.mkdir(path.join(repoPath, "docs"), { recursive: true });
+    await fs.writeFile(
+      path.join(repoPath, "docs", "upload-policy.md"),
+      "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n",
+      "utf8",
+    );
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy SHA-256 checksum" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy SHA-256 checksum" } },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "上传策略要求执行 SHA-256 校验（docs/upload-policy.md#L1-L3）。",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "请从知识库说明上传策略；索引为空时自行处理",
+      taskContract: createTestTaskContract({
+        objective: "Ground the upload-policy answer in repository knowledge.",
+        target: "REPOSITORY",
+        effects: { knowledgeEvidence: true },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(result.success, `${result.error ?? ""}\n${records.map((record) => JSON.stringify(record.payload)).join("\n")}`).toBe(true);
+    expect(result.summary).toContain("docs/upload-policy.md#L1-L3");
+    const serialized = records.map((record) => JSON.stringify(record.payload)).join("\n");
+    expect(serialized).toContain("knowledge_index");
+    expect(serialized.match(/knowledge_search/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(serialized).toContain("EMPTY_INDEX");
   });
 
   it("can use web_search for non-code research tasks", async () => {

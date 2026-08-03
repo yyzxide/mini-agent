@@ -532,6 +532,10 @@ describe("TaskGuardrails", () => {
       type: "FINAL",
       success: true,
       summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/",
+      webClaims: [{
+        claim: "最新系列是 GPT-5.6。",
+        sourceUrls: ["https://openai.com/index/gpt-5-6/"],
+      }],
     })).toBeUndefined();
   });
 
@@ -567,7 +571,41 @@ describe("TaskGuardrails", () => {
       type: "FINAL",
       success: true,
       summary: "当前型号是 Claude Opus 4.1。https://www.anthropic.com/claude/opus",
+      webClaims: [{
+        claim: "当前型号是 Claude Opus 4.1。",
+        sourceUrls: ["https://www.anthropic.com/claude/opus"],
+      }],
     })).toBeUndefined();
+  });
+
+  it("rejects strict Web claim mappings that cite an unfetched source", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `OpenAI latest model ${String(currentYear)}`, [{
+      title: "Roundup",
+      url: "https://example.com/openai",
+      snippet: "Overview.",
+    }]);
+    addWebSearch(state, `site:openai.com latest model ${String(currentYear)}`, [{
+      title: "GPT-5.6",
+      url: "https://openai.com/index/gpt-5-6/",
+      snippet: "Current release.",
+    }]);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/gpt-5-6/",
+      `GPT-5.6 was released in ${String(currentYear)}.`,
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/ https://invented.example/source",
+      webClaims: [{
+        claim: "最新系列是 GPT-5.6。",
+        sourceUrls: ["https://invented.example/source"],
+      }],
+    })).toMatchObject({ code: "FINAL_WEB_CLAIM_SOURCE_NOT_FETCHED" });
   });
 
   it("requires fetching an exact candidate from the authority freshness search", () => {

@@ -503,6 +503,16 @@ describe("mini-agent CLI", () => {
         "16384",
         "--thinking-mode",
         "disabled",
+        "--web-providers",
+        "brave,duckduckgo_lite",
+        "--brave-api-key",
+        "brave-secret",
+        "--brave-country",
+        "cn",
+        "--brave-search-lang",
+        "zh",
+        "--brave-safe-search",
+        "strict",
       ], { from: "user" });
     });
     const initialized = JSON.parse(initOutput) as {
@@ -514,6 +524,10 @@ describe("mini-agent CLI", () => {
         maxTokens?: number;
         thinkingMode?: string;
       };
+      webSearch?: {
+        providerOrder?: string[];
+        brave?: { apiKey?: string; country?: string; searchLang?: string; safeSearch?: string };
+      };
     };
 
     expect(initialized.llm).toMatchObject({
@@ -524,12 +538,25 @@ describe("mini-agent CLI", () => {
       maxTokens: 16384,
       thinkingMode: "disabled",
     });
+    expect(initialized.webSearch).toEqual({
+      providerOrder: ["brave", "duckduckgo_lite"],
+      brave: {
+        apiKey: "<redacted>",
+        country: "CN",
+        searchLang: "zh",
+        safeSearch: "strict",
+      },
+    });
 
     const showOutput = await captureStdout(async () => {
       await createProgram().parseAsync(["config", "show"], { from: "user" });
     });
-    const shown = JSON.parse(showOutput) as { llm?: { apiKey?: string } };
+    const shown = JSON.parse(showOutput) as {
+      llm?: { apiKey?: string };
+      webSearch?: { brave?: { apiKey?: string } };
+    };
     expect(shown.llm?.apiKey).toBe("<redacted>");
+    expect(shown.webSearch?.brave?.apiKey).toBe("<redacted>");
   });
 
   it("runs a command from the CLI", async () => {
@@ -831,7 +858,7 @@ describe("mini-agent CLI", () => {
         ], { from: "user" });
       });
       const body = JSON.parse(String(calls[0]?.body)) as { messages: Array<{ content: string }> };
-      expect(body.messages[0]?.content).toContain("If the context includes Selected skills");
+      expect(body.messages[0]?.content).toContain("The Skill catalog is discovery metadata");
       expect(body.messages[1]?.content).toContain("Run targeted Vitest tests first");
       expect(body.messages[1]?.content).toContain("npm test 做完整验证");
       expect(body.messages[1]?.content).toContain("Historical memory evidence (untrusted)");

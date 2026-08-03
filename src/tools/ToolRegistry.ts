@@ -15,6 +15,8 @@ import { truncateText } from "../utils/fs.js";
 import type { EventType, JsonObject, SessionRecordType } from "../session/SessionTypes.js";
 import { ApplyPatchTool } from "./ApplyPatchTool.js";
 import { KnowledgeSearchTool } from "../rag/KnowledgeSearchTool.js";
+import { KnowledgeIndexTool } from "../rag/KnowledgeIndexTool.js";
+import { SkillReadTool } from "../skills/SkillReadTool.js";
 import { FetchUrlTool } from "./FetchUrlTool.js";
 import { GitDiffTool } from "./GitDiffTool.js";
 import { GitStatusTool } from "./GitStatusTool.js";
@@ -22,6 +24,7 @@ import { ListFilesTool } from "./ListFilesTool.js";
 import { ReadFileTool } from "./ReadFileTool.js";
 import { SearchCodeTool } from "./SearchCodeTool.js";
 import { WebSearchTool } from "./WebSearchTool.js";
+import type { WebSearchToolOptions } from "./WebSearchTool.js";
 import { VerifyFileTool } from "./VerifyFileTool.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { toolFailure } from "./Tool.js";
@@ -238,7 +241,9 @@ function compactPersistedToolResult(toolName: string, value: unknown) {
     };
 }
 
-export function createDefaultToolRegistry(): ToolRegistry {
+export function createDefaultToolRegistry(options: {
+  webSearch?: WebSearchToolOptions;
+} = {}): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register(new ApplyPatchTool());
@@ -246,11 +251,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register(new GitDiffTool());
   registry.register(new GitStatusTool());
   registry.register(new KnowledgeSearchTool());
+  registry.register(new KnowledgeIndexTool());
   registry.register(new ListFilesTool());
   registry.register(new ReadFileTool());
   registry.register(new SearchCodeTool());
+  registry.register(new SkillReadTool());
   registry.register(new VerifyFileTool());
-  registry.register(new WebSearchTool());
+  registry.register(new WebSearchTool(options.webSearch));
 
   return registry;
 }

@@ -6,8 +6,10 @@ import {
   initAgentConfig,
   loadAgentConfig,
   redactAgentConfig,
+  resolveBraveSearchApiKey,
   resolveLlmConfig,
   resolveMultiAgentPolicy,
+  resolveWebSearchProviderOrder,
 } from "../../src/config/AgentConfig.js";
 
 let tempRoot: string;
@@ -160,6 +162,41 @@ describe("AgentConfig", () => {
     });
 
     expect(redactAgentConfig(config).llm?.apiKey).toBe("<redacted>");
+  });
+
+  it("loads ordered Web Search providers and resolves Brave secrets from a named environment variable", async () => {
+    await fs.writeFile(path.join(tempRoot, "mini-agent.config.json"), JSON.stringify({
+      version: 1,
+      webSearch: {
+        providerOrder: ["brave", "duckduckgo_lite"],
+        brave: {
+          apiKeyEnv: "TEST_BRAVE_SEARCH_KEY",
+          country: "cn",
+          searchLang: "zh",
+          safeSearch: "strict",
+        },
+      },
+    }), "utf8");
+    const previous = process.env.TEST_BRAVE_SEARCH_KEY;
+    process.env.TEST_BRAVE_SEARCH_KEY = "env-brave-key";
+    try {
+      const config = await loadAgentConfig(tempRoot);
+      expect(resolveWebSearchProviderOrder(config)).toEqual(["brave", "duckduckgo_lite"]);
+      expect(resolveBraveSearchApiKey(config)).toBe("env-brave-key");
+      expect(config.webSearch?.brave?.country).toBe("CN");
+    } finally {
+      restoreEnv("TEST_BRAVE_SEARCH_KEY", previous);
+    }
+  });
+
+  it("redacts a directly configured Brave Search API key", () => {
+    expect(redactAgentConfig({
+      version: 1,
+      webSearch: {
+        providerOrder: ["brave"],
+        brave: { apiKey: "brave-secret" },
+      },
+    }).webSearch?.brave?.apiKey).toBe("<redacted>");
   });
 
   it("keeps multi-agent available by default with semantic and CLI overrides", async () => {

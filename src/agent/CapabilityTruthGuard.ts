@@ -1,8 +1,6 @@
 import {
-  detectResponseCapabilityDenials,
   inferLocale,
   renderProductCapabilityAnswer,
-  type ProductMetaTopic,
 } from "./ProductCapability.js";
 import type { ProductCapabilityId } from "./CapabilityRegistry.js";
 import type { TaskFrame } from "../runtime/TaskFrame.js";
@@ -10,59 +8,35 @@ import type { TaskFrame } from "../runtime/TaskFrame.js";
 export interface CapabilityTruthCorrection {
   corrected: boolean;
   text: string;
-  conflicts: ProductCapabilityId[];
+  capabilities: ProductCapabilityId[];
 }
 
 /**
- * Product capability claims are checked against the local registry. The model
- * may interpret phrasing, but it cannot override supported=true facts.
+ * Product capability answers are rendered from model-selected semantic IDs and
+ * the local registry. Raw user or assistant wording is deliberately not
+ * rescanned here, so adding a new phrasing never requires another regex route.
  */
 export function enforceCapabilityTruth(input: {
   taskFrame?: TaskFrame;
   userGoal: string;
   answer: string;
 }): CapabilityTruthCorrection {
-  const conflicts = detectResponseCapabilityDenials(input.answer);
-  if (conflicts.length === 0) {
-    return { corrected: false, text: input.answer, conflicts: [] };
-  }
-
   const frame = input.taskFrame;
-  const semanticProductRequest = frame?.target === "PRODUCT"
+  const productRequest = frame?.target === "PRODUCT"
     || (frame?.target === "MIXED"
       && frame.conversationEvidence.purpose === "PRIOR_RESPONSE_AUDIT");
-  if (!semanticProductRequest) {
-    return { corrected: false, text: input.answer, conflicts };
+  const intent = frame?.productCapability;
+  if (!productRequest || !intent || intent.act === "NONE") {
+    return { corrected: false, text: input.answer, capabilities: [] };
   }
 
   const priorResponseAudit = frame.conversationEvidence.purpose === "PRIOR_RESPONSE_AUDIT";
   return {
     corrected: true,
-    text: renderProductCapabilityAnswer(
-      {
-        topic: topicForConflicts(conflicts),
-        act: priorResponseAudit ? "EXPLAIN_LIMITATION" : "AVAILABILITY",
-      },
-      {
-        priorDenialFound: priorResponseAudit,
-        locale: inferLocale(input.userGoal),
-      },
-    ),
-    conflicts,
+    text: renderProductCapabilityAnswer(intent, {
+      priorDenialFound: priorResponseAudit,
+      locale: inferLocale(input.userGoal),
+    }),
+    capabilities: intent.capabilityIds,
   };
-}
-
-function topicForConflicts(
-  conflicts: ProductCapabilityId[],
-): ProductMetaTopic {
-  if (conflicts.length !== 1) return "ALL";
-  const conflict = conflicts[0];
-  if (
-    conflict === "WEB_RESEARCH"
-    || conflict === "REPOSITORY_WRITE"
-    || conflict === "MULTI_AGENT_COLLABORATION"
-  ) {
-    return conflict;
-  }
-  return "ALL";
 }

@@ -15,6 +15,15 @@
     "minScore": 0.12,
     "maxContextChars": 6000
   },
+  "webSearch": {
+    "providerOrder": ["brave", "duckduckgo_html", "duckduckgo_lite"],
+    "brave": {
+      "apiKeyEnv": "BRAVE_SEARCH_API_KEY",
+      "country": "CN",
+      "searchLang": "zh-hans",
+      "safeSearch": "moderate"
+    }
+  },
   "multiAgent": {
     "mode": "auto",
     "maxConcurrency": 2,

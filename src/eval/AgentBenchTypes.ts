@@ -7,6 +7,8 @@ export interface AgentBenchThresholds {
   minPassAtK?: number;
   minRunPassRate?: number;
   minToolChoiceAccuracy?: number;
+  minAllRunsPassRate?: number;
+  maxFlakyScenarios?: number;
   maxAverageSteps?: number;
   maxAverageLlmCalls?: number;
   maxAverageTotalTokens?: number;
@@ -17,6 +19,8 @@ export interface AgentBenchThresholds {
 export interface AgentBenchBaselinePolicy {
   maxPassAt1Regression?: number;
   maxRunPassRateRegression?: number;
+  maxAllRunsPassRateRegression?: number;
+  maxToolChoiceAccuracyRegression?: number;
   maxAverageStepsIncreaseRatio?: number;
   maxAverageLlmCallsIncreaseRatio?: number;
   maxAverageTotalTokensIncreaseRatio?: number;
@@ -40,6 +44,7 @@ export interface AgentBenchRunResult {
   success: boolean;
   summary: string;
   error?: string;
+  failureCode?: string;
   expectationFailures: string[];
   metrics: AgentHarnessMetrics;
   repoPath?: string;
@@ -53,6 +58,17 @@ export interface AgentBenchScenarioSummary {
   passRate: number;
   passedAtLeastOnce: boolean;
   firstRunPassed: boolean;
+  allRunsPassed: boolean;
+  flaky: boolean;
+  averageSteps: number;
+  averageTotalTokens: number;
+  failuresByCategory: Record<string, number>;
+}
+
+export interface AgentBenchConfidenceInterval {
+  confidence: 0.95;
+  lower: number;
+  upper: number;
 }
 
 export interface AgentBenchSummary {
@@ -63,6 +79,9 @@ export interface AgentBenchSummary {
   passAtK: number;
   runPassRate: number;
   toolChoiceAccuracy: number;
+  allRunsPassRate: number;
+  flakyScenarios: number;
+  runPassRate95CI: AgentBenchConfidenceInterval;
   averageSteps: number;
   averageLlmCalls: number;
   averageDurationMs: number;
@@ -78,6 +97,32 @@ export interface AgentBenchGateResult {
   comparedToBaseline: boolean;
 }
 
+export interface AgentBenchComparison {
+  dataset: string;
+  mode: AgentBenchMode;
+  currentStartedAt: string;
+  baselineStartedAt: string;
+  metricDeltas: {
+    passAt1: number;
+    passAtK: number;
+    runPassRate: number;
+    allRunsPassRate: number;
+    toolChoiceAccuracy: number;
+    averageSteps: number;
+    averageLlmCalls: number;
+    averageDurationMs: number;
+    averageTotalTokens: number;
+    contextTruncationRate: number;
+    flakyScenarios: number;
+  };
+  scenarios: Array<{
+    scenarioId: string;
+    currentPassRate: number;
+    baselinePassRate: number;
+    delta: number;
+  }>;
+}
+
 export interface AgentBenchReport {
   version: 1;
   dataset: string;
@@ -90,4 +135,5 @@ export interface AgentBenchReport {
   scenarios: AgentBenchScenarioSummary[];
   runs: AgentBenchRunResult[];
   gate: AgentBenchGateResult;
+  comparison?: AgentBenchComparison;
 }

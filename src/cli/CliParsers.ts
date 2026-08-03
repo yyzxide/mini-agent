@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import process from "node:process";
 import type { LogLevel } from "../utils/logger.js";
 import { resolveRepoPath } from "../utils/fs.js";
-import type { ThinkingMode } from "../config/AgentConfig.js";
+import {
+  WEB_SEARCH_PROVIDER_NAMES,
+  type ThinkingMode,
+  type WebSearchProviderName,
+} from "../config/AgentConfig.js";
 
 export function parseOptionalLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -52,6 +56,17 @@ export function parseThinkingMode(value: string): ThinkingMode {
     return normalized;
   }
   throw new Error(`Expected thinking mode auto, enabled, or disabled, got: ${value}`);
+}
+
+export function parseWebSearchProviders(value: string): WebSearchProviderName[] {
+  const providers = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (providers.length === 0 || providers.some((provider) => !WEB_SEARCH_PROVIDER_NAMES.includes(provider as WebSearchProviderName))) {
+    throw new Error(`Expected a comma-separated provider order using ${WEB_SEARCH_PROVIDER_NAMES.join(", ")}, got: ${value}`);
+  }
+  if (new Set(providers).size !== providers.length) {
+    throw new Error(`Web Search providers must be unique, got: ${value}`);
+  }
+  return providers as WebSearchProviderName[];
 }
 
 export function parseNumber(value: string): number {
