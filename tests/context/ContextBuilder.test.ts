@@ -258,6 +258,7 @@ describe("ContextBuilder", () => {
     const context = await new ContextBuilder({ repoPath, maxChars: 20_000, maxTokens: 5_000 }).build(state);
 
     expect(context).toContain("Active file chunk:");
+    expect(context).toContain("Filesystem state: EXISTS");
     expect(context).toContain(source);
     expect(context).toContain("File read coverage:");
     expect(context).toContain("partial; next unread line 3");

@@ -2,6 +2,7 @@ import type { AgentDecision } from "../agent/AgentDecision.js";
 import type { AgentState } from "../agent/AgentState.js";
 import type { WorkingSet } from "./ContextTypes.js";
 import { detectTaskPhase } from "./TaskPhaseDetector.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 
 const FILE_PATH_PATTERN = /(?:^|[\s`'"(（])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|html|css|md|markdown|json|ya?ml|toml|sh))(?:$|[\s`'",，。)）:：])/g;
 
@@ -128,9 +129,9 @@ function buildLatestFailures(state: AgentState): string[] {
   return uniqueStrings([
     ...(state.lastError ? [state.lastError] : []),
     ...state.toolResults.filter((result) => !result.result.success)
-      .map((result) => result.result.error?.message ?? `${result.toolName} failed`),
+      .map((result) => formatToolErrorForModel(result.result.error, `${result.toolName} failed`)),
     ...state.patchResults.filter((result) => !result.result.success)
-      .map((result) => result.result.error?.message ?? "Patch failed"),
+      .map((result) => formatToolErrorForModel(result.result.error, "Patch failed")),
     ...state.commandResults.filter((result) => !result.success)
       .map((result) => result.stderr || result.stdout || result.error || `${result.command} failed`),
   ]);

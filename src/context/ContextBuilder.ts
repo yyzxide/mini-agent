@@ -22,6 +22,7 @@ import {
   buildWebResearchProgress,
   formatWebResearchProgress,
 } from "../agent/WebResearchProgress.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
@@ -415,7 +416,7 @@ function formatDiagnostics(state: AgentState): string {
 
 function summarizePatchFailures(state: AgentState): string {
   const failures = state.patchResults.filter((result) => !result.result.success).slice(-3)
-    .map((result) => result.result.error?.message ?? "Patch failed");
+    .map((result) => formatToolErrorForModel(result.result.error, "Patch failed"));
   return failures.length > 0 ? failures.join("\n") : "(none)";
 }
 

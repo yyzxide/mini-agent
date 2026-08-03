@@ -67,12 +67,80 @@ describe("PatchManager", () => {
     expect(result.success).toBe(true);
   });
 
+  it("reports a semantic no-op patch before git apply reports a corrupt hunk", async () => {
+    const manager = new PatchManager({ repoPath });
+    const patch = [
+      "diff --git a/demo.txt b/demo.txt",
+      "--- a/demo.txt",
+      "+++ b/demo.txt",
+      "@@ -1 +1 @@",
+      " hello",
+      "",
+    ].join("\n");
+
+    const result = await manager.validatePatch({ patch });
+
+    expect(result).toMatchObject({
+      success: false,
+      code: "PATCH_NO_CHANGES",
+      details: { files: ["demo.txt"], additions: 0, deletions: 0 },
+    });
+    expect(result.error).toContain("no added or deleted lines");
+  });
+
+  it("modifies an existing untracked file without treating it as a new Git file", async () => {
+    await fs.writeFile(path.join(repoPath, "untracked.html"), "<title>2048</title>\n", "utf8");
+    const manager = new PatchManager({ repoPath });
+    const patch = [
+      "diff --git a/untracked.html b/untracked.html",
+      "--- a/untracked.html",
+      "+++ b/untracked.html",
+      "@@ -1 +1 @@",
+      "-<title>2048</title>",
+      "+<title>2048 Improved</title>",
+      "",
+    ].join("\n");
+
+    const result = await manager.applyPatch({ patch });
+
+    expect(result.success).toBe(true);
+    expect(result.changedFiles).toEqual([
+      { path: "untracked.html", changeType: "MODIFIED", additions: 1, deletions: 1 },
+    ]);
+    await expect(fs.readFile(path.join(repoPath, "untracked.html"), "utf8"))
+      .resolves.toBe("<title>2048 Improved</title>\n");
+  });
+
+  it("returns a filesystem-specific error when a create patch targets an existing untracked file", async () => {
+    await fs.writeFile(path.join(repoPath, "untracked.html"), "existing\n", "utf8");
+    const manager = new PatchManager({ repoPath });
+    const patch = [
+      "diff --git a/untracked.html b/untracked.html",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/untracked.html",
+      "@@ -0,0 +1 @@",
+      "+replacement",
+      "",
+    ].join("\n");
+
+    const result = await manager.validatePatch({ patch });
+
+    expect(result).toMatchObject({
+      success: false,
+      code: "PATCH_TARGET_ALREADY_EXISTS",
+      details: { path: "untracked.html", operation: "CREATE", exists: true },
+    });
+    expect(result.error).toContain("Git tracking is irrelevant");
+  });
+
   it("rejects an illegal patch during validation", async () => {
     const manager = new PatchManager({ repoPath });
 
     const result = await manager.validatePatch({ patch: modifyMissingPatch() });
 
     expect(result.success).toBe(false);
+    expect(result.code).toBe("PATCH_TARGET_MISSING");
     expect(result.stderr ?? result.error).toContain("missing.txt");
   });
 

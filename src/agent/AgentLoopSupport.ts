@@ -173,6 +173,9 @@ export function isGitDiffData(value: unknown): value is { diff: string } {
 }
 
 export function stableDecisionKey(decision: AgentDecision): string {
+  if (decision.type === "APPLY_PATCH") {
+    return JSON.stringify({ type: decision.type, patch: decision.patch });
+  }
   return JSON.stringify(sortJsonValue(decision));
 }
 

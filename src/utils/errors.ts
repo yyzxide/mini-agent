@@ -59,6 +59,17 @@ export class EmptyPatchError extends MiniAgentError {
   }
 }
 
+export class PatchNoChangesError extends MiniAgentError {
+  constructor(files: string[]) {
+    super(
+      "PATCH_NO_CHANGES",
+      "Patch contains file headers and context, but no added or deleted lines. Do not submit placeholders or copy an unchanged file as a patch; include focused '-' old lines and '+' replacement lines for an existing file.",
+      { files, additions: 0, deletions: 0 },
+    );
+    this.name = "PatchNoChangesError";
+  }
+}
+
 export class PatchTooLargeError extends MiniAgentError {
   constructor(maxPatchChars: number) {
     super("PATCH_TOO_LARGE", `Patch exceeds maximum size of ${maxPatchChars} characters`, { maxPatchChars });
@@ -91,6 +102,28 @@ export class InvalidPatchFormatError extends MiniAgentError {
   constructor(message: string, details?: unknown) {
     super("INVALID_PATCH_FORMAT", message, details);
     this.name = "InvalidPatchFormatError";
+  }
+}
+
+export class PatchTargetAlreadyExistsError extends MiniAgentError {
+  constructor(targetPath: string) {
+    super(
+      "PATCH_TARGET_ALREADY_EXISTS",
+      `Cannot create ${targetPath}: the target already exists in the workspace. Git tracking is irrelevant; modify the existing file against the content returned by read_file instead of using new file mode or /dev/null.`,
+      { path: targetPath, operation: "CREATE", exists: true },
+    );
+    this.name = "PatchTargetAlreadyExistsError";
+  }
+}
+
+export class PatchTargetMissingError extends MiniAgentError {
+  constructor(targetPath: string, operation: "MODIFY" | "DELETE") {
+    super(
+      "PATCH_TARGET_MISSING",
+      `Cannot ${operation.toLowerCase()} ${targetPath}: the target does not exist in the workspace. Inspect the current filesystem state and use a create-file patch only when the target is actually absent.`,
+      { path: targetPath, operation, exists: false },
+    );
+    this.name = "PatchTargetMissingError";
   }
 }
 
