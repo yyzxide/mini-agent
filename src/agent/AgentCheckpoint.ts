@@ -8,6 +8,7 @@ import type { JsonObject, SessionRecord } from "../session/SessionTypes.js";
 import type { AgentState, AgentStatus, AgentVerificationOutcome } from "./AgentState.js";
 import type { AgentOperatingMode } from "./AgentOperatingMode.js";
 import type { SubAgentBatchResult } from "./SubAgentTypes.js";
+import { parseVerifyFileData } from "../tools/VerifyFileTool.js";
 import {
   mergeFileReadCoverageList,
   parseReadFileResultData,
@@ -357,6 +358,28 @@ function reconcileCheckpointTail(checkpoint: AgentCheckpoint, records: SessionRe
             recovered.effects.fileReadCoverage ?? [],
             result,
           );
+        }
+      }
+      if (success && toolName === "verify_file") {
+        const verification = parseVerifyFileData(record.payload.result);
+        if (verification) {
+          const outcome: AgentVerificationOutcome = {
+            command: `verify_file ${verification.path}`,
+            success: true,
+            exitCode: 0,
+            level: verification.level,
+            repositoryWide: verification.repositoryWide,
+            scopePaths: verification.scopePaths,
+          };
+          recovered.effects.latestVerification = outcome;
+          if (recovered.effects.successfulPatch) {
+            recovered.effects.verificationAttemptedAfterPatch = true;
+            recovered.effects.verificationEvidenceAfterPatch = [
+              ...(recovered.effects.verificationEvidenceAfterPatch ?? []),
+              outcome,
+            ].slice(-20);
+            recovered.effects.verificationAfterPatch = true;
+          }
         }
       }
       if (recovered.inFlightAction === `tool:${toolName}`) delete recovered.inFlightAction;

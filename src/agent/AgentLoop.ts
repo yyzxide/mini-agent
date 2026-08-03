@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
 import type { CommandResult } from "../command/CommandRunner.js";
-import { classifyVerificationCommandInput } from "../command/CommandClassification.js";
+import { classifyVerificationCommandInput, validateVerificationCommandCompatibility } from "../command/CommandClassification.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import type {
   LlmClient,
@@ -18,6 +18,7 @@ import { SessionStore } from "../session/SessionStore.js";
 import type { JsonObject } from "../session/SessionTypes.js";
 import { ToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext } from "../tools/Tool.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 import {
   CommandBlockedError,
   CommandPermissionDeniedError,
@@ -69,6 +70,7 @@ import {
   selectToolsForCapabilityNegotiation,
   type CapabilityUpgrade,
 } from "./CapabilityNegotiator.js";
+import { decisionActionForReservedToolName } from "./CapabilityRegistry.js";
 import { resolveTaskFrame } from "../runtime/TaskFrameResolver.js";
 import { compileTaskFrameContract } from "../runtime/TaskFrameContract.js";
 import { selectTaskFrameConversation } from "../runtime/TaskFrameConversationSelector.js";
@@ -157,8 +159,9 @@ interface StepOutcome {
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES = 3;
+const MAX_RECURRING_GUARDRAIL_FAILURES_WITHOUT_PROGRESS = 4;
 const MAX_REPEATED_DECISIONS = 3;
-const MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES = 2;
+const MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES = 1;
 
 function taskFrameOperation(frame: TaskFrame): string {
   if (frame.effects.repositoryWrite !== "NONE") return "CHANGE_REPOSITORY";
@@ -396,6 +399,9 @@ export class AgentLoop {
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
     let recoverableLlmProtocolFailures = 0;
+    let previousFailedDecisionFingerprint: string | undefined;
+    let repeatedFailedDecisionCount = 0;
+    const recurringGuardrailFailures = new Map<string, number>();
 
     while (!state.isStepLimitReached()) {
       const contractTools = selectToolsForCapabilityNegotiation(
@@ -504,10 +510,13 @@ export class AgentLoop {
         return await this.fail(state, error, input);
       }
 
+      const progressBefore = completionProgressFingerprint(state);
       const outcome = await this.handleDecision(state, decision, input);
       if (outcome.result) {
         return outcome.result;
       }
+      const madeCompletionProgress = completionProgressFingerprint(state) !== progressBefore;
+      if (madeCompletionProgress) recurringGuardrailFailures.clear();
 
       if (outcome.failed && outcome.failureKind === "GUARDRAIL") {
         consecutiveFailures = 0;
@@ -517,15 +526,49 @@ export class AgentLoop {
           previousGuardrailCode = outcome.guardrailCode;
           consecutiveSameGuardrailFailures = 1;
         }
+        const guardrailCode = outcome.guardrailCode ?? "(unknown)";
+        recurringGuardrailFailures.set(
+          guardrailCode,
+          (recurringGuardrailFailures.get(guardrailCode) ?? 0) + 1,
+        );
       } else {
         consecutiveSameGuardrailFailures = 0;
         previousGuardrailCode = undefined;
         consecutiveFailures = outcome.failed ? consecutiveFailures + 1 : 0;
       }
 
+      if (outcome.failed && outcome.failureKind !== "GUARDRAIL") {
+        const failureFingerprint = `${decisionKey}\n${state.lastError ?? "(unknown failure)"}`;
+        if (failureFingerprint === previousFailedDecisionFingerprint) {
+          repeatedFailedDecisionCount += 1;
+        } else {
+          previousFailedDecisionFingerprint = failureFingerprint;
+          repeatedFailedDecisionCount = 1;
+        }
+      } else {
+        previousFailedDecisionFingerprint = undefined;
+        repeatedFailedDecisionCount = 0;
+      }
+
+      if (repeatedFailedDecisionCount >= 2) {
+        const error = `Agent repeated a failed decision without resolving the active error. ${state.lastError ?? "No failure detail was recorded."}`;
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error, input);
+      }
+
       if (consecutiveSameGuardrailFailures > MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES) {
         const error = [
           `Agent could not satisfy guardrail ${previousGuardrailCode ?? "(unknown)"} after repeated attempts.`,
+          state.lastError ?? "No recovery detail was recorded.",
+        ].join(" ");
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error, input);
+      }
+      const recurringGuardrail = [...recurringGuardrailFailures.entries()]
+        .find(([, count]) => count >= MAX_RECURRING_GUARDRAIL_FAILURES_WITHOUT_PROGRESS);
+      if (recurringGuardrail) {
+        const error = [
+          `Agent entered a recurring guardrail cycle without new completion evidence (${recurringGuardrail[0]} repeated ${String(recurringGuardrail[1])} times).`,
           state.lastError ?? "No recovery detail was recorded.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
@@ -1048,6 +1091,14 @@ export class AgentLoop {
     toolInput: JsonObject,
     input: AgentRunInput,
   ): Promise<boolean> {
+    const reservedAction = decisionActionForReservedToolName(toolName);
+    if (reservedAction) {
+      const error = `DECISION_ACTION_REQUIRED: ${toolName} is not a callable tool. Return the top-level ${reservedAction} AgentDecision instead.`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      await this.emit({ type: "guardrail", code: "DECISION_ACTION_REQUIRED", message: error });
+      return true;
+    }
     await this.emit({ type: "tool", toolName, input: toolInput });
     const startedAt = Date.now();
     const result = await this.toolRegistry.execute(toolName, toolInput, this.buildToolContext(state.sessionId, input));
@@ -1059,7 +1110,7 @@ export class AgentLoop {
       durationMs: Date.now() - startedAt,
       ...(resultSummary ? { summary: resultSummary } : {}),
       ...(result.success ? { resultPreview: previewToolResult(result.data) } : {}),
-      ...(result.error?.message ? { error: result.error.message } : {}),
+      ...(!result.success ? { error: formatToolErrorForModel(result.error, `Tool failed: ${toolName}`) } : {}),
     });
     const embeddingCache = readEmbeddingCacheStats(result.metadata?.embeddingCache);
     if (embeddingCache) {
@@ -1073,7 +1124,7 @@ export class AgentLoop {
     });
 
     if (!result.success) {
-      state.setLastError(result.error?.message ?? `Tool failed: ${toolName}`);
+      state.setLastError(formatToolErrorForModel(result.error, `Tool failed: ${toolName}`));
       await this.recordError(state.sessionId, state.lastError);
       return true;
     } else if (toolName === "git_diff" && isGitDiffData(result.data)) {
@@ -1096,12 +1147,15 @@ export class AgentLoop {
       { patch: decision.patch, checkBeforeApply: true },
       this.buildToolContext(state.sessionId, input),
     );
+    const patchError = result.success
+      ? undefined
+      : formatToolErrorForModel(result.error, "Patch application failed");
     await this.emit({
       type: "patch_result",
       success: result.success,
       durationMs: Date.now() - startedAt,
       description: decision.description,
-      ...(result.error?.message ? { error: result.error.message } : {}),
+      ...(patchError ? { error: patchError } : {}),
     });
 
     state.addPatchResult({
@@ -1111,7 +1165,7 @@ export class AgentLoop {
     });
 
     if (!result.success) {
-      const error = result.error?.message ?? "Patch application failed";
+      const error = patchError ?? "Patch application failed";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
       if (result.error?.code === "PATCH_PERMISSION_DENIED") {
@@ -1131,6 +1185,14 @@ export class AgentLoop {
   ): Promise<StepOutcome> {
     const commandInput = commandInputFromDecision(decision);
     const command = renderCommandInput(commandInput);
+    const compatibilityIssue = validateVerificationCommandCompatibility(commandInput);
+    if (compatibilityIssue) {
+      const error = `${compatibilityIssue.code}: ${compatibilityIssue.message} ${compatibilityIssue.guidance}`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      await this.emit({ type: "guardrail", code: compatibilityIssue.code, message: error });
+      return { failed: true, failureKind: "GUARDRAIL", guardrailCode: compatibilityIssue.code };
+    }
     const isHighRiskCommand = isHighRiskCommandInput(commandInput);
     await this.emit({ type: "command", command, description: decision.description });
 
@@ -1823,4 +1885,19 @@ export class AgentLoop {
     } as AgentProgressEvent;
     await this.onProgress?.(enriched);
   }
+}
+
+function completionProgressFingerprint(state: AgentState): string {
+  const evidence = state.getCompletionEvidence();
+  return JSON.stringify({
+    successfulPatches: state.patchResults.filter((result) => result.result.success).length,
+    successfulTools: state.toolResults.filter((result) => result.result.success).length,
+    verificationEvidence: evidence.verificationEvidence.map((result) => [
+      result.command,
+      result.success,
+      result.level,
+    ]),
+    fileReadCoverage: state.getFileReadCoverage().map((entry) => [entry.path, entry.complete, entry.readCalls]),
+    delegationBatches: state.delegationBatches.length,
+  });
 }

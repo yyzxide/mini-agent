@@ -145,6 +145,26 @@ describe("ToolRegistry", () => {
     expect(result.error?.message).toContain("maxLines");
   });
 
+  it("verifies standalone HTML without passing it to node --check", async () => {
+    await fs.writeFile(path.join(repoPath, "game.html"), "<!doctype html><html><head></head><body><script>const score = 2 + 2;</script></body></html>\n", "utf8");
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("verify_file", { path: "game.html" }, { repoPath });
+
+    expectSuccess<{ path: string; level: string; scriptCount: number }>(result);
+    expect(result.data).toMatchObject({ path: "game.html", level: "SYNTAX", scriptCount: 1 });
+  });
+
+  it("reports inline JavaScript syntax failures from an HTML file", async () => {
+    await fs.writeFile(path.join(repoPath, "broken.html"), "<html><head></head><body><script>const = ;</script></body></html>\n", "utf8");
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("verify_file", { path: "broken.html" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("FILE_VERIFICATION_FAILED");
+  });
+
   it("marks fetch_url as a review-level tool", () => {
     const registry = createDefaultToolRegistry();
 

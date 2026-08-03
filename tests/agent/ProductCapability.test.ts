@@ -20,7 +20,7 @@ describe("product capability architecture", () => {
     const capability = getProductCapability("REPOSITORY_WRITE");
 
     expect(answer).toContain(capability.zh.name);
-    expect(answer).toContain(capability.tools[0]!);
+    expect(answer).toContain(capability.actions[0]!);
     expect(answer).toContain(capability.effects[0]!);
   });
 
@@ -28,7 +28,8 @@ describe("product capability architecture", () => {
     expect(listProductCapabilities().length).toBeGreaterThanOrEqual(7);
     expect(formatCapabilityRegistryForPrompt()).toContain("supported=true");
     expect(formatCapabilityRegistryForPrompt()).toContain("WEB_RESEARCH");
-    expect(formatCapabilityRegistryForPrompt()).toContain("apply_patch");
+    expect(formatCapabilityRegistryForPrompt()).toContain("actions=APPLY_PATCH");
+    expect(formatCapabilityRegistryForPrompt()).not.toContain("tools=run_command");
     expect(formatCapabilityRegistryForPrompt()).toContain("MULTI_AGENT_COLLABORATION");
   });
 

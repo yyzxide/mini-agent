@@ -76,6 +76,64 @@ describe("TaskGuardrails", () => {
     });
   });
 
+  it("treats HTML as source and accepts scoped verify_file evidence", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal: "Optimize game.html",
+      taskContract: createTestTaskContract({
+        objective: "Optimize game.html",
+        target: "REPOSITORY",
+        effects: {
+          repositoryWrite: "REQUIRED",
+          verification: "STATIC",
+          verificationBasis: "TASK_INFERRED",
+        },
+      }),
+    });
+    addSuccessfulPatch(state, "game.html");
+    state.addToolResult({
+      toolName: "verify_file",
+      input: { path: "game.html" },
+      result: {
+        success: true,
+        data: {
+          path: "game.html",
+          level: "SYNTAX",
+          repositoryWide: false,
+          scopePaths: ["game.html"],
+          checks: ["html-structure", "inline-classic-javascript-parse"],
+        },
+      },
+    });
+
+    expect(buildTaskCompletionContract(state)).toMatchObject({ kind: "SOURCE_CHANGE", requiredVerificationLevel: "SYNTAX" });
+    expect(validateAgentDecisionGuardrails(state, successfulFinal())).toBeUndefined();
+  });
+
+  it("preserves a verification level that the user explicitly required", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal: "Optimize game.html and pass static validation",
+      taskContract: createTestTaskContract({
+        objective: "Optimize game.html and pass static validation",
+        target: "REPOSITORY",
+        effects: {
+          repositoryWrite: "REQUIRED",
+          verification: "STATIC",
+          verificationBasis: "USER_REQUIRED",
+        },
+      }),
+    });
+    addSuccessfulPatch(state, "game.html");
+
+    expect(buildTaskCompletionContract(state)).toMatchObject({
+      requiredVerificationLevel: "STATIC",
+      verificationReason: expect.stringContaining("explicitly requested"),
+    });
+  });
+
   it("blocks a successful final when source code was changed without verification", () => {
     const state = stateFor("Add subtract to src/math.ts.");
     addSuccessfulPatch(state, "src/math.ts");

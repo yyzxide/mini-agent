@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyVerificationCommand,
+  classifyVerificationCommandInput,
   isTestCommand,
   isVerificationCommand,
   isVerificationRelevant,
   verificationLevelAtLeast,
+  validateVerificationCommandCompatibility,
 } from "../../src/command/CommandClassification.js";
 
 describe("CommandClassification", () => {
@@ -52,5 +54,14 @@ describe("CommandClassification", () => {
     expect(scoped).toMatchObject({ repositoryWide: false, scopePaths: ["src/other.js"] });
     expect(isVerificationRelevant(scoped, ["src/app.js"])).toBe(false);
     expect(isVerificationRelevant(classifyVerificationCommand("npm test"), ["src/app.js"])).toBe(true);
+  });
+
+  it("does not mistake an incompatible verifier/target pair for evidence", () => {
+    const input = { executable: "node", args: ["--check", "2048.html"] };
+    expect(validateVerificationCommandCompatibility(input)).toMatchObject({
+      code: "VERIFIER_TARGET_MISMATCH",
+    });
+    expect(classifyVerificationCommandInput(input).level).toBe("NONE");
+    expect(classifyVerificationCommand("node --check 2048.html").level).toBe("NONE");
   });
 });

@@ -54,6 +54,7 @@ const REPOSITORY_READ_TOOLS = new Set([
   "list_files",
   "read_file",
   "search_code",
+  "verify_file",
 ]);
 const WEB_TOOLS = new Set(["web_search", "fetch_url"]);
 
@@ -151,6 +152,7 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
       `Task objective: ${contract.taskFrame.objective}`,
       `Task target: ${contract.taskFrame.target}`,
       `Repository mutation: ${contract.taskFrame.effects.repositoryWrite}`,
+      `Verification request: ${contract.taskFrame.effects.verification} / ${contract.taskFrame.effects.verificationBasis}`,
       `Answer form: ${contract.taskFrame.answer.shape} / ${contract.taskFrame.answer.depth}`,
       `Task completion criteria: ${contract.taskFrame.completionCriteria.join(" | ") || "satisfy the objective"}`,
     ] : []),

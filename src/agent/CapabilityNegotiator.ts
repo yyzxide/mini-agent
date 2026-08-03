@@ -50,17 +50,17 @@ export function selectToolsForCapabilityNegotiation(
   tools: ToolSpec[],
   contract: AgentTaskContract,
 ): ToolSpec[] {
+  const callableTools = tools.filter((tool) => tool.name !== "apply_patch");
   if (contract.adaptationPolicy === "FIXED_READ_ONLY") {
-    return tools.filter((tool) =>
+    return callableTools.filter((tool) =>
       isToolAllowedByTaskContract(tool, contract)
       || isRequestableSafeTaskFrameMcpTool(tool, contract),
     );
   }
-  return tools.filter((tool) =>
+  return callableTools.filter((tool) =>
     isToolAllowedByTaskContract(tool, contract)
     || (
-      tool.name !== "apply_patch"
-      && tool.annotations?.readOnlyHint === true
+      tool.annotations?.readOnlyHint === true
       && tool.annotations.destructiveHint === false
     )
     || (

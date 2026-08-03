@@ -55,6 +55,26 @@ describe("CapabilityNegotiator", () => {
     expect(names).not.toContain("apply_patch");
   });
 
+  it("never exposes the internal patch executor as a TOOL_CALL even after write authorization", () => {
+    const contract = createTestTaskContract({
+      objective: "Modify a repository file",
+      target: "REPOSITORY",
+      effects: { repositoryRead: true, repositoryWrite: "REQUIRED" },
+    });
+    const writeAuthorized = {
+      ...contract,
+      capabilities: { ...contract.capabilities, repositoryWrite: true },
+    };
+    const names = selectToolsForCapabilityNegotiation(
+      createDefaultToolRegistry().listSpecs(),
+      writeAuthorized,
+    ).map((tool) => tool.name);
+
+    expect(writeAuthorized.capabilities.repositoryWrite).toBe(true);
+    expect(names).not.toContain("apply_patch");
+    expect(names).toContain("verify_file");
+  });
+
   it("upgrades an answer-only contract when the model selects a Web tool", () => {
     const contract = answerOnlyContract("需要核实一个外部事实");
     const result = negotiateCapabilities({

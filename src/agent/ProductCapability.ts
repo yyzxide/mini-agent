@@ -57,7 +57,7 @@ function renderInventory(locale: "zh" | "en"): string {
     return [
       "Mini Coding Agent uses one AgentLoop and compiles each request into a least-privilege TaskFrame.",
       "",
-      ...entries.map((entry) => `- ${entry.en.name}: ${entry.en.description}${entry.tools.length > 0 ? ` Tools: ${entry.tools.map((tool) => `\`${tool}\``).join(", ")}.` : ""}`),
+      ...entries.map((entry) => `- ${entry.en.name}: ${entry.en.description}${renderMechanisms(entry, "en")}`),
       "",
       "A capability disabled for one request is only unavailable to that request; it is not missing from the overall product.",
     ].join("\n");
@@ -65,7 +65,7 @@ function renderInventory(locale: "zh" | "en"): string {
   return [
     "Mini Coding Agent 使用一个 AgentLoop，并把每条请求编译为最小权限 TaskFrame，不需要手动切换模式。",
     "",
-    ...entries.map((entry) => `- ${entry.zh.name}：${entry.zh.description}${entry.tools.length > 0 ? ` 工具：${entry.tools.map((tool) => `\`${tool}\``).join("、")}。` : ""}`),
+    ...entries.map((entry) => `- ${entry.zh.name}：${entry.zh.description}${renderMechanisms(entry, "zh")}`),
     "",
     "某条请求没有开放某项工具，只表示该请求不需要这项能力，不代表整个产品缺少它。",
   ].join("\n");
@@ -75,14 +75,14 @@ function renderFocusedCapability(entry: ProductCapabilityDefinition, locale: "zh
   if (locale === "en") {
     return [
       `Yes. ${entry.en.name} is supported. ${entry.en.description}`,
-      entry.tools.length > 0 ? `It is provided through ${entry.tools.map((tool) => `\`${tool}\``).join(" and ")} when TaskFrame enables ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")}.` : "",
+      [...entry.tools, ...entry.actions].length > 0 ? `It is provided through ${formatMechanismNames(entry)} when TaskFrame enables ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")}.` : "",
       entry.en.limitation ?? "",
       "TaskFrame effects are selected from the user's goal; one request's grants do not define the product's global capabilities.",
     ].filter(Boolean).join("\n\n");
   }
   return [
     `支持${entry.zh.name}。${entry.zh.description}`,
-    entry.tools.length > 0 ? `该能力通过 ${entry.tools.map((tool) => `\`${tool}\``).join("、")} 提供，由 TaskFrame 的 ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")} 效果授权。` : "",
+    [...entry.tools, ...entry.actions].length > 0 ? `该能力通过 ${formatMechanismNames(entry)} 提供，由 TaskFrame 的 ${entry.effects.map((effect) => `\`${effect}\``).join(" / ")} 效果授权。` : "",
     entry.zh.limitation ?? "",
     "TaskFrame 会根据用户目标生成；某条请求没有开放工具，并不代表产品没有该能力。",
   ].filter(Boolean).join("\n\n");
@@ -104,16 +104,28 @@ function renderLimitationExplanation(
     return [
       priorDenialFound ? "The previous answer was wrong; the session contains a false capability denial." : "A previous capability denial would be an answer error, not an actual product limitation.",
       "The model confused the current request's least-privilege TaskContract with the overall product capability registry.",
-      `The registry is authoritative: ${entries.map((entry) => `${entry.en.name} is supported through ${entry.tools.join(" / ")}`).join("; ")}.`,
+      `The registry is authoritative: ${entries.map((entry) => `${entry.en.name} is supported through ${formatMechanismNames(entry)}`).join("; ")}.`,
       "Explaining this contradiction uses local product and session facts. It must not trigger unrelated web searches merely to prove that networking works.",
     ].join("\n\n");
   }
   return [
     priorDenialFound ? "上一轮回答错了；会话记录中确实存在与产品事实冲突的能力否认。" : "如果之前否认了这项能力，那是回答错误，不是产品真的缺少能力。",
     "根因是模型把当前请求的最小权限 TaskContract 错误泛化成了整个产品的能力清单。",
-    `Capability Registry 才是权威事实源：${entries.map((entry) => `${entry.zh.name}由 ${entry.tools.map((tool) => `\`${tool}\``).join("、")} 提供`).join("；")}。`,
+    `Capability Registry 才是权威事实源：${entries.map((entry) => `${entry.zh.name}由 ${formatMechanismNames(entry)} 提供`).join("；")}。`,
     "解释这类矛盾只需要本地产品事实和 Session 记录，不应该为了证明联网能力而搜索天气或外部 AI 资料。",
   ].join("\n\n");
+}
+
+function formatMechanismNames(entry: ProductCapabilityDefinition): string {
+  return [...entry.tools, ...entry.actions].map((name) => `\`${name}\``).join("、");
+}
+
+function renderMechanisms(entry: ProductCapabilityDefinition, locale: "zh" | "en"): string {
+  const parts = [
+    entry.tools.length > 0 ? `${locale === "zh" ? "工具" : "Tools"}: ${entry.tools.map((name) => `\`${name}\``).join(locale === "zh" ? "、" : ", ")}` : undefined,
+    entry.actions.length > 0 ? `${locale === "zh" ? "动作" : "Actions"}: ${entry.actions.map((name) => `\`${name}\``).join(locale === "zh" ? "、" : ", ")}` : undefined,
+  ].filter((value): value is string => value !== undefined);
+  return parts.length > 0 ? ` ${parts.join(locale === "zh" ? "；" : "; ")}。` : "";
 }
 
 function containsGlobalDenial(text: string, capability: "WEB_RESEARCH" | "REPOSITORY_WRITE" | "MULTI_AGENT_COLLABORATION"): boolean {
