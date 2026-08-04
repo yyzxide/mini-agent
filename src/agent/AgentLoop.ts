@@ -231,7 +231,21 @@ export class AgentLoop {
     if (
       taskContract.taskFrame === undefined
     ) {
+      const understandingMode = "task_frame";
       const startedAt = Date.now();
+      await this.eventStore.appendEvent(sessionId, {
+        type: "LLM_CALL_STARTED",
+        payload: { mode: understandingMode, step: 0 },
+      });
+      // TaskFrame compilation is the first potentially slow network operation.
+      // Announce it before awaiting the provider so an interactive CLI never
+      // looks frozen between the session line and semantic understanding.
+      await this.emit({
+        type: "llm",
+        phase: "started",
+        mode: understandingMode,
+        sessionId,
+      });
       const resolved = await resolveTaskFrame({
         userGoal,
         llmClient: this.llmClient,
@@ -336,15 +350,8 @@ export class AgentLoop {
       taskContract,
     });
     this.activeState = state;
-    if (understandingEvent) await this.emit(understandingEvent);
-    await this.emit({
-      type: "task_contract",
-      kind: taskContract.kind,
-      outputKind: taskContract.outputKind,
-    });
     if (understandingDurationMs > 0) {
       const understandingMode = "task_frame";
-      await this.emit({ type: "llm", phase: "started", mode: understandingMode });
       await this.recordLlmUsage(
         state,
         understandingMetrics,
@@ -352,6 +359,12 @@ export class AgentLoop {
         understandingDurationMs,
       );
     }
+    if (understandingEvent) await this.emit(understandingEvent);
+    await this.emit({
+      type: "task_contract",
+      kind: taskContract.kind,
+      outputKind: taskContract.outputKind,
+    });
     if (taskContract.capabilities.repositoryWrite) {
       this.activeTaskDiffBaseline = await new TaskDiffService({ repoPath: this.repoPath })
         .captureWorkingTree()

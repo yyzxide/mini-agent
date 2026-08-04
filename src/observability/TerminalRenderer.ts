@@ -252,7 +252,8 @@ export class TerminalRenderer {
 
   private renderLlm(event: Extract<AgentRuntimeEvent, { type: "llm" }>): void {
     if (event.phase === "started") {
-      this.line(`${this.paint("magenta", "├─")} [thinking]${event.step === undefined ? "" : ` step=${String(event.step + 1)}`} · model decision${event.model ? ` · ${event.model}` : ""}`);
+      const activity = event.mode === "task_frame" ? "task understanding" : "model decision";
+      this.line(`${this.paint("magenta", "├─")} [thinking]${event.step === undefined ? "" : ` step=${String(event.step + 1)}`} · ${activity}${event.model ? ` · ${event.model}` : ""}`);
       return;
     }
     if (event.phase === "failed") {

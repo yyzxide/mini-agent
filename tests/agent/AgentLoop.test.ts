@@ -87,6 +87,11 @@ describe("AgentLoop", () => {
     ];
     const llmClient: LlmClient = {
       compileTaskFrame: async (input) => {
+        expect(progress).toContainEqual(expect.objectContaining({
+          type: "llm",
+          phase: "started",
+          mode: "task_frame",
+        }));
         expect(input.userGoal).toBe("把 demo.txt 改好并验证");
         return {
           success: true,
@@ -172,6 +177,16 @@ describe("AgentLoop", () => {
       source: "MODEL_TASK_FRAME",
       mutationRequirement: "REQUIRED",
     }));
+    const taskFrameStarted = progress.findIndex((event) => (
+      event.type === "llm" && event.phase === "started" && event.mode === "task_frame"
+    ));
+    const taskFrameFinished = progress.findIndex((event) => (
+      event.type === "llm" && event.phase === "finished" && event.mode === "task_frame"
+    ));
+    const understandingFinished = progress.findIndex((event) => event.type === "understanding");
+    expect(taskFrameStarted).toBeGreaterThanOrEqual(0);
+    expect(taskFrameFinished).toBeGreaterThan(taskFrameStarted);
+    expect(understandingFinished).toBeGreaterThan(taskFrameFinished);
     await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8"))
       .resolves.toBe("single control chain\n");
   });
