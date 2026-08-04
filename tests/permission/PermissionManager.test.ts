@@ -62,6 +62,35 @@ describe("PermissionManager", () => {
     expect(decision.reason).toContain("explicit approval");
   });
 
+  it("accepts the numbered yes option shown by the prompt", async () => {
+    let prompt = "";
+    const manager = new PermissionManager({
+      prompt: async (message) => {
+        prompt = message;
+        return "1";
+      },
+    });
+
+    const decision = await manager.check({
+      level: PermissionLevel.REVIEW,
+      action: "external_write",
+    });
+
+    expect(prompt).toContain("1. yes");
+    expect(decision).toMatchObject({ allowed: true, mode: "USER_APPROVED" });
+  });
+
+  it("rejects the numbered no option shown by the prompt", async () => {
+    const manager = new PermissionManager({ prompt: async () => "2" });
+
+    const decision = await manager.check({
+      level: PermissionLevel.REVIEW,
+      action: "external_write",
+    });
+
+    expect(decision).toMatchObject({ allowed: false, mode: "USER_REJECTED" });
+  });
+
   it("blocks sudo commands", async () => {
     const manager = new PermissionManager();
 

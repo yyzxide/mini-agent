@@ -30,5 +30,5 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify architecture, exports, docs, build, unused code, and tests
+      - name: Verify architecture, exports, docs, CLI entry, build, unused code, and tests
         run: pnpm verify

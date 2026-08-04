@@ -1,7 +1,7 @@
 import type { AgentState } from "../agent/AgentState.js";
 import type { TaskPhase } from "./ContextTypes.js";
 
-const TARGET_EVIDENCE_TOOLS = new Set(["read_file", "search_code", "knowledge_search"]);
+const TARGET_EVIDENCE_TOOLS = new Set(["read_file", "search_code", "knowledge_search", "skill_read"]);
 
 export function detectTaskPhase(state: AgentState): TaskPhase {
   if (state.lastError) {

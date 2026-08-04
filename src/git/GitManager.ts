@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { execa } from "execa";
 import { MiniAgentError } from "../utils/errors.js";
 import { normalizeRepoPath, resolveRepoPath, toRepoRelativePath, truncateText } from "../utils/fs.js";
@@ -27,6 +30,11 @@ export interface GitDiffSummary {
   fileCount: number;
   additions: number;
   deletions: number;
+  stat: string;
+}
+
+interface WorkingTreeSummary {
+  changedFiles: string[];
   stat: string;
 }
 
@@ -118,19 +126,11 @@ export class GitManager {
   }
 
   async getChangedFiles(): Promise<string[]> {
-    const result = await this.runGit(["diff", "--name-only"], "Failed to read changed files");
-    const unstaged = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-
-    const cached = await this.runGit(["diff", "--cached", "--name-only"], "Failed to read staged changed files");
-    const staged = cached.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-
-    return [...new Set([...unstaged, ...staged])].sort();
+    return (await this.captureWorkingTreeSummary()).changedFiles;
   }
 
   async generateDiffSummary(): Promise<GitDiffSummary> {
-    const statResult = await this.runGit(["diff", "--shortstat"], "Failed to summarize diff");
-    const changedFiles = await this.getChangedFiles();
-    const stat = statResult.stdout.trim();
+    const { changedFiles, stat } = await this.captureWorkingTreeSummary();
     const fileCount = Number.parseInt(stat.match(/(\d+)\s+files?\s+changed/)?.[1] ?? String(changedFiles.length), 10);
     const additions = Number.parseInt(stat.match(/(\d+)\s+insertions?\(\+\)/)?.[1] ?? "0", 10);
     const deletions = Number.parseInt(stat.match(/(\d+)\s+deletions?\(-\)/)?.[1] ?? "0", 10);
@@ -142,6 +142,54 @@ export class GitManager {
       deletions: Number.isFinite(deletions) ? deletions : 0,
       stat,
     };
+  }
+
+  private async captureWorkingTreeSummary(): Promise<WorkingTreeSummary> {
+    const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "mini-agent-git-index-"));
+    const indexPath = path.join(tempDirectory, "index");
+    const objectDirectory = path.join(tempDirectory, "objects");
+
+    try {
+      await fs.mkdir(objectDirectory, { recursive: true });
+      const repositoryObjects = await this.runGit(
+        ["rev-parse", "--git-path", "objects"],
+        "Failed to locate Git object directory",
+      );
+      const env = {
+        GIT_INDEX_FILE: indexPath,
+        GIT_OBJECT_DIRECTORY: objectDirectory,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: path.resolve(this.repoPath, repositoryObjects.stdout.trim()),
+      };
+      const head = await execa("git", ["rev-parse", "--verify", "HEAD"], {
+        cwd: this.repoPath,
+        reject: false,
+        encoding: "utf8",
+      });
+      await this.runGit(
+        head.exitCode === 0 ? ["read-tree", "HEAD"] : ["read-tree", "--empty"],
+        "Failed to initialize temporary Git index",
+        env,
+      );
+      await this.runGit([
+        "add",
+        "-A",
+        "--",
+        ".",
+        ":(exclude).mini-agent",
+        ":(exclude).mini-agent/**",
+      ], "Failed to snapshot working tree", env);
+      const [names, shortstat] = await Promise.all([
+        this.runGit(["diff", "--cached", "--name-only", "-z", "--"], "Failed to read changed files", env),
+        this.runGit(["diff", "--cached", "--shortstat", "--"], "Failed to summarize diff", env),
+      ]);
+
+      return {
+        changedFiles: names.stdout.split("\0").filter(Boolean).sort(),
+        stat: shortstat.stdout.trim(),
+      };
+    } finally {
+      await fs.rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   async getDiff(options: GetDiffOptions = {}): Promise<GitDiffResult> {
@@ -166,12 +214,17 @@ export class GitManager {
     return { diff: text, truncated };
   }
 
-  private async runGit(args: string[], failureMessage: string): Promise<{ stdout: string; stderr: string }> {
+  private async runGit(
+    args: string[],
+    failureMessage: string,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{ stdout: string; stderr: string }> {
     const result = await execa("git", args, {
       cwd: this.repoPath,
       reject: false,
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
+      ...(env ? { env } : {}),
     });
 
     if (result.exitCode !== 0) {

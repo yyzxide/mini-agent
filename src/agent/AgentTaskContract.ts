@@ -54,8 +54,11 @@ const REPOSITORY_READ_TOOLS = new Set([
   "list_files",
   "read_file",
   "search_code",
+  "verify_file",
+  "skill_read",
 ]);
 const WEB_TOOLS = new Set(["web_search", "fetch_url"]);
+const KNOWLEDGE_TOOLS = new Set(["knowledge_search", "knowledge_index"]);
 
 export function createDefaultAgentTaskContract(): AgentTaskContract {
   return {
@@ -107,7 +110,7 @@ export function isToolAllowedByTaskContract(
 ): boolean {
   if (!tool) return false;
   if (tool.name === "apply_patch") return contract.capabilities.repositoryWrite;
-  if (tool.name === "knowledge_search") return contract.capabilities.knowledgeAccess;
+  if (KNOWLEDGE_TOOLS.has(tool.name)) return contract.capabilities.knowledgeAccess;
   if (WEB_TOOLS.has(tool.name)) return contract.capabilities.webAccess;
   if (REPOSITORY_READ_TOOLS.has(tool.name)) return contract.capabilities.repositoryRead;
 
@@ -151,6 +154,7 @@ export function formatAgentTaskContract(contract: AgentTaskContract): string {
       `Task objective: ${contract.taskFrame.objective}`,
       `Task target: ${contract.taskFrame.target}`,
       `Repository mutation: ${contract.taskFrame.effects.repositoryWrite}`,
+      `Verification request: ${contract.taskFrame.effects.verification} / ${contract.taskFrame.effects.verificationBasis}`,
       `Answer form: ${contract.taskFrame.answer.shape} / ${contract.taskFrame.answer.depth}`,
       `Task completion criteria: ${contract.taskFrame.completionCriteria.join(" | ") || "satisfy the objective"}`,
     ] : []),

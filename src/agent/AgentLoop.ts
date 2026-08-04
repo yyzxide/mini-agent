@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CommandRunner, isHighRiskCommandInput } from "../command/CommandRunner.js";
-import type { CommandInput, CommandResult } from "../command/CommandRunner.js";
-import { classifyVerificationCommandInput } from "../command/CommandClassification.js";
+import type { CommandResult } from "../command/CommandRunner.js";
+import { classifyVerificationCommandInput, validateVerificationCommandCompatibility } from "../command/CommandClassification.js";
 import { ContextBuilder } from "../context/ContextBuilder.js";
 import type {
   LlmClient,
@@ -18,6 +18,7 @@ import { SessionStore } from "../session/SessionStore.js";
 import type { JsonObject } from "../session/SessionTypes.js";
 import { ToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext } from "../tools/Tool.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 import {
   CommandBlockedError,
   CommandPermissionDeniedError,
@@ -53,12 +54,10 @@ import {
   estimateConversationTokens,
   type ConversationMessage,
 } from "../session/ConversationHistory.js";
-import { redactSecrets } from "../utils/logger.js";
 import type {
   AgentRuntimeEvent,
   AgentRuntimeEventHandler,
   RuntimeConversationTrace,
-  RuntimeLlmUsage,
 } from "../observability/AgentRuntimeEvent.js";
 import {
   buildWebLimitationFinal,
@@ -71,10 +70,34 @@ import {
   selectToolsForCapabilityNegotiation,
   type CapabilityUpgrade,
 } from "./CapabilityNegotiator.js";
+import { decisionActionForReservedToolName } from "./CapabilityRegistry.js";
 import { resolveTaskFrame } from "../runtime/TaskFrameResolver.js";
 import { compileTaskFrameContract } from "../runtime/TaskFrameContract.js";
 import { selectTaskFrameConversation } from "../runtime/TaskFrameConversationSelector.js";
 import type { TaskFrame } from "../runtime/TaskFrame.js";
+import { buildTaskCompletionContract } from "./TaskCompletionContract.js";
+import {
+  aggregateLlmMetrics,
+  collaborationResultMetadata,
+  commandInputFromDecision,
+  commandResultToPayload,
+  drainLlmCallMetrics,
+  hasAppliedDelegatedPatch,
+  hasSuccessfulDelegatedPatchProposal,
+  hasSuccessfulDelegatedReview,
+  isGitDiffData,
+  isRecoverableLlmProtocolFailure,
+  isRedundantSuccessfulIdempotentToolCall,
+  isRedundantSuccessfulWebToolCall,
+  previewToolResult,
+  priorResponseGuardOptions,
+  readEmbeddingCacheStats,
+  renderCommandInput,
+  stableDecisionKey,
+  summarizeToolResult,
+  taskDiffRecordMetadata,
+  taskDiffResultMetadata,
+} from "./AgentLoopSupport.js";
 
 export interface AgentLoopOptions {
   repoPath: string;
@@ -114,6 +137,7 @@ export interface AgentRunResult {
   finalDiff: string;
   steps: number;
   error?: string;
+  failureCode?: string;
   delegationBatches?: number;
   subAgents?: number;
   taskKind: AgentTaskContract["kind"];
@@ -137,8 +161,9 @@ interface StepOutcome {
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES = 3;
+const MAX_RECURRING_GUARDRAIL_FAILURES_WITHOUT_PROGRESS = 4;
 const MAX_REPEATED_DECISIONS = 3;
-const MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES = 2;
+const MAX_RECOVERABLE_LLM_PROTOCOL_FAILURES = 1;
 
 function taskFrameOperation(frame: TaskFrame): string {
   if (frame.effects.repositoryWrite !== "NONE") return "CHANGE_REPOSITORY";
@@ -206,7 +231,21 @@ export class AgentLoop {
     if (
       taskContract.taskFrame === undefined
     ) {
+      const understandingMode = "task_frame";
       const startedAt = Date.now();
+      await this.eventStore.appendEvent(sessionId, {
+        type: "LLM_CALL_STARTED",
+        payload: { mode: understandingMode, step: 0 },
+      });
+      // TaskFrame compilation is the first potentially slow network operation.
+      // Announce it before awaiting the provider so an interactive CLI never
+      // looks frozen between the session line and semantic understanding.
+      await this.emit({
+        type: "llm",
+        phase: "started",
+        mode: understandingMode,
+        sessionId,
+      });
       const resolved = await resolveTaskFrame({
         userGoal,
         llmClient: this.llmClient,
@@ -311,15 +350,8 @@ export class AgentLoop {
       taskContract,
     });
     this.activeState = state;
-    if (understandingEvent) await this.emit(understandingEvent);
-    await this.emit({
-      type: "task_contract",
-      kind: taskContract.kind,
-      outputKind: taskContract.outputKind,
-    });
     if (understandingDurationMs > 0) {
       const understandingMode = "task_frame";
-      await this.emit({ type: "llm", phase: "started", mode: understandingMode });
       await this.recordLlmUsage(
         state,
         understandingMetrics,
@@ -327,6 +359,12 @@ export class AgentLoop {
         understandingDurationMs,
       );
     }
+    if (understandingEvent) await this.emit(understandingEvent);
+    await this.emit({
+      type: "task_contract",
+      kind: taskContract.kind,
+      outputKind: taskContract.outputKind,
+    });
     if (taskContract.capabilities.repositoryWrite) {
       this.activeTaskDiffBaseline = await new TaskDiffService({ repoPath: this.repoPath })
         .captureWorkingTree()
@@ -367,7 +405,7 @@ export class AgentLoop {
       ].join(" ");
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
-      return await this.fail(state, error, input);
+      return await this.fail(state, error, input, "TASK_FRAME_UNRESOLVED");
     }
     await this.recordCheckpoint(state);
     let consecutiveFailures = 0;
@@ -376,6 +414,9 @@ export class AgentLoop {
     let previousDecisionKey: string | undefined;
     let repeatedDecisionCount = 0;
     let recoverableLlmProtocolFailures = 0;
+    let previousFailedDecisionFingerprint: string | undefined;
+    let repeatedFailedDecisionCount = 0;
+    const recurringGuardrailFailures = new Map<string, number>();
 
     while (!state.isStepLimitReached()) {
       const contractTools = selectToolsForCapabilityNegotiation(
@@ -481,13 +522,16 @@ export class AgentLoop {
           ? `Agent repeated a decision without resolving the active guardrail: ${state.lastError}`
           : "Agent repeated the same decision too many times";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "REPEATED_DECISION");
       }
 
+      const progressBefore = completionProgressFingerprint(state);
       const outcome = await this.handleDecision(state, decision, input);
       if (outcome.result) {
         return outcome.result;
       }
+      const madeCompletionProgress = completionProgressFingerprint(state) !== progressBefore;
+      if (madeCompletionProgress) recurringGuardrailFailures.clear();
 
       if (outcome.failed && outcome.failureKind === "GUARDRAIL") {
         consecutiveFailures = 0;
@@ -497,10 +541,34 @@ export class AgentLoop {
           previousGuardrailCode = outcome.guardrailCode;
           consecutiveSameGuardrailFailures = 1;
         }
+        const guardrailCode = outcome.guardrailCode ?? "(unknown)";
+        recurringGuardrailFailures.set(
+          guardrailCode,
+          (recurringGuardrailFailures.get(guardrailCode) ?? 0) + 1,
+        );
       } else {
         consecutiveSameGuardrailFailures = 0;
         previousGuardrailCode = undefined;
         consecutiveFailures = outcome.failed ? consecutiveFailures + 1 : 0;
+      }
+
+      if (outcome.failed && outcome.failureKind !== "GUARDRAIL") {
+        const failureFingerprint = `${decisionKey}\n${state.lastError ?? "(unknown failure)"}`;
+        if (failureFingerprint === previousFailedDecisionFingerprint) {
+          repeatedFailedDecisionCount += 1;
+        } else {
+          previousFailedDecisionFingerprint = failureFingerprint;
+          repeatedFailedDecisionCount = 1;
+        }
+      } else {
+        previousFailedDecisionFingerprint = undefined;
+        repeatedFailedDecisionCount = 0;
+      }
+
+      if (repeatedFailedDecisionCount >= 2) {
+        const error = `Agent repeated a failed decision without resolving the active error. ${state.lastError ?? "No failure detail was recorded."}`;
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error, input, "REPEATED_FAILED_DECISION");
       }
 
       if (consecutiveSameGuardrailFailures > MAX_CONSECUTIVE_SAME_GUARDRAIL_FAILURES) {
@@ -509,12 +577,22 @@ export class AgentLoop {
           state.lastError ?? "No recovery detail was recorded.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "REPEATED_GUARDRAIL");
+      }
+      const recurringGuardrail = [...recurringGuardrailFailures.entries()]
+        .find(([, count]) => count >= MAX_RECURRING_GUARDRAIL_FAILURES_WITHOUT_PROGRESS);
+      if (recurringGuardrail) {
+        const error = [
+          `Agent entered a recurring guardrail cycle without new completion evidence (${recurringGuardrail[0]} repeated ${String(recurringGuardrail[1])} times).`,
+          state.lastError ?? "No recovery detail was recorded.",
+        ].join(" ");
+        await this.recordError(state.sessionId, error);
+        return await this.fail(state, error, input, "RECURRING_GUARDRAIL");
       }
       if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
         const error = "Agent failed too many consecutive steps";
         await this.recordError(state.sessionId, error);
-        return await this.fail(state, error, input);
+        return await this.fail(state, error, input, "CONSECUTIVE_FAILURES");
       }
 
       state.incrementStep();
@@ -525,7 +603,7 @@ export class AgentLoop {
       ? `Agent stopped after reaching max steps (${state.maxSteps}). Last unresolved issue: ${state.lastError}`
       : `Agent stopped after reaching max steps (${state.maxSteps})`;
     await this.recordError(sessionId, error);
-    return await this.fail(state, error, input);
+    return await this.fail(state, error, input, "STEP_LIMIT_REACHED");
   }
 
   private async handleDecision(
@@ -587,6 +665,7 @@ export class AgentLoop {
         if (isRedundantSuccessfulIdempotentToolCall(
           state,
           this.availableTools.find((tool) => tool.name === decision.toolName),
+          this.availableTools,
           decision.toolName,
           decision.input,
         )) {
@@ -594,7 +673,7 @@ export class AgentLoop {
           return {
             failed: await this.recordCapabilityViolation(
               state,
-              `${code}: ${decision.toolName} already succeeded with the same input and no patch or command has changed the observable state; use the existing result or choose materially different input`,
+              `${code}: ${decision.toolName} already succeeded with the same input and no intervening action has changed observable state; use the existing result or choose materially different input`,
             ),
             failureKind: "GUARDRAIL",
             guardrailCode: code,
@@ -687,7 +766,7 @@ export class AgentLoop {
           ?? { failed: false, result: await this.finish(state, decision.summary, decision.success, input) };
 
       case "FAILED":
-        return { failed: true, result: await this.fail(state, decision.error, input) };
+        return { failed: true, result: await this.fail(state, decision.error, input, "MODEL_REPORTED_FAILURE") };
     }
   }
 
@@ -890,7 +969,7 @@ export class AgentLoop {
           "The parent worktree was not modified as a fallback.",
         ].join(" ");
         await this.recordError(state.sessionId, error);
-        return { failed: true, result: await this.fail(state, error, input) };
+        return { failed: true, result: await this.fail(state, error, input, "REQUIRED_DELEGATION_EXHAUSTED") };
       }
       return { failed };
     }
@@ -1028,6 +1107,14 @@ export class AgentLoop {
     toolInput: JsonObject,
     input: AgentRunInput,
   ): Promise<boolean> {
+    const reservedAction = decisionActionForReservedToolName(toolName);
+    if (reservedAction) {
+      const error = `DECISION_ACTION_REQUIRED: ${toolName} is not a callable tool. Return the top-level ${reservedAction} AgentDecision instead.`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      await this.emit({ type: "guardrail", code: "DECISION_ACTION_REQUIRED", message: error });
+      return true;
+    }
     await this.emit({ type: "tool", toolName, input: toolInput });
     const startedAt = Date.now();
     const result = await this.toolRegistry.execute(toolName, toolInput, this.buildToolContext(state.sessionId, input));
@@ -1039,7 +1126,7 @@ export class AgentLoop {
       durationMs: Date.now() - startedAt,
       ...(resultSummary ? { summary: resultSummary } : {}),
       ...(result.success ? { resultPreview: previewToolResult(result.data) } : {}),
-      ...(result.error?.message ? { error: result.error.message } : {}),
+      ...(!result.success ? { error: formatToolErrorForModel(result.error, `Tool failed: ${toolName}`) } : {}),
     });
     const embeddingCache = readEmbeddingCacheStats(result.metadata?.embeddingCache);
     if (embeddingCache) {
@@ -1053,7 +1140,7 @@ export class AgentLoop {
     });
 
     if (!result.success) {
-      state.setLastError(result.error?.message ?? `Tool failed: ${toolName}`);
+      state.setLastError(formatToolErrorForModel(result.error, `Tool failed: ${toolName}`));
       await this.recordError(state.sessionId, state.lastError);
       return true;
     } else if (toolName === "git_diff" && isGitDiffData(result.data)) {
@@ -1076,12 +1163,15 @@ export class AgentLoop {
       { patch: decision.patch, checkBeforeApply: true },
       this.buildToolContext(state.sessionId, input),
     );
+    const patchError = result.success
+      ? undefined
+      : formatToolErrorForModel(result.error, "Patch application failed");
     await this.emit({
       type: "patch_result",
       success: result.success,
       durationMs: Date.now() - startedAt,
       description: decision.description,
-      ...(result.error?.message ? { error: result.error.message } : {}),
+      ...(patchError ? { error: patchError } : {}),
     });
 
     state.addPatchResult({
@@ -1091,11 +1181,11 @@ export class AgentLoop {
     });
 
     if (!result.success) {
-      const error = result.error?.message ?? "Patch application failed";
+      const error = patchError ?? "Patch application failed";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
       if (result.error?.code === "PATCH_PERMISSION_DENIED") {
-        return { failed: true, result: await this.fail(state, error, input) };
+        return { failed: true, result: await this.fail(state, error, input, "PATCH_PERMISSION_DENIED") };
       }
       return { failed: true };
     }
@@ -1111,6 +1201,22 @@ export class AgentLoop {
   ): Promise<StepOutcome> {
     const commandInput = commandInputFromDecision(decision);
     const command = renderCommandInput(commandInput);
+    const compatibilityIssue = validateVerificationCommandCompatibility(commandInput);
+    if (compatibilityIssue) {
+      const fallback = await this.executeBuiltInVerificationFallback(state, input, {
+        reason: `${compatibilityIssue.message} ${compatibilityIssue.guidance}`,
+        ...(compatibilityIssue.suggestedVerifyFilePath
+          ? { preferredPath: compatibilityIssue.suggestedVerifyFilePath }
+          : {}),
+        requireRepositoryChange: false,
+      });
+      if (fallback) return fallback;
+      const error = `${compatibilityIssue.code}: ${compatibilityIssue.message} ${compatibilityIssue.guidance}`;
+      state.setLastError(error);
+      await this.recordError(state.sessionId, error);
+      await this.emit({ type: "guardrail", code: compatibilityIssue.code, message: error });
+      return { failed: true, failureKind: "GUARDRAIL", guardrailCode: compatibilityIssue.code };
+    }
     const isHighRiskCommand = isHighRiskCommandInput(commandInput);
     await this.emit({ type: "command", command, description: decision.description });
 
@@ -1131,7 +1237,15 @@ export class AgentLoop {
       const message = error.message;
       state.setLastError(message);
       await this.recordError(state.sessionId, message, error);
-      return { failed: true, result: await this.fail(state, message, input) };
+      return {
+        failed: true,
+        result: await this.fail(
+          state,
+          message,
+          input,
+          permission.mode === "BLOCKED" ? "COMMAND_BLOCKED" : "COMMAND_PERMISSION_DENIED",
+        ),
+      };
     }
 
     const timeoutMs = commandInput.timeoutMs ?? this.commandRunner.defaultTimeoutMs;
@@ -1172,12 +1286,54 @@ export class AgentLoop {
       const error = result.stderr || result.stdout || result.error || `Command failed with exit code ${String(result.exitCode)}`;
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
+      if (result.exitCode === null && !result.timedOut && result.verification?.level === "NONE") {
+        const fallback = await this.executeBuiltInVerificationFallback(state, input, {
+          reason: `The unclassified command failed (${error}).`,
+          requireRepositoryChange: true,
+        });
+        if (fallback) return fallback;
+      }
       return { failed: true };
     } else {
       state.setLastError(null);
     }
 
     return { failed: false };
+  }
+
+  private async executeBuiltInVerificationFallback(
+    state: AgentState,
+    input: AgentRunInput,
+    options: {
+      reason: string;
+      preferredPath?: string;
+      requireRepositoryChange: boolean;
+    },
+  ): Promise<StepOutcome | undefined> {
+    const contract = buildTaskCompletionContract(state);
+    if (contract.requiredVerificationLevel !== "SYNTAX") return undefined;
+    if (options.requireRepositoryChange && !state.getCompletionEvidence().repositoryChanged) return undefined;
+
+    const supportedPathPattern = /\.(?:html?|json|js|cjs)$/i;
+    const candidates = options.preferredPath
+      ? [options.preferredPath]
+      : contract.targetFiles.filter((target) => supportedPathPattern.test(target));
+    const paths = [...new Set(candidates.map((target) => target.replace(/^\.\//, "").replaceAll("\\", "/")))]
+      .filter((target) => supportedPathPattern.test(target));
+    if (paths.length !== 1) return undefined;
+
+    const tool = this.availableTools.find((candidate) => candidate.name === "verify_file");
+    if (!isToolAllowedByTaskContract(tool, state.taskContract)) return undefined;
+    const targetPath = paths[0];
+    if (!targetPath) return undefined;
+
+    const message = [
+      `VERIFIER_AUTO_FALLBACK: ${options.reason}`,
+      `Running the safe built-in verify_file parser for ${targetPath}.`,
+    ].join(" ");
+    await this.emit({ type: "guardrail", code: "VERIFIER_AUTO_FALLBACK", message });
+    const failed = await this.executeToolDecision(state, "verify_file", { path: targetPath }, input);
+    return { failed };
   }
 
   private async executeAskUserDecision(
@@ -1192,7 +1348,7 @@ export class AgentLoop {
       state.status = "WAITING_USER";
       state.setLastError(error);
       await this.recordError(state.sessionId, error);
-      return { failed: true, result: await this.fail(state, error, input) };
+      return { failed: true, result: await this.fail(state, error, input, "USER_INPUT_REQUIRED") };
     }
 
     state.status = "WAITING_USER";
@@ -1310,7 +1466,12 @@ export class AgentLoop {
     };
   }
 
-  private async fail(state: AgentState, error: string, input?: AgentRunInput): Promise<AgentRunResult> {
+  private async fail(
+    state: AgentState,
+    error: string,
+    input?: AgentRunInput,
+    failureCode = "UNKNOWN_FAILURE",
+  ): Promise<AgentRunResult> {
     state.markFailed(error);
     const finalDiff = state.operatingMode === "PLAN" || !state.taskContract.capabilities.repositoryWrite
       ? ""
@@ -1346,13 +1507,14 @@ export class AgentLoop {
       type: "TASK_FAILED",
       payload: {
         error,
+        failureCode,
         steps: state.step,
       },
     });
     if (input?.keepSessionActive !== true) {
       await this.sessionStore.updateSessionStatus(state.sessionId, "FAILED");
     }
-    await this.emit({ type: "error", message: error });
+    await this.emit({ type: "error", code: failureCode, message: error });
 
     return {
       sessionId: state.sessionId,
@@ -1361,6 +1523,7 @@ export class AgentLoop {
       finalDiff,
       steps: state.step,
       error,
+      failureCode,
       taskKind: state.taskContract.kind,
       outputKind: state.taskContract.outputKind,
       resultMode: state.taskContract.resultMode,
@@ -1508,11 +1671,13 @@ export class AgentLoop {
       answer: text,
     });
     if (!correction.corrected) return text;
-    const capabilities = correction.conflicts.join(",");
-    const message = `Model capability claim contradicted the local Capability Registry and was replaced (${capabilities}).`;
+    const capabilities = correction.capabilities.length > 0
+      ? correction.capabilities.join(",")
+      : "ALL";
+    const message = `Product capability answer was grounded in the local Capability Registry (${capabilities}).`;
     await this.eventStore.appendEvent(state.sessionId, {
       type: "CAPABILITY_CLAIM_CORRECTED",
-      payload: { capabilities: correction.conflicts, message },
+      payload: { capabilities: correction.capabilities, message },
     });
     await this.emit({ type: "guardrail", code: "CAPABILITY_CLAIM_CORRECTED", message });
     return correction.text;
@@ -1805,334 +1970,17 @@ export class AgentLoop {
   }
 }
 
-function aggregateLlmMetrics(metrics: LlmCallMetrics[]): {
-  model?: string;
-  finishReason?: string;
-  usage: RuntimeLlmUsage;
-} {
-  const usageMetrics = metrics.flatMap((metric) => metric.usage ? [metric.usage] : []);
-  const sum = (key: keyof NonNullable<LlmCallMetrics["usage"]>): number | undefined => {
-    const values = usageMetrics.map((usage) => usage[key]).filter((value): value is number => value !== undefined);
-    return values.length > 0 ? values.reduce((total, value) => total + value, 0) : undefined;
-  };
-  const promptTokens = sum("promptTokens");
-  const completionTokens = sum("completionTokens");
-  const reportedTotal = sum("totalTokens");
-  const reasoningTokens = sum("reasoningTokens");
-  const cacheReadTokens = sum("cachedPromptTokens");
-  const cacheWriteTokens = sum("cacheWriteTokens");
-  const lastModel = findLastMetricValue(metrics, "model");
-  const lastFinishReason = findLastMetricValue(metrics, "finishReason");
-  return {
-    ...(lastModel ? { model: lastModel } : {}),
-    ...(lastFinishReason ? { finishReason: lastFinishReason } : {}),
-    usage: {
-      usageAvailable: usageMetrics.length > 0,
-      reasoningContentAvailable: metrics.some((metric) => metric.reasoningContentAvailable === true),
-      ...(promptTokens === undefined ? {} : { promptTokens }),
-      ...(completionTokens === undefined ? {} : { completionTokens }),
-      ...(reportedTotal === undefined
-        ? promptTokens === undefined || completionTokens === undefined ? {} : { totalTokens: promptTokens + completionTokens }
-        : { totalTokens: reportedTotal }),
-      ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
-      ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
-      ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
-    },
-  };
-}
-
-function findLastMetricValue(metrics: LlmCallMetrics[], key: "model" | "finishReason"): string | undefined {
-  for (let index = metrics.length - 1; index >= 0; index -= 1) {
-    const value = metrics[index]?.[key];
-    if (value) return value;
-  }
-  return undefined;
-}
-
-function summarizeToolResult(toolName: string, value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "string") return limitSingleLine(value, 180);
-  if (Array.isArray(value)) return `${String(value.length)} item${value.length === 1 ? "" : "s"}`;
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (
-      toolName === "read_file"
-      && typeof record.path === "string"
-      && record.hasMore === true
-      && typeof record.startLine === "number"
-      && typeof record.endLine === "number"
-      && typeof record.totalLines === "number"
-    ) {
-      return `${record.path} · partial ${String(record.startLine)}-${String(record.endLine)}/${String(record.totalLines)}`;
-    }
-    for (const key of ["path", "status", "summary", "message"]) {
-      if (typeof record[key] === "string") return limitSingleLine(record[key], 180);
-    }
-    for (const key of ["results", "files", "matches", "entries"]) {
-      if (Array.isArray(record[key])) return `${String(record[key].length)} ${key}`;
-    }
-    return limitSingleLine(JSON.stringify(value), 180);
-  }
-  return String(value);
-}
-
-function previewToolResult(value: unknown): string {
-  try {
-    const serialized = JSON.stringify(redactSecrets(toJsonValue(value)));
-    return serialized.length <= 2_000 ? serialized : `${serialized.slice(0, 1_999)}…`;
-  } catch {
-    return "[unserializable tool result]";
-  }
-}
-
-function readEmbeddingCacheStats(value: unknown): {
-  memoryHits: number;
-  diskHits: number;
-  misses: number;
-  writes: number;
-  coalescedRequests: number;
-} | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const keys = ["memoryHits", "diskHits", "misses", "writes", "coalescedRequests"] as const;
-  if (!keys.every((key) => typeof record[key] === "number" && Number.isFinite(record[key]))) return undefined;
-  return {
-    memoryHits: record.memoryHits as number,
-    diskHits: record.diskHits as number,
-    misses: record.misses as number,
-    writes: record.writes as number,
-    coalescedRequests: record.coalescedRequests as number,
-  };
-}
-
-function limitSingleLine(value: string, maxChars: number): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return normalized.length <= maxChars ? normalized : `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
-}
-
-function drainLlmCallMetrics(client: LlmClient): LlmCallMetrics[] {
-  if (typeof (client as { drainCallMetrics?: unknown }).drainCallMetrics === "function") {
-    return ((client as unknown as { drainCallMetrics: () => LlmCallMetrics[] }).drainCallMetrics());
-  }
-
-  return [];
-}
-
-function commandResultToPayload(result: CommandResult): JsonObject {
-  return toJsonObject({
-    command: result.command,
-    cwd: result.cwd,
-    exitCode: result.exitCode,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    durationMs: result.durationMs,
-    success: result.success,
-    timedOut: result.timedOut,
-    truncated: result.truncated,
-    error: result.error,
-    verification: result.verification,
-  });
-}
-
-function commandInputFromDecision(decision: Extract<AgentDecision, { type: "RUN_COMMAND" }>): CommandInput {
-  if (decision.shell) {
-    return {
-      command: decision.command ?? "",
-      shell: true,
-      ...(decision.cwd ? { cwd: decision.cwd } : {}),
-      ...(decision.timeoutMs === undefined ? {} : { timeoutMs: decision.timeoutMs }),
-    };
-  }
-
-  return {
-    executable: decision.executable ?? "",
-    args: decision.args ?? [],
-    shell: false,
-    ...(decision.cwd ? { cwd: decision.cwd } : {}),
-    ...(decision.timeoutMs === undefined ? {} : { timeoutMs: decision.timeoutMs }),
-  };
-}
-
-function renderCommandInput(input: CommandInput): string {
-  if (input.shell) {
-    return input.command ?? "";
-  }
-
-  return [input.executable ?? "", ...(input.args ?? [])].map(quoteCommandPart).join(" ").trim();
-}
-
-function quoteCommandPart(value: string): string {
-  if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
-    return value;
-  }
-
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function isGitDiffData(value: unknown): value is { diff: string } {
-  return typeof value === "object"
-    && value !== null
-    && "diff" in value
-    && typeof value.diff === "string";
-}
-
-function stableDecisionKey(decision: AgentDecision): string {
-  return JSON.stringify(sortJsonValue(decision));
-}
-
-function isRedundantSuccessfulWebToolCall(
-  state: AgentState,
-  toolName: string,
-  input: JsonObject,
-): boolean {
-  if (toolName !== "web_search" && toolName !== "fetch_url") return false;
-  const inputKey = JSON.stringify(sortJsonValue(input));
-  return state.toolResults.some((result) => (
-    result.toolName === toolName
-    && result.result.success
-    && JSON.stringify(sortJsonValue(result.input)) === inputKey
-  ));
-}
-
-function isRedundantSuccessfulIdempotentToolCall(
-  state: AgentState,
-  tool: ToolSpec | undefined,
-  toolName: string,
-  input: JsonObject,
-): boolean {
-  if (
-    tool?.annotations?.readOnlyHint !== true
-    || tool.annotations.idempotentHint !== true
-    || tool.annotations.openWorldHint === true
-  ) {
-    return false;
-  }
-
-  const inputKey = JSON.stringify(sortJsonValue(input));
-  if (!state.toolResults.some((result) => (
-    result.toolName === toolName
-    && result.result.success
-    && JSON.stringify(sortJsonValue(result.input)) === inputKey
-  ))) {
-    return false;
-  }
-
-  const currentDecisionIndex = state.decisions.length - 1;
-  let previousDecisionIndex = -1;
-  for (let index = currentDecisionIndex - 1; index >= 0; index -= 1) {
-    const decision = state.decisions[index];
-    if (
-      decision?.type === "TOOL_CALL"
-      && decision.toolName === toolName
-      && JSON.stringify(sortJsonValue(decision.input)) === inputKey
-    ) {
-      previousDecisionIndex = index;
-      break;
-    }
-  }
-  if (previousDecisionIndex < 0) return false;
-
-  return !state.decisions
-    .slice(previousDecisionIndex + 1, currentDecisionIndex)
-    .some((decision) => (
-      decision.type === "APPLY_PATCH"
-      || decision.type === "APPLY_DELEGATED_PATCH"
-      || decision.type === "RUN_COMMAND"
-    ));
-}
-
-function isRecoverableLlmProtocolFailure(error: string): boolean {
-  return /(?:invalid json|schema validation failed|did not contain a json object|did not include parsable content|response is empty|missing type|agentdecision schema)/i.test(error);
-}
-
-function priorResponseGuardOptions(
-  state: AgentState,
-  historyTruncated: boolean,
-): {
-  historyTruncated: boolean;
-  auditRequested: boolean;
-  semanticQueries: string[];
-} {
-  const evidence = state.taskContract.taskFrame?.conversationEvidence;
-  return {
-    historyTruncated,
-    auditRequested: evidence?.purpose === "PRIOR_RESPONSE_AUDIT",
-    semanticQueries: evidence?.queries ?? [],
-  };
-}
-
-function taskDiffRecordMetadata(artifact: TaskDiffArtifact | undefined): Record<string, unknown> {
-  if (!artifact) return {};
-  return {
-    artifactId: artifact.artifactId,
-    fileCount: artifact.fileCount,
-    additions: artifact.additions,
-    deletions: artifact.deletions,
-    changedFiles: artifact.files.map((file) => file.path),
-    files: artifact.files.map((file) => ({
-      path: file.path,
-      changeType: file.changeType,
-      additions: file.additions,
-      deletions: file.deletions,
-      binary: file.binary,
-    })),
-    truncated: artifact.truncated,
-  };
-}
-
-function taskDiffResultMetadata(
-  artifact: TaskDiffArtifact | undefined,
-): Pick<AgentRunResult, "diffArtifactId" | "diffFileCount" | "diffAdditions" | "diffDeletions"> {
-  if (!artifact) return {};
-  return {
-    diffArtifactId: artifact.artifactId,
-    diffFileCount: artifact.fileCount,
-    diffAdditions: artifact.additions,
-    diffDeletions: artifact.deletions,
-  };
-}
-
-function collaborationResultMetadata(state: AgentState): Pick<AgentRunResult, "delegationBatches" | "subAgents"> {
-  if (state.delegationBatches.length === 0) return {};
-  return {
+function completionProgressFingerprint(state: AgentState): string {
+  const evidence = state.getCompletionEvidence();
+  return JSON.stringify({
+    successfulPatches: state.patchResults.filter((result) => result.result.success).length,
+    successfulTools: state.toolResults.filter((result) => result.result.success).length,
+    verificationEvidence: evidence.verificationEvidence.map((result) => [
+      result.command,
+      result.success,
+      result.level,
+    ]),
+    fileReadCoverage: state.getFileReadCoverage().map((entry) => [entry.path, entry.complete, entry.readCalls]),
     delegationBatches: state.delegationBatches.length,
-    subAgents: state.delegationBatches.reduce((total, batch) => total + batch.results.length, 0),
-  };
-}
-
-function hasSuccessfulDelegatedPatchProposal(state: AgentState): boolean {
-  return state.delegationBatches.some((batch) => batch.results.some((result) => (
-    result.status === "COMPLETED" && typeof result.proposedPatch === "string" && result.proposedPatch.length > 0
-  )));
-}
-
-function hasSuccessfulDelegatedReview(state: AgentState, taskId?: string): boolean {
-  return state.delegationBatches.some((batch) => batch.results.some((result) => (
-    result.status === "COMPLETED"
-    && result.reviewedTaskIds !== undefined
-    && result.reviewedTaskIds.length > 0
-    && (taskId === undefined || result.reviewedTaskIds.includes(taskId))
-  )));
-}
-
-function hasAppliedDelegatedPatch(state: AgentState): boolean {
-  return state.patchResults.some((result) => (
-    result.result.success && /\(delegated by [^)]+\)$/.test(result.description ?? "")
-  ));
-}
-
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => sortJsonValue(item));
-  }
-
-  if (typeof value === "object" && value !== null) {
-    const output: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      output[key] = sortJsonValue((value as Record<string, unknown>)[key]);
-    }
-    return output;
-  }
-
-  return value;
+  });
 }

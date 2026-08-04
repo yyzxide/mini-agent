@@ -581,7 +581,7 @@ function normalizeMemoryTopic(value: string): string {
 }
 
 function hasRetrievalEvidence(result: LongTermMemorySearchResult, providerId: string): boolean {
-  return providerId !== "local-hash-v2" || result.matchedKeywords.length > 0;
+  return !providerId.startsWith("local-hash-") || result.matchedKeywords.length > 0;
 }
 
 function normalizeMemoryEntry(value: unknown, index: number): LongTermMemoryEntry {

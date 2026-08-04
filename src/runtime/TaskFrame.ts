@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PRODUCT_CAPABILITY_IDS } from "../agent/CapabilityRegistry.js";
 
 export const TaskFrameSchema = z.object({
   version: z.literal(1).default(1),
@@ -11,6 +12,20 @@ export const TaskFrameSchema = z.object({
     "DERIVATION",
     "MIXED",
   ]),
+  productCapability: z.object({
+    act: z.enum([
+      "NONE",
+      "INVENTORY",
+      "AVAILABILITY",
+      "EXPLAIN_LIMITATION",
+    ]).default("NONE"),
+    capabilityIds: z.array(z.enum(PRODUCT_CAPABILITY_IDS))
+      .max(PRODUCT_CAPABILITY_IDS.length)
+      .default([]),
+  }).default({
+    act: "NONE",
+    capabilityIds: [],
+  }),
   answer: z.object({
     shape: z.enum([
       "DEFINITION",
@@ -34,6 +49,7 @@ export const TaskFrameSchema = z.object({
     knowledgeEvidence: z.boolean().default(false),
     commandExecution: z.boolean().default(false),
     verification: z.enum(["NONE", "SYNTAX", "STATIC", "TEST"]).default("NONE"),
+    verificationBasis: z.enum(["TASK_INFERRED", "USER_REQUIRED"]).default("TASK_INFERRED"),
     delegation: z.boolean().default(false),
     mcp: z.boolean().default(false),
   }),

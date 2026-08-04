@@ -11,6 +11,7 @@ import {
   type VerificationLevel,
 } from "../command/CommandClassification.js";
 import type { SubAgentBatchResult } from "./SubAgentTypes.js";
+import { parseVerifyFileData } from "../tools/VerifyFileTool.js";
 import { createDefaultAgentTaskContract } from "./AgentTaskContract.js";
 import type { AgentTaskContract } from "./AgentTaskContract.js";
 import {
@@ -150,10 +151,33 @@ export class AgentState {
 
   addToolResult(result: AgentToolExecutionResult): void {
     this.toolResults.push(result);
-    if (result.toolName === "read_file" && result.result.success) {
+    if ((result.toolName === "read_file" || result.toolName === "skill_read") && result.result.success) {
       const read = parseReadFileResultData(result.result.data);
       if (read) {
         this.fileReadCoverage = mergeFileReadCoverageList(this.fileReadCoverage, read);
+      }
+    }
+    if (result.toolName === "verify_file" && result.result.success) {
+      const verification = parseVerifyFileData(result.result.data);
+      if (verification) {
+        const outcome: AgentVerificationOutcome = {
+          command: `verify_file ${verification.path}`,
+          success: true,
+          exitCode: 0,
+          level: verification.level,
+          repositoryWide: verification.repositoryWide,
+          scopePaths: verification.scopePaths,
+        };
+        this.executionActions.push({
+          kind: "COMMAND",
+          classification: {
+            level: verification.level,
+            category: "syntax",
+            repositoryWide: verification.repositoryWide,
+            scopePaths: verification.scopePaths,
+          },
+          result: outcome,
+        });
       }
     }
   }

@@ -10,14 +10,29 @@ const expectedSchema = z.object({
   success: z.boolean().optional(),
   diffContains: z.array(z.string()).optional(),
   diffNotContains: z.array(z.string()).optional(),
+  filesExist: z.array(z.string().trim().min(1)).optional(),
   filesContain: z.record(z.string(), z.string()).optional(),
   filesNotContain: z.record(z.string(), z.string()).optional(),
   toolsCalled: z.array(z.string().min(1)).optional(),
+  toolCallsInOrder: z.array(z.object({
+    name: z.string().trim().min(1),
+    inputContains: z.record(z.string(), z.unknown()).optional(),
+  }).strict()).optional(),
   testsPassed: z.boolean().optional(),
   verificationPassed: z.boolean().optional(),
   maxSteps: z.number().int().positive().optional(),
   maxLlmCalls: z.number().int().positive().optional(),
   maxTotalTokens: z.number().int().nonnegative().optional(),
+  summaryContains: z.array(z.string()).optional(),
+  summaryNotContains: z.array(z.string()).optional(),
+  summaryMatches: z.array(z.string().refine((value) => {
+    try {
+      new RegExp(value, "iu");
+      return true;
+    } catch {
+      return false;
+    }
+  }, "Invalid regular expression")).optional(),
 }).strict();
 
 const scenarioSchema = z.object({
@@ -27,6 +42,9 @@ const scenarioSchema = z.object({
   tags: z.array(z.string().trim().min(1)).optional(),
   userGoal: z.string().trim().min(1),
   files: z.record(z.string(), z.string()).optional(),
+  untrackedFiles: z.record(z.string(), z.string()).optional(),
+  ragIndexPaths: z.array(z.string().trim().min(1)).min(1).optional(),
+  postIndexFiles: z.record(z.string(), z.string()).optional(),
   decisions: z.array(AgentDecisionSchema).min(1).optional(),
   maxSteps: z.number().int().positive().optional(),
   operatingMode: z.enum(["EXECUTE", "PLAN"]).optional(),
@@ -38,6 +56,8 @@ const thresholdsSchema = z.object({
   minPassAtK: probabilitySchema.optional(),
   minRunPassRate: probabilitySchema.optional(),
   minToolChoiceAccuracy: probabilitySchema.optional(),
+  minAllRunsPassRate: probabilitySchema.optional(),
+  maxFlakyScenarios: z.number().int().nonnegative().optional(),
   maxAverageSteps: nonNegativeSchema.optional(),
   maxAverageLlmCalls: nonNegativeSchema.optional(),
   maxAverageTotalTokens: nonNegativeSchema.optional(),
@@ -48,6 +68,8 @@ const thresholdsSchema = z.object({
 const baselinePolicySchema = z.object({
   maxPassAt1Regression: probabilitySchema.optional(),
   maxRunPassRateRegression: probabilitySchema.optional(),
+  maxAllRunsPassRateRegression: probabilitySchema.optional(),
+  maxToolChoiceAccuracyRegression: probabilitySchema.optional(),
   maxAverageStepsIncreaseRatio: nonNegativeSchema.optional(),
   maxAverageLlmCallsIncreaseRatio: nonNegativeSchema.optional(),
   maxAverageTotalTokensIncreaseRatio: nonNegativeSchema.optional(),
@@ -103,8 +125,25 @@ function isValidReport(value: unknown): value is AgentBenchReport {
   if (report.version !== 1 || typeof report.dataset !== "string" || (report.mode !== "scripted" && report.mode !== "real")) return false;
   if (!report.summary || typeof report.summary !== "object" || Array.isArray(report.summary)) return false;
   const summary = report.summary as Record<string, unknown>;
-  return [
+  const requiredSummaryNumbersValid = [
     "scenarios", "totalRuns", "passedRuns", "passAt1", "passAtK", "runPassRate", "toolChoiceAccuracy",
     "averageSteps", "averageLlmCalls", "averageDurationMs", "averageTotalTokens", "averageCachedPromptTokens", "contextTruncationRate",
   ].every((key) => typeof summary[key] === "number" && Number.isFinite(summary[key]));
+  if (!requiredSummaryNumbersValid) return false;
+  if (!optionalFiniteNumber(summary, "allRunsPassRate") || !optionalFiniteNumber(summary, "flakyScenarios")) return false;
+  if (!Array.isArray(report.scenarios) || !Array.isArray(report.runs)) return false;
+  if (typeof report.startedAt !== "string" || typeof report.finishedAt !== "string") return false;
+  if (typeof report.repetitions !== "number" || !Number.isInteger(report.repetitions) || report.repetitions < 1) return false;
+  return report.scenarios.every((scenario) => {
+    if (!scenario || typeof scenario !== "object" || Array.isArray(scenario)) return false;
+    const entry = scenario as Record<string, unknown>;
+    return typeof entry.scenarioId === "string"
+      && typeof entry.scenarioName === "string"
+      && typeof entry.passRate === "number"
+      && Number.isFinite(entry.passRate);
+  });
+}
+
+function optionalFiniteNumber(value: Record<string, unknown>, key: string): boolean {
+  return !(key in value) || (typeof value[key] === "number" && Number.isFinite(value[key]));
 }

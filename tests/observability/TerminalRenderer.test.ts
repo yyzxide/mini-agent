@@ -4,6 +4,20 @@ import type { ContextTrace } from "../../src/context/ContextTypes.js";
 import { TerminalRenderer } from "../../src/observability/TerminalRenderer.js";
 
 describe("TerminalRenderer", () => {
+  it("labels TaskFrame compilation as task understanding", () => {
+    const output: string[] = [];
+    const renderer = new TerminalRenderer({
+      contract: createDefaultAgentTaskContract(),
+      color: false,
+      write: (text) => output.push(text),
+    });
+
+    renderer.render({ type: "llm", phase: "started", mode: "task_frame" });
+
+    expect(output.join("")).toContain("[thinking] · task understanding");
+    expect(output.join("")).not.toContain("model decision");
+  });
+
   it("shows unresolved TaskFrame details at normal verbosity", () => {
     const output: string[] = [];
     const renderer = new TerminalRenderer({

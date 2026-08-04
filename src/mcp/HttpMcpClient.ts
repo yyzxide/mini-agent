@@ -1,8 +1,15 @@
-import type { McpCallToolResult, McpRemoteTool, McpServerConfig } from "./McpTypes.js";
+import type { McpCallToolResult, McpGetPromptResult, McpReadResourceResult, McpRemotePrompt, McpRemoteResource, McpRemoteTool, McpServerConfig, McpServerMetadata } from "./McpTypes.js";
 import {
   initializeRequest,
+  collectMcpPages,
+  MCP_PROTOCOL_VERSION,
   parseCallResult,
-  parseToolsList,
+  parseInitializeResult,
+  parseGetPromptResult,
+  parsePromptsListPage,
+  parseReadResourceResult,
+  parseResourcesListPage,
+  parseToolsListPage,
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpClient,
@@ -13,6 +20,7 @@ export class HttpMcpClient implements McpClient {
   private connected = false;
   private sessionId: string | undefined;
   private connection: Promise<void> | undefined;
+  private serverMetadata: McpServerMetadata | undefined;
 
   constructor(private readonly config: McpServerConfig) {}
 
@@ -30,14 +38,18 @@ export class HttpMcpClient implements McpClient {
   }
 
   private async startConnection(): Promise<void> {
-    await this.request(initializeRequest(this.nextId++));
+    this.serverMetadata = parseInitializeResult(
+      await this.request(initializeRequest(this.nextId++)),
+    );
     await this.notify("notifications/initialized");
     this.connected = true;
   }
 
   async listTools(): Promise<McpRemoteTool[]> {
     await this.connect();
-    return parseToolsList(await this.request(this.makeRequest("tools/list")));
+    return await collectMcpPages(async (cursor) =>
+      parseToolsListPage(await this.request(this.makeRequest("tools/list", cursor ? { cursor } : undefined))),
+    );
   }
 
   async callTool(name: string, input: unknown): Promise<McpCallToolResult> {
@@ -46,6 +58,34 @@ export class HttpMcpClient implements McpClient {
       name,
       arguments: typeof input === "object" && input !== null ? input : {},
     })));
+  }
+
+  async listResources(): Promise<McpRemoteResource[]> {
+    await this.connect();
+    return await collectMcpPages(async (cursor) =>
+      parseResourcesListPage(await this.request(this.makeRequest("resources/list", cursor ? { cursor } : undefined))),
+    );
+  }
+
+  async readResource(uri: string): Promise<McpReadResourceResult> {
+    await this.connect();
+    return parseReadResourceResult(await this.request(this.makeRequest("resources/read", { uri })));
+  }
+
+  async listPrompts(): Promise<McpRemotePrompt[]> {
+    await this.connect();
+    return await collectMcpPages(async (cursor) =>
+      parsePromptsListPage(await this.request(this.makeRequest("prompts/list", cursor ? { cursor } : undefined))),
+    );
+  }
+
+  async getPrompt(name: string, args: Record<string, string>): Promise<McpGetPromptResult> {
+    await this.connect();
+    return parseGetPromptResult(await this.request(this.makeRequest("prompts/get", { name, arguments: args })));
+  }
+
+  getServerMetadata(): McpServerMetadata | undefined {
+    return this.serverMetadata;
   }
 
   async close(): Promise<void> {
@@ -61,6 +101,7 @@ export class HttpMcpClient implements McpClient {
       this.connected = false;
       this.sessionId = undefined;
       this.connection = undefined;
+      this.serverMetadata = undefined;
     }
   }
 
@@ -100,7 +141,7 @@ export class HttpMcpClient implements McpClient {
   private headers(): Record<string, string> {
     return {
       ...this.config.headers,
-      "mcp-protocol-version": "2025-11-25",
+      "mcp-protocol-version": MCP_PROTOCOL_VERSION,
       ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
     };
   }

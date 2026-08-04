@@ -61,6 +61,47 @@ describe("OpenAICompatibleClient", () => {
     expect(body.messages[1]?.content).not.toContain('\"patchResults\"');
   });
 
+  it("uses a coding-sized default output budget", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "{\"type\":\"PLAN\",\"message\":\"Inspect\"}" } }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.chat(sampleInput());
+
+    const body = JSON.parse(String(calls[0]?.body)) as { max_tokens: number };
+    expect(body.max_tokens).toBe(16_384);
+  });
+
+  it("sends an explicitly configured provider thinking mode", async () => {
+    const calls: RequestInit[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "secret-key",
+      model: "deepseek-v4-flash",
+      thinkingMode: "disabled",
+      fetchFn: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "{\"type\":\"PLAN\",\"message\":\"Inspect\"}" } }],
+        }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.chat(sampleInput());
+
+    const body = JSON.parse(String(calls[0]?.body)) as { thinking?: { type: string } };
+    expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
   it("injects runtime context into semantic TaskFrame compilation", async () => {
     const calls: RequestInit[] = [];
     const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -148,6 +189,9 @@ describe("OpenAICompatibleClient", () => {
     };
     expect(body.messages[0]?.content).toContain("semantic TaskFrame compiler");
     expect(body.messages[0]?.content).toContain("Return one JSON object only");
+    expect(body.messages[0]?.content).toContain("productCapability.act");
+    expect(body.messages[0]?.content).toContain("MCP_TOOL_RUNTIME");
+    expect(body.messages[0]?.content).toContain("AGENT_EVALUATION");
   });
 
   it("preserves recent conversation as role-separated messages", async () => {
@@ -381,9 +425,9 @@ describe("OpenAICompatibleClient", () => {
 
     const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
       messages: Array<{ content: string }>;
-      response_format?: unknown;
+      response_format?: { type: string };
     };
-    expect(retryBody.response_format).toBeUndefined();
+    expect(retryBody.response_format).toEqual({ type: "json_object" });
     expect(retryBody.messages[1]?.content).toContain("previous model response was empty");
   });
 
@@ -410,9 +454,9 @@ describe("OpenAICompatibleClient", () => {
 
     const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
       messages: Array<{ content: string }>;
-      response_format?: unknown;
+      response_format?: { type: string };
     };
-    expect(retryBody.response_format).toBeUndefined();
+    expect(retryBody.response_format).toEqual({ type: "json_object" });
     expect(retryBody.messages[1]?.content).toContain("could not be parsed as an AgentDecision JSON object");
     expect(retryBody.messages[1]?.content).toContain("Do not return markdown");
   });
@@ -480,24 +524,95 @@ describe("OpenAICompatibleClient", () => {
     expect(decision).toEqual({ type: "PLAN", message: "Array content works" });
   });
 
-  it("returns diagnostic FAILED decision when model content stays empty", async () => {
+  it("never treats private reasoning_content as an AgentDecision", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            content: "",
+            reasoning_content: "draft {\"type\":\"FINAL\",\"summary\":\"Private\",\"success\":true}",
+          },
+        }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"type\":\"FINAL\",\"summary\":\"Public\",\"success\":true}" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
     const client = new OpenAICompatibleClient({
       baseUrl: "https://llm.example/v1",
       apiKey: "secret-key",
       model: "agent-model",
-      fetchFn: async () => new Response(JSON.stringify({
-        choices: [{ finish_reason: "length", message: { content: "", reasoning_content: "thinking" } }],
-      }), { status: 200 }),
+      fetchFn,
+    });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision).toEqual({ type: "FINAL", summary: "Public", success: true });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers once from output-budget exhaustion with a larger compact DeepSeek request", async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        usage: {
+          completion_tokens: 4096,
+          completion_tokens_details: { reasoning_tokens: 4096 },
+        },
+        choices: [{ finish_reason: "length", message: { content: "{", reasoning_content: "thinking" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "{\"type\":\"PLAN\",\"message\":\"Recovered\"}" } }],
+      }), { status: 200 })) as unknown as typeof fetch;
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "secret-key",
+      model: "deepseek-v4-flash",
+      maxTokens: 4096,
+      fetchFn,
+    });
+
+    const decision = await client.chat(sampleInput());
+
+    expect(decision).toEqual({ type: "PLAN", message: "Recovered" });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const retryBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as {
+      max_tokens: number;
+      thinking?: { type: string };
+      response_format?: { type: string };
+      messages: Array<{ content: string }>;
+    };
+    expect(retryBody.max_tokens).toBe(8192);
+    expect(retryBody.thinking).toEqual({ type: "disabled" });
+    expect(retryBody.response_format).toEqual({ type: "json_object" });
+    expect(retryBody.messages.at(-1)?.content).toContain("exhausted its output budget");
+  });
+
+  it("returns one precise diagnostic when the recovery budget is also exhausted", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      usage: {
+        completion_tokens: 4096,
+        completion_tokens_details: { reasoning_tokens: 4096 },
+      },
+      choices: [{ finish_reason: "length", message: { content: "", reasoning_content: "thinking" } }],
+    }), { status: 200 })) as typeof fetch;
+    const client = new OpenAICompatibleClient({
+      baseUrl: "https://llm.example/v1",
+      apiKey: "secret-key",
+      model: "agent-model",
+      maxTokens: 4096,
+      fetchFn,
     });
 
     const decision = await client.chat(sampleInput());
 
     expect(decision.type).toBe("FAILED");
     if (decision.type === "FAILED") {
-      expect(decision.error).toContain("LLM response did not include parsable content");
+      expect(decision.error).toContain("LLM_OUTPUT_BUDGET_EXHAUSTED");
       expect(decision.error).toContain("finish_reason=length");
-      expect(decision.error).toContain("message_keys=content,reasoning_content");
+      expect(decision.error).toContain("max_tokens=8192");
+      expect(decision.error).toContain("reasoning_tokens=4096");
     }
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   it("returns clear configuration errors", async () => {

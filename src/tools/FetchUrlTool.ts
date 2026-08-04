@@ -542,6 +542,10 @@ function classifyUnusableFetchedContent(rawText: string, normalizedText: string)
   const raw = rawText.trim().toLowerCase();
   const text = normalizedText.toLowerCase();
 
+  if (text.length === 0) {
+    return "empty readable response";
+  }
+
   if (
     /^["{[]/.test(raw)
     && /(?:["_](?:waf|captcha)[\w-]*"|"(?:captcha|challenge|verify_url|risk_control)")\s*:/i.test(raw)
@@ -561,7 +565,24 @@ function classifyUnusableFetchedContent(rawText: string, normalizedText: string)
     return "access-denied or login-only shell";
   }
 
+  const title = readHtmlTitle(rawText)?.normalize("NFKC").toLowerCase() ?? "";
+  const strongMissingPageTitle = /(?:^|\b)(?:404|410)(?:\b|$)|\b(?:page|content|resource)\s+(?:not found|unavailable|removed|does not exist)\b|(?:页面|内容|资源)(?:不存在|未找到|已删除|不可用)/i;
+  const shortMissingPageBody = /^(?:404\b|page not found\b|not found\b|the requested (?:page|resource).{0,40}(?:not found|unavailable)|抱歉.{0,20}(?:页面|内容).{0,20}(?:不存在|未找到|已删除)|(?:页面|内容)(?:不存在|未找到|已删除|不可用))/i;
+  if (
+    (title.length > 0 && strongMissingPageTitle.test(title) && text.length < 5_000)
+    || (text.length < 1_500 && shortMissingPageBody.test(text))
+  ) {
+    return "soft 404 or removed-content page";
+  }
+
   return undefined;
+}
+
+function readHtmlTitle(html: string): string | undefined {
+  const match = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  if (!match) return undefined;
+  const title = normalizeText(decodeHtmlEntities(match.replace(/<[^>]+>/g, " ")));
+  return title.length > 0 ? title : undefined;
 }
 
 function decodeHtmlEntities(text: string): string {

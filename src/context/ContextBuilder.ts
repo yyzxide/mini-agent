@@ -6,7 +6,7 @@ import { MemoryContextService } from "../memory/MemoryContextService.js";
 import { planMemoryRead } from "../memory/MemoryPolicy.js";
 import { readSessionMemoryWithTrace } from "../session/SessionMemory.js";
 import { SessionStore } from "../session/SessionStore.js";
-import { formatSkillsForContext, SkillStore } from "../skills/SkillStore.js";
+import { formatSkillCatalogForContext, SkillStore } from "../skills/SkillStore.js";
 import { ContextPlanner } from "./ContextPlanner.js";
 import {
   formatCurrentFileReadCoverage,
@@ -22,6 +22,7 @@ import {
   buildWebResearchProgress,
   formatWebResearchProgress,
 } from "../agent/WebResearchProgress.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 
 export interface ContextBuilderOptions {
   repoPath: string;
@@ -92,7 +93,7 @@ export class ContextBuilder {
       diff,
       sessionMemoryResult,
       longTermMemory,
-      selectedSkills,
+      skillCatalog,
     ] = await Promise.all([
       hydrateRepositoryContext ? git.isGitRepository().catch(() => false) : Promise.resolve(false),
       hydrateRepositoryContext
@@ -129,7 +130,7 @@ export class ContextBuilder {
           : Promise.resolve(knowledgeRequest
             ? "(disabled for indexed knowledge-base requests)"
             : "(not requested for the current task)"),
-      skillStore.select(goal, 3).then(formatSkillsForContext)
+      skillStore.list().then(formatSkillCatalogForContext)
         .catch((error: unknown) => `error: ${errorToText(error)}`),
     ]);
 
@@ -153,7 +154,7 @@ export class ContextBuilder {
       diff,
       sessionMemory,
       longTermMemory,
-      selectedSkills,
+      skillCatalog,
       diagnostics,
       recentEvidence,
       activeFileChunk,
@@ -196,7 +197,7 @@ function buildCandidates(input: {
   diff: string;
   sessionMemory: string;
   longTermMemory: string;
-  selectedSkills: string;
+  skillCatalog: string;
   diagnostics: string;
   recentEvidence: string;
   activeFileChunk: string;
@@ -212,7 +213,7 @@ function buildCandidates(input: {
   const hasDiagnostics = input.state.lastError !== null || input.workingSet.latestFailures.length > 0;
   const hasDiff = input.diff.trim().length > 0 && input.diff !== "(none)";
   const hasSessionMemory = input.sessionMemory !== "(none)";
-  const hasSelectedSkills = input.selectedSkills.trim().length > 0 && !input.selectedSkills.startsWith("(none");
+  const hasSkillCatalog = input.skillCatalog.trim().length > 0 && !input.skillCatalog.startsWith("(no skills");
   const hasLongTermMemory = input.needsLongTermMemory
     && input.longTermMemory !== "(none)"
     && input.longTermMemory !== "(not requested for the current task)";
@@ -221,6 +222,17 @@ function buildCandidates(input: {
   const hasActiveFileChunk = input.activeFileChunk.length > 0;
 
   return [
+    {
+      id: "skill_catalog",
+      title: "Skill catalog",
+      content: input.skillCatalog,
+      priority: 93,
+      enabled: hasSkillCatalog,
+      stable: true,
+      maxTokens: 700,
+      retention: "head",
+      reason: "The bounded catalog lets the model discover relevant skills semantically and load them with skill_read instead of relying only on local keyword selection.",
+    },
     {
       id: "task",
       title: "Task",
@@ -341,17 +353,6 @@ function buildCandidates(input: {
       reason: "Parallel child investigations are advisory evidence for the parent; the parent remains responsible for validation and all mutations.",
     },
     {
-      id: "selected_skills",
-      title: "Selected skills",
-      content: input.selectedSkills,
-      priority: 92,
-      enabled: hasSelectedSkills,
-      stable: true,
-      maxTokens: 1_200,
-      retention: "head_tail",
-      reason: "Only skills selected for the current goal are relevant.",
-    },
-    {
       id: "conversation_memory",
       title: "Conversation memory",
       content: input.sessionMemory,
@@ -415,7 +416,7 @@ function formatDiagnostics(state: AgentState): string {
 
 function summarizePatchFailures(state: AgentState): string {
   const failures = state.patchResults.filter((result) => !result.result.success).slice(-3)
-    .map((result) => result.result.error?.message ?? "Patch failed");
+    .map((result) => formatToolErrorForModel(result.result.error, "Patch failed"));
   return failures.length > 0 ? failures.join("\n") : "(none)";
 }
 

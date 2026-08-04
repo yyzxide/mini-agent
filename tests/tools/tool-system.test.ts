@@ -145,6 +145,26 @@ describe("ToolRegistry", () => {
     expect(result.error?.message).toContain("maxLines");
   });
 
+  it("verifies standalone HTML without passing it to node --check", async () => {
+    await fs.writeFile(path.join(repoPath, "game.html"), "<!doctype html><html><head></head><body><script>const score = 2 + 2;</script></body></html>\n", "utf8");
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("verify_file", { path: "game.html" }, { repoPath });
+
+    expectSuccess<{ path: string; level: string; scriptCount: number }>(result);
+    expect(result.data).toMatchObject({ path: "game.html", level: "SYNTAX", scriptCount: 1 });
+  });
+
+  it("reports inline JavaScript syntax failures from an HTML file", async () => {
+    await fs.writeFile(path.join(repoPath, "broken.html"), "<html><head></head><body><script>const = ;</script></body></html>\n", "utf8");
+    const registry = createDefaultToolRegistry();
+
+    const result = await registry.execute("verify_file", { path: "broken.html" }, { repoPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("FILE_VERIFICATION_FAILED");
+  });
+
   it("marks fetch_url as a review-level tool", () => {
     const registry = createDefaultToolRegistry();
 
@@ -456,6 +476,37 @@ describe("read-only repository tools", () => {
 
     expect(waf).toMatchObject({ success: false, error: { code: "FETCH_URL_CONTENT_UNUSABLE" } });
     expect(captcha).toMatchObject({ success: false, error: { code: "FETCH_URL_CONTENT_UNUSABLE" } });
+  });
+
+  it("fetch_url rejects HTTP-200 soft 404 and empty pages as unusable evidence", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const registry = createDefaultToolRegistry();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        "<html><head><title>404 - Page Not Found</title></head><body>The page has moved.</body></html>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        "<html><head></head><body><script>renderApp()</script></body></html>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const soft404 = await registry.execute("fetch_url", {
+      url: "https://example.com/missing-soft",
+    }, fetchUrlContext());
+    const empty = await registry.execute("fetch_url", {
+      url: "https://example.com/empty",
+    }, fetchUrlContext());
+
+    expect(soft404).toMatchObject({
+      success: false,
+      error: { code: "FETCH_URL_CONTENT_UNUSABLE", details: { reason: "soft 404 or removed-content page" } },
+    });
+    expect(empty).toMatchObject({
+      success: false,
+      error: { code: "FETCH_URL_CONTENT_UNUSABLE", details: { reason: "empty readable response" } },
+    });
   });
 
   it("fetch_url rejects non-success HTTP responses as evidence", async () => {

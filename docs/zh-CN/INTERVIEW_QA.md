@@ -129,9 +129,9 @@ Long-term Memory 保存受策略约束的用户偏好、项目约定、架构决
 
 ## Q21：MCP 做到了什么？
 
-当前实现 stdio 和 Streamable HTTP 的 MCP tools runtime，包括初始化、`tools/list`、`tools/call`、名称隔离、权限映射、统一 Tool Registry 和生命周期关闭。
+当前实现 stdio 和 Streamable HTTP 的 MCP runtime，包括初始化、`tools/list`、`tools/call`，以及静态 `resources/list/read`、`prompts/list/get` 的只读适配；三类 list 支持有界 cursor 分页，单个 capability 失败只局部降级。还包括名称隔离、发现目标 allowlist、权限映射、untrusted 数据标记、统一 Tool Registry 和生命周期关闭。
 
-没有声称完整覆盖 resources、prompts、OAuth、服务端主动请求和所有兼容场景。
+没有声称完整覆盖 resource templates、订阅、completion、OAuth、服务端主动请求和所有兼容场景，也没有声称兼容 `2026-07-28` 无状态规范。
 
 ## Q22：如何测试 Agent，而不是只测试函数？
 
@@ -141,7 +141,7 @@ Long-term Memory 保存受策略约束的用户偏好、项目约定、架构决
 2. AgentLoop 场景：多步 Decision、失败恢复、证据门禁、子任务和冲突；
 3. AgentBench：版本化数据集、成功率、工具选择、步数、Token、缓存、时延和失败分类。
 
-真实模型模式需要多次重复，不能用一次幸运结果证明稳定。
+真实模型模式需要多次重复，不能用一次幸运结果证明稳定。项目通过 `bench accept` 固定关键真实模型验收场景，并同时生成 JSON/Markdown 报告。
 
 ## Q23：项目当前最大的不足是什么？
 

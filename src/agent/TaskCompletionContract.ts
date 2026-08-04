@@ -22,11 +22,11 @@ export interface TaskCompletionContract {
   verificationReason?: string;
 }
 
-const SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte)$/i;
+const SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte|html?)$/i;
 const CONFIG_EXTENSION_PATTERN = /\.(?:json|ya?ml|toml|xml)$/i;
 const DOCUMENT_EXTENSION_PATTERN = /\.(?:md|markdown|mdx|txt|rst|adoc)$/i;
 const STATIC_SOURCE_EXTENSION_PATTERN = /\.(?:ts|tsx|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|vue|svelte)$/i;
-const DYNAMIC_SOURCE_EXTENSION_PATTERN = /\.(?:js|jsx|mjs|cjs|py|rb|php|sh|bash)$/i;
+const DYNAMIC_SOURCE_EXTENSION_PATTERN = /\.(?:js|jsx|mjs|cjs|py|rb|php|sh|bash|html?)$/i;
 const FILE_PATH_PATTERN = /(?:^|[\s`'"(（])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte|html|css|md|markdown|mdx|txt|rst|adoc|json|ya?ml|toml|xml))(?:$|[\s`'",.!?，。！？)）:：])/gi;
 
 export function buildTaskCompletionContract(state: AgentState): TaskCompletionContract {
@@ -54,22 +54,32 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
   const hasSourceTarget = targetFiles.some((file) => SOURCE_EXTENSION_PATTERN.test(file));
   const hasConfigTarget = targetFiles.some(isConfigurationFile);
   const hasDocumentTarget = targetFiles.length > 0 && targetFiles.every((file) => DOCUMENT_EXTENSION_PATTERN.test(file));
-  const explicitVerification = taskFrame !== undefined
+  const requestedVerification = taskFrame !== undefined
     && taskFrame.effects.verification !== "NONE";
-  const requiredVerificationLevel = requiresRepositoryChange || explicitVerification
-    ? taskFrame && taskFrame.effects.verification !== "NONE"
-      ? taskFrame.effects.verification
-      : determineRequiredVerificationLevel({
+  const userRequiredVerification = requestedVerification
+    && taskFrame?.effects.verificationBasis === "USER_REQUIRED";
+  const inferredVerificationLevel = determineRequiredVerificationLevel({
         targetFiles,
         hasSourceTarget,
         hasConfigTarget,
-      })
+      });
+  const taskInferredVerificationLevel = determineTaskInferredVerificationLevel(
+    taskFrame?.effects.verification ?? "NONE",
+    inferredVerificationLevel,
+    targetFiles,
+  );
+  const requiredVerificationLevel = requiresRepositoryChange || requestedVerification
+    ? userRequiredVerification
+      ? taskFrame?.effects.verification ?? inferredVerificationLevel
+      : requiresRepositoryChange
+        ? taskInferredVerificationLevel
+        : taskFrame?.effects.verification ?? "NONE"
     : "NONE";
   const requiresVerification = requiredVerificationLevel !== "NONE";
 
   let kind: TaskCompletionKind = "ANSWER";
   if (requiresKnowledgeEvidence) kind = "KNOWLEDGE_QUERY";
-  else if (explicitVerification && !requiresRepositoryChange) kind = "VERIFICATION";
+  else if (requestedVerification && !requiresRepositoryChange) kind = "VERIFICATION";
   else if (hasSourceTarget) kind = "SOURCE_CHANGE";
   else if (hasConfigTarget) kind = "CONFIGURATION_CHANGE";
   else if (requiresRepositoryChange && hasDocumentTarget) kind = "DOCUMENTATION_CHANGE";
@@ -84,14 +94,34 @@ export function buildTaskCompletionContract(state: AgentState): TaskCompletionCo
     targetFiles,
     ...(requiresVerification
       ? {
-        verificationReason: explicitVerification
+        verificationReason: userRequiredVerification
         ? `The user explicitly requested verification at ${requiredVerificationLevel} level.`
           : hasConfigTarget
             ? "Configuration changes require a successful check after the latest patch."
-            : "Source changes require a successful check after the latest patch.",
+            : `The runtime selected a compatible ${requiredVerificationLevel} check from the files changed after the latest patch.`,
       }
       : {}),
   };
+}
+
+function determineTaskInferredVerificationLevel(
+  modelLevel: VerificationLevel,
+  fileDerivedLevel: VerificationLevel,
+  targetFiles: string[],
+): VerificationLevel {
+  // A standalone HTML document has no typecheck surface by itself. Its
+  // compatible built-in contract is structural + inline-script syntax.
+  if (targetFiles.length > 0 && targetFiles.every((file) => /\.html?$/i.test(file))) {
+    return "SYNTAX";
+  }
+  const rank: Record<VerificationLevel, number> = {
+    NONE: 0,
+    DIFF_HYGIENE: 1,
+    SYNTAX: 2,
+    STATIC: 3,
+    TEST: 4,
+  };
+  return rank[modelLevel] > rank[fileDerivedLevel] ? modelLevel : fileDerivedLevel;
 }
 
 export function formatTaskCompletionContract(
@@ -103,8 +133,8 @@ export function formatTaskCompletionContract(
     ...(contract.requiresKnowledgeEvidence ? ["Indexed knowledge evidence and citations must ground the answer."] : []),
     ...(contract.requiresVerification
       ? [evidence.repositoryChanged
-        ? `A relevant ${contract.requiredVerificationLevel} verification command must pass after the most recent successful patch.`
-        : `A relevant ${contract.requiredVerificationLevel} verification command must pass.`]
+        ? `A relevant ${contract.requiredVerificationLevel} verification action must pass after the most recent successful patch.`
+        : `A relevant ${contract.requiredVerificationLevel} verification action must pass.`]
       : []),
   ];
   return [

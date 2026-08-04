@@ -27,6 +27,7 @@ export interface WebResearchProgress {
   authorityCandidateFetched: boolean;
   visibleFreshnessEvidence: boolean;
   citationsAvailable: number;
+  claimSourceMappingRequired: boolean;
   evidenceReady: boolean;
   remainingSteps: number;
   synthesisReserved: boolean;
@@ -59,6 +60,7 @@ export function buildWebResearchProgress(state: AgentState): WebResearchProgress
     ? assessAuthoritativeFreshnessEvidence(state)
     : undefined;
   const requiredSearchViews = state.taskContract.evidence.webSearchViewCount;
+  const claimSourceMappingRequired = state.taskContract.taskFrame?.webEvidencePolicy.profile !== "ORDINARY";
   const authoritySearchSatisfied = !authorityRequired
     || authority?.status !== "NO_AUTHORITY_FRESHNESS_SEARCH";
   const authorityCandidateFetched = !authorityRequired
@@ -111,6 +113,7 @@ export function buildWebResearchProgress(state: AgentState): WebResearchProgress
     authorityCandidateFetched,
     visibleFreshnessEvidence,
     citationsAvailable: gatheredUrls.size,
+    claimSourceMappingRequired,
     evidenceReady,
     remainingSteps,
     synthesisReserved,
@@ -130,6 +133,7 @@ export function formatWebResearchProgress(progress: WebResearchProgress | undefi
     `Authority candidate fetched: ${formatSatisfied(progress.authorityCandidateFetched)}`,
     `Visible freshness evidence: ${formatSatisfied(progress.visibleFreshnessEvidence)}`,
     `Citations available: ${String(progress.citationsAvailable)}`,
+    `Structured claim-source mapping required: ${String(progress.claimSourceMappingRequired)}`,
     "Higher-version conflict check: enforced when FINAL is evaluated",
     `Evidence ready: ${formatSatisfied(progress.evidenceReady)}`,
     `Remaining decisions: ${String(progress.remainingSteps)}`,

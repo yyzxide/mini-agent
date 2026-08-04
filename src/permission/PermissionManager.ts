@@ -80,7 +80,7 @@ export class PermissionManager {
     }
 
     const answer = (await this.askUser(input)).trim().toLowerCase();
-    if (answer === "yes" || answer === "y") {
+    if (answer === "yes" || answer === "y" || answer === "1") {
       return { allowed: true, mode: "USER_APPROVED", reason: "Approved by user" };
     }
 

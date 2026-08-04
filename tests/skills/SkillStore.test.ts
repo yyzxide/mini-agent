@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SkillStore, formatSkillsForContext } from "../../src/skills/SkillStore.js";
+import { SkillStore, formatSkillCatalogForContext, formatSkillsForContext } from "../../src/skills/SkillStore.js";
+import { createDefaultToolRegistry } from "../../src/tools/ToolRegistry.js";
 
 let repoPath: string;
 
@@ -77,6 +78,50 @@ describe("SkillStore", () => {
     const context = formatSkillsForContext([skill]);
     expect(context).toContain("current user instructions");
     expect(context).toContain("Skill: testing");
+    expect(formatSkillCatalogForContext([skill])).toContain("Use skill_read");
+  });
+
+  it("discovers and progressively reads bundled skill resources", async () => {
+    const skillFile = path.join(repoPath, "skills", "testing", "SKILL.md");
+    await writeSkill(skillFile, [
+      "---", "name: testing", "description: Test changes", "triggers: tests", "---", "", "Read references/checks.md.",
+    ].join("\n"));
+    await fs.mkdir(path.join(repoPath, "skills", "testing", "references"), { recursive: true });
+    await fs.writeFile(path.join(repoPath, "skills", "testing", "references", "checks.md"), "one\ntwo\nthree\n", "utf8");
+
+    const store = new SkillStore({ repoPath });
+    await expect(store.get("testing")).resolves.toMatchObject({ resources: ["references/checks.md"] });
+    await expect(store.read("testing", { resource: "references/checks.md", maxLines: 2 })).resolves.toMatchObject({
+      content: "one\ntwo",
+      hasMore: true,
+      nextStartLine: 3,
+    });
+    const result = await createDefaultToolRegistry().execute("skill_read", {
+      name: "testing",
+      resource: "references/checks.md",
+      startLine: 3,
+      maxLines: 2,
+    }, { repoPath });
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        path: "skills/testing/references/checks.md",
+        source: "repository",
+        content: "three\n",
+        hasMore: false,
+      },
+    });
+  });
+
+  it("does not advertise binary or oversized bundled files as readable skill resources", async () => {
+    const skillFile = path.join(repoPath, "skills", "testing", "SKILL.md");
+    await writeSkill(skillFile, [
+      "---", "name: testing", "description: Test changes", "triggers: tests", "---", "", "Read text resources only.",
+    ].join("\n"));
+    await fs.writeFile(path.join(repoPath, "skills", "testing", "image.png"), Buffer.from([0, 1, 2]));
+    await fs.writeFile(path.join(repoPath, "skills", "testing", "large.txt"), "x".repeat(128_001), "utf8");
+
+    await expect(new SkillStore({ repoPath }).get("testing")).resolves.toMatchObject({ resources: [] });
   });
 });
 

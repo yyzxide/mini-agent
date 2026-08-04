@@ -32,7 +32,7 @@ export interface ApplyPatchData {
 
 export class ApplyPatchTool implements Tool<ApplyPatchInput, ApplyPatchData> {
   readonly name = "apply_patch";
-  readonly description = "Preview, check, and apply a unified diff patch.";
+  readonly description = "Preview, check, and apply a unified diff patch against workspace filesystem state. Git tracking does not determine whether a target exists: use a normal modification patch for an existing untracked file and new file mode only for an absent path.";
   readonly inputSchema = ApplyPatchInputSchema;
   readonly permissionLevel = PermissionLevel.REVIEW;
   readonly metadata = {
@@ -78,7 +78,11 @@ export class ApplyPatchTool implements Tool<ApplyPatchInput, ApplyPatchData> {
 
       if (!applyResult.success) {
         await appendPatchFailure(context, applyResult.error ?? "Patch apply failed", applyResult.checkResult.stderr);
-        return toolFailure("PATCH_APPLY_FAILED", applyResult.error ?? "Patch apply failed", applyResult);
+        return toolFailure(
+          applyResult.checkResult.code ?? "PATCH_APPLY_FAILED",
+          applyResult.error ?? "Patch apply failed",
+          applyResult,
+        );
       }
 
       const data: ApplyPatchData = {

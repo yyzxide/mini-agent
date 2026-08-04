@@ -42,7 +42,9 @@ Every CLI request and every programmatic `AgentLoop` call enters the same loop a
 
 Execution starts from a least-privilege bootstrap contract. Safe tools can be discovered, while Web, write, command, and delegation effects are granted or denied as the model proposes concrete actions. Successful completion is checked locally against the TaskFrame, accumulated evidence, permissions, sandbox rules, and post-change verification.
 
-Configured MCP tools are exposed to TaskFrame as a bounded metadata catalog marked as untrusted data. The runtime grants only the exact MCP tool selected by the model, never an entire server or a neighboring repository/command capability. Read-only tools remain usable in Plan mode; mutating external calls still require explicit per-call approval.
+Configured MCP capabilities are exposed to TaskFrame as a bounded metadata catalog marked as untrusted data. Remote tools are registered individually; discovered resources and prompts are exposed through namespaced read-only adapters. The runtime grants only the exact adapter selected by the model, never an entire server or a neighboring repository/command capability. Read-only adapters remain usable in Plan mode; mutating external calls still require explicit per-call approval. Every MCP adapter fails closed when a programmatic caller omits the permission manager.
+
+Repository RAG is also Agent-operable rather than CLI-only: `knowledge_search` returns grounded passages and citations, while `knowledge_index` lets the same Agent build or refresh the derived index when it is empty or stale. Skills use progressive disclosure: a bounded catalog is always available for semantic discovery, and `skill_read` loads full `SKILL.md` instructions or validated bundled text resources only when relevant.
 
 ### Model-driven task understanding
 
@@ -58,6 +60,10 @@ For example, these requests intentionally receive different permissions:
 ### Isolated multi-agent changes
 
 Repository tasks can delegate investigation, implementation, and review. A writer edits and verifies a disposable Git worktree; a reviewer can inspect the writer's materialized patch; only the parent Agent may merge the result. Parent-worktree changes are fingerprinted and conflicting proposals are rejected instead of overwriting concurrent work.
+
+### Filesystem-first mutations
+
+File existence comes from the workspace filesystem, never from Git tracking state. A successfully read untracked file is modified as an existing file; a create patch is valid only when its target path is absent. Patch preflight returns structured target-state errors before invoking Git, and those details remain visible to the next model decision. Git is used to validate diff context, summarize changes, commit, and push—not to decide whether a file can be edited.
 
 ### Evidence and answer quality
 
@@ -129,7 +135,8 @@ Minimal configuration:
     "apiKey": "your-api-key",
     "model": "your-model",
     "temperature": 0.2,
-    "maxTokens": 4096,
+    "maxTokens": 16384,
+    "thinkingMode": "auto",
     "timeoutMs": 60000
   },
   "multiAgent": {
@@ -141,7 +148,9 @@ Minimal configuration:
 }
 ```
 
-Environment variables and command-line overrides are also supported. See [`mini-agent.config.example.json`](mini-agent.config.example.json) for LLM, RAG, multi-agent, and MCP options. Embedding environment variables and cache behavior are documented in [`docs/zh-CN/RAG_GUIDE.md`](docs/zh-CN/RAG_GUIDE.md); Memory and Web are runtime capabilities rather than sections in the example JSON.
+Environment variables and command-line overrides are also supported. See [`mini-agent.config.example.json`](mini-agent.config.example.json) for LLM, RAG, Web search, multi-agent, and MCP options. Web search defaults to the credential-free DuckDuckGo HTML/Lite adapters; an optional Brave Search API provider can be placed first with `webSearch.providerOrder` and `BRAVE_SEARCH_API_KEY`. `mini-agent doctor` reports the resolved order and missing Brave credentials. Embedding environment variables and cache behavior are documented in [`docs/zh-CN/RAG_GUIDE.md`](docs/zh-CN/RAG_GUIDE.md); Memory remains a runtime-managed capability rather than a configuration section.
+
+`maxTokens` is the provider's output budget, including reasoning tokens on providers that count them there. The default is `16384`; when a response ends with `finish_reason=length`, mini-agent makes at most one compact recovery request with a budget up to `32768`. `thinkingMode` is an optional provider extension (`auto`, `enabled`, or `disabled`). Keep `auto` for broad OpenAI-compatible portability; for DeepSeek models that spend the whole budget in hidden reasoning, use `"thinkingMode": "disabled"` or `mini-agent config init --thinking-mode disabled`. Private `reasoning_content` is telemetry only and is never parsed as an `AgentDecision`.
 
 ## Three useful demos
 
@@ -202,6 +211,16 @@ mini-agent patch ...               Preview or apply a unified diff
 mini-agent git ...                 Debug Git integration
 ```
 
+Repeated real-model sampling should be saved and compared instead of judged from one successful run:
+
+```bash
+mini-agent bench accept --repetitions 3
+mini-agent bench run benchmarks/agent-bench-v1.json --mode real --repetitions 5 --output .mini-agent/bench/current.json
+mini-agent bench compare .mini-agent/bench/current.json .mini-agent/bench/baseline.json
+```
+
+`bench accept` runs the versioned real-model profile for stale-RAG recovery, progressive Skill loading, and artifact provenance. It writes `.mini-agent/bench/real-model-acceptance-latest.json` plus a human-readable Markdown report. Reports separate first-run success, at-least-one success, all-runs success, flaky scenarios, run-level pass rate with a 95% Wilson interval, cost, latency, tool choice, and failure categories. Live evaluation remains opt-in because it consumes model credentials and is not deterministic.
+
 Useful runtime options:
 
 ```bash
@@ -222,6 +241,8 @@ Multi-agent support is available in `auto` mode by default. Natural-language int
 - Commands are structured with shell disabled by default; risky execution requires approval.
 - Source and configuration changes require relevant verification after the latest patch.
 - Web citations can only use URLs gathered during the current task.
+- Strict current, corroborated, and high-stakes Web answers must map material claims to exact successfully fetched URLs through structured `webClaims`; the runtime validates provenance and visibility, while semantic entailment remains a separate evaluation problem.
+- HTTP 200 challenge shells, empty pages, and high-confidence soft 404 pages are rejected as unusable evidence.
 - Failed research can end with an explicit evidence limitation instead of looping or inventing a URL.
 - Checkpoints persist bounded execution state and recover interrupted work without replaying raw side effects.
 - Child writers cannot directly modify the parent worktree.
@@ -237,7 +258,7 @@ The project keeps four concepts separate:
 - long-term memory: governed preferences, conventions, decisions, and verified outcomes;
 - provider prompt cache: provider-reported token reuse, observed but not controlled by the Agent.
 
-Context compaction uses structured salience rather than retaining only the latest tail. Selected, truncated, and excluded sections are observable in trace output. Repository RAG is a separate, citation-bearing Markdown/TXT knowledge index with hybrid retrieval and offline evaluation.
+Context compaction uses structured salience rather than retaining only the latest tail. Selected, truncated, and excluded sections are observable in trace output. Repository RAG is a separate, citation-bearing text/source/config knowledge index with hybrid retrieval and offline evaluation. It accepts an explicit allowlist of common documentation, programming, markup, and configuration formats, rejects binary content, and does not parse PDF/OCR. Its mutating operations merge under a cross-process file lock and publish through atomic rename, preventing concurrent CLI updates from silently replacing unrelated sources.
 
 ## Development and verification
 
@@ -247,10 +268,10 @@ pnpm build
 pnpm typecheck
 pnpm lint:unused
 pnpm test
-pnpm bench -- --baseline benchmarks/baselines/core-v1.json
+pnpm bench
 ```
 
-`pnpm verify` is the canonical gate: it checks that every TypeScript source file is reachable from the CLI entry point, rejects unreferenced exports, validates documentation references, performs a clean build, rejects unused local declarations, and runs the deterministic suite. The tests cover semantic contracts and permissions, conversation provenance, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
+`pnpm verify` is the canonical gate: it checks that every TypeScript source file is reachable from the CLI entry point, rejects unreferenced exports, validates documentation references, performs a clean build, restores and directly verifies the compiled CLI executable, compares the deterministic AgentBench dataset with its versioned baseline, rejects unused local declarations, and runs the deterministic suite. The tests cover semantic contracts and permissions, conversation provenance, Web evidence, full-file reads, patch and command safety, child worktree isolation, parent/child conflicts, terminal rendering, storage recovery, Memory, RAG, MCP, and evaluation.
 
 CI runs on pushes and pull requests to `main`. Real-model and live-Web behavior remain opt-in because CI must be deterministic and must not require external credentials.
 
@@ -266,6 +287,7 @@ CI runs on pushes and pull requests to `main`. Real-model and live-Web behavior 
 | [Test plan](docs/zh-CN/TEST_PLAN.md) | Automated and manual verification strategy |
 | [Roadmap](docs/zh-CN/ROADMAP.md) | Deliberately bounded next steps |
 | [Interview package](docs/zh-CN/RESUME_PACKAGE.md) | Accurate resume positioning and talking points |
+| [AI / Agent study guide](docs/zh-CN/AI_STUDY_GUIDE.md) | Foundations, primary sources, project exercises, and interview self-checks |
 
 ## Scope
 
@@ -278,4 +300,4 @@ This repository is an engineering-oriented local Agent prototype. It is suitable
 - observable multi-agent collaboration;
 - repeatable Agent evaluation.
 
-It does not claim parity with Claude Code or Codex, production-grade sandboxing, stable real-time search across all domains, autonomous completion of arbitrary tasks, or complete MCP protocol coverage.
+It does not claim parity with Claude Code or Codex, production-grade sandboxing, stable real-time search across all domains, autonomous completion of arbitrary tasks, or complete MCP protocol coverage. Its MCP runtime implements the `2025-11-25` tools, static resources/list/read, and prompts/list/get subsets; it does not yet claim compatibility with the stateless `2026-07-28` specification.

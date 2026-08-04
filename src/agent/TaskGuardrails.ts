@@ -107,7 +107,7 @@ function validateFinalDecision(
 
   const taskContractViolation = validateTaskContractEvidence(
     state,
-    decision.summary,
+    decision,
     evidenceInsufficient,
   );
   if (taskContractViolation) {
@@ -159,7 +159,7 @@ function validateFinalDecision(
     && knowledgeOutcome?.found === true
     && (
       knowledgeOutcome.citations.length === 0
-      || !knowledgeOutcome.citations.some((citation) => decision.summary.includes(citation))
+      || !knowledgeOutcome.citations.some((citation) => summaryIncludesKnowledgeCitation(decision.summary, citation))
     )
   ) {
     return {
@@ -167,7 +167,7 @@ function validateFinalDecision(
       message: [
         "Postcondition failed: knowledge_search returned grounded document citations,",
         "but the final answer did not preserve any of them.",
-        "Answer from the retrieved evidence and include at least one exact file-and-line citation.",
+        "Answer from the retrieved evidence and include at least one file-and-line citation for the returned source range.",
       ].join(" "),
     };
   }
@@ -242,9 +242,10 @@ function validateFinalDecision(
 
 function validateTaskContractEvidence(
   state: AgentState,
-  summary: string,
+  decision: Extract<AgentDecision, { type: "FINAL" }>,
   evidenceInsufficient: boolean,
 ): AgentDecisionGuardrailViolation | undefined {
+  const summary = decision.summary;
   const requirements = state.taskContract.evidence;
 
   if (requirements.repositoryRead && !hasSuccessfulRepositoryEvidence(state)) {
@@ -264,10 +265,10 @@ function validateTaskContractEvidence(
         ? [normalizeReadPath(explicitTarget)]
         : coverage[0]?.path ? [coverage[0].path] : [];
     const target = targets.find((candidate) => {
-      const item = coverage.find((entry) => normalizeReadPath(entry.path) === candidate);
+      const item = findReadCoverageForTarget(coverage, candidate);
       return !item?.complete;
     }) ?? targets[0];
-    const targetCoverage = target ? coverage.find((entry) => normalizeReadPath(entry.path) === target) : undefined;
+    const targetCoverage = target ? findReadCoverageForTarget(coverage, target) : undefined;
     if (!targetCoverage) {
       return {
         code: "FINAL_WITHOUT_COMPLETE_FILE_READ",
@@ -402,11 +403,73 @@ function validateTaskContractEvidence(
     }
   }
 
+  if (!evidenceInsufficient && state.taskContract.taskFrame?.webEvidencePolicy.profile !== "ORDINARY") {
+    if (!decision.webClaims?.length) {
+      return {
+        code: "FINAL_WITHOUT_WEB_CLAIM_SOURCES",
+        message: [
+          "Postcondition failed: strict Web research requires a structured webClaims mapping.",
+          "Map each material factual conclusion to exact successfully fetched sourceUrls and keep both the claim and URLs visible in summary.",
+        ].join(" "),
+      };
+    }
+  }
+
+  if (decision.webClaims?.length) {
+    const fetchedUrls = new Set(successfulFetchedUrls(state)
+      .map(normalizeComparableUrl)
+      .filter((value): value is string => value !== undefined));
+    for (const mapping of decision.webClaims) {
+      if (!normalizeComparableText(summary).includes(normalizeComparableText(mapping.claim))) {
+        return {
+          code: "FINAL_WEB_CLAIM_NOT_VISIBLE",
+          message: `Postcondition failed: mapped Web claim is not present in the user-visible summary: ${mapping.claim}`,
+        };
+      }
+      for (const sourceUrl of mapping.sourceUrls) {
+        const normalizedUrl = normalizeComparableUrl(sourceUrl);
+        if (!normalizedUrl || !fetchedUrls.has(normalizedUrl)) {
+          return {
+            code: "FINAL_WEB_CLAIM_SOURCE_NOT_FETCHED",
+            message: `Postcondition failed: Web claim source was not successfully fetched and inspected: ${sourceUrl}`,
+          };
+        }
+        if (!summary.includes(sourceUrl)) {
+          return {
+            code: "FINAL_WEB_CLAIM_SOURCE_NOT_VISIBLE",
+            message: `Postcondition failed: mapped source URL is missing from the user-visible summary: ${sourceUrl}`,
+          };
+        }
+      }
+    }
+  }
+
   return undefined;
+}
+
+function normalizeComparableText(value: string): string {
+  return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeComparableUrl(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    parsed.hash = "";
+    if (parsed.pathname !== "/") parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function hasSuccessfulRepositoryEvidence(state: AgentState): boolean {
   if (hasSuccessfulToolCall(state, "read_file")) return true;
+  if (state.toolResults.some((result) => (
+    result.toolName === "skill_read"
+    && result.result.success
+    && readObjectString(result.result.data, "source") === "repository"
+  ))) return true;
   return state.delegationBatches.some((batch) => batch.results.some((result) => (
     result.status === "COMPLETED"
     && result.evidence.length > 0
@@ -418,6 +481,17 @@ function hasSuccessfulRepositoryEvidence(state: AgentState): boolean {
       "git_diff",
     ].includes(tool))
   )));
+}
+
+function findReadCoverageForTarget(
+  coverage: ReturnType<AgentState["getFileReadCoverage"]>,
+  target: string,
+) {
+  const normalizedTarget = normalizeReadPath(target);
+  const exact = coverage.find((entry) => normalizeReadPath(entry.path) === normalizedTarget);
+  if (exact) return exact;
+  const suffixMatches = coverage.filter((entry) => normalizeReadPath(entry.path).endsWith(`/${normalizedTarget}`));
+  return suffixMatches.length === 1 ? suffixMatches[0] : undefined;
 }
 
 function formatCoverageRanges(ranges: Array<{ startLine: number; endLine: number }>): string {
@@ -633,6 +707,34 @@ function readLatestKnowledgeSearchOutcome(state: AgentState): KnowledgeSearchOut
     };
   }
   return state.recoveredCheckpoint?.effects.knowledgeSearch;
+}
+
+function summaryIncludesKnowledgeCitation(summary: string, citation: string): boolean {
+  if (summary.includes(citation)) return true;
+  const parsed = citation.match(/^(.*?)#L(\d+)(?:-L(\d+))?$/iu);
+  if (!parsed?.[1] || !parsed[2]) return false;
+  const source = parsed[1];
+  const expectedStart = Number(parsed[2]);
+  const expectedEnd = Number(parsed[3] ?? parsed[2]);
+  const locator = new RegExp([
+    escapeRegExp(source),
+    "\\s*(?:",
+    "#L(\\d+)(?:-L(\\d+))?",
+    "|:(\\d+)",
+    "|第\\s*(\\d+)(?:\\s*[-–—至到]\\s*(\\d+))?\\s*行",
+    ")",
+  ].join(""), "giu");
+  for (const match of summary.matchAll(locator)) {
+    const citedStart = Number(match[1] ?? match[3] ?? match[4]);
+    const citedEnd = Number(match[2] ?? match[5] ?? citedStart);
+    if (Number.isFinite(citedStart) && Number.isFinite(citedEnd)
+      && citedStart <= expectedEnd && citedEnd >= expectedStart) return true;
+  }
+  return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isKnowledgeTask(state: AgentState): boolean {

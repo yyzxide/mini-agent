@@ -1,5 +1,7 @@
 # 项目现状
 
+> 最近核对：2026-08-03。本文只记录能够由当前源码、确定性门禁和手工审计支持的结论。
+
 本文描述 `mini-coding-agent` 当前能够被代码和测试证明的能力、适合的项目定位，以及仍然存在的工程边界。
 
 它不再使用百分制自评。主观高分无法证明可靠性，反而会掩盖真实的设计取舍。面试或项目介绍应引用具体能力、测试、演示和限制。
@@ -16,16 +18,26 @@
 
 ## 当前验证基线
 
-截至 2026-07-29，仓库把 `pnpm verify` 作为唯一确定性验证基线。它依次执行：
+截至 2026-08-03，仓库把 `pnpm verify` 作为唯一确定性验证基线。它依次执行：
 
 - 从 `src/cli/index.ts` 建立 TypeScript import graph，拒绝不可达源码和无法解析的本地 import，并禁止已删除控制面文件或旧模式标识在迁移边界之外重新出现；
 - 检查源码导出是否至少被源码或测试引用，防止“文件可达但旧接口无人使用”；
 - 校验 README 与 `docs/` 中的本地链接和源码路径引用；
-- 清空 `dist/` 后重新执行 TypeScript 构建，避免旧编译产物伪装成当前功能；
+- 清空 `dist/` 后重新执行 TypeScript 构建，校验 shebang 并在 POSIX 平台恢复 `dist/cli/index.js` 的可执行位，避免旧编译产物或不可启动的 CLI 伪装成成功构建；
+- 通过真实可执行入口运行 `dist/cli/index.js --version`，并核对输出与 `package.json` 版本一致；
+- 运行版本化的确定性 AgentBench，并与 baseline 比较；
 - 开启 `noUnusedLocals` / `noUnusedParameters` 检查；
 - 运行完整 Vitest 测试集。
 
-GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm verify`，避免本地与 CI 漂移。测试数量不再写死在长期文档中；它会随删除重复用例或增加结构型回归而变化，实际结果以当次命令输出为准。
+GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm verify`，避免本地与 CI 漂移。2026-08-03 在非受限子进程环境执行的完整门禁通过；测试数量不再写死在长期文档中，它会随删除重复用例或增加结构型回归而变化，实际结果以当次命令输出为准。项目固定使用 pnpm，但 package script 内部直接调用 Node、TypeScript 和 Vitest，不再嵌套 npm/pnpm；因此从 `pnpm` 或 `corepack pnpm` 进入时都不会继承另一种包管理器的私有配置并产生误导性警告。
+
+### 本轮代码审计结论
+
+- import graph 中没有不可达 TypeScript 源文件，导出检查没有发现无人引用的源码声明；现有 `commander`、`execa`、`zod` 及开发依赖都有实际用途。
+- strict TypeScript、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、未使用声明检查、clean build、CLI 烟雾测试、AgentBench 和完整测试均通过。
+- MCP stdio 用例在受限执行沙箱中会因嵌套 Node 子进程 I/O 被环境截断而假失败；同一用例和完整测试在正常子进程环境通过。这是测试环境边界，不应通过修改 MCP 协议代码掩盖。
+- 没有发现需要直接删除的旧执行器或重复控制面。源码中的旧标签和旧配置路径只存在于明确的持久化迁移边界，并由架构检查限制。
+- 当前主要代码风险是维护性而非已复现的功能错误：`src/cli/index.ts` 与 `src/agent/AgentLoop.ts` 仍然较大。继续拆分应以形成稳定职责边界和回归收益为前提，不能为了行数重写核心控制面。
 
 ## 已完成的核心闭环
 
@@ -40,6 +52,10 @@ GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm ver
 - 当前已经授权的最小能力与已获得的证据。
 
 模型选择 `web_search`、`read_file`、`APPLY_PATCH`、`RUN_COMMAND` 或某个 MCP Tool 时，`CapabilityNegotiator` 在同一个 State、Session 和事件流中申请并组合能力，`kind` 始终保持 `AGENT_TASK`。CLI、程序化 `AgentLoop` 和 AgentHarness 使用同一条 TaskFrame 执行链。旧 Session 中的结果字符串只用于持久化数据兼容，不对应另一套执行器。
+
+Capability Registry 的 `tools` 与 `actions` 已物理分离：`TOOL_CALL` 只会看到真实注册工具，`APPLY_PATCH` / `RUN_COMMAND` 等只作为顶层 Decision 动作出现。运行时也会对遗留的 `TOOL_CALL run_command` / `TOOL_CALL apply_patch` 返回精确的 `DECISION_ACTION_REQUIRED`，而不是模糊的 `TOOL_NOT_FOUND`。
+
+Registry 还统一登记 `surfaces`，因此没有静态 Tool 名称的 Session、长期记忆、Skills、AgentBench，以及动态命名的 MCP Tool Runtime 也能进入同一产品事实清单。产品能力问答由 TaskFrame 模型输出结构化 `productCapability.act/capabilityIds`，再由本地 Registry 生成；运行时已经删除对“联网、写文件、子代理”等回答文本的专项正则扫描。
 
 ### 2. AI TaskFrame 任务理解
 
@@ -67,14 +83,19 @@ GitHub Actions 在 `main` 的 push 和 pull request 上运行同一个 `pnpm ver
 - 过大的 `read_file` 分页提示自动收敛，真实 Schema 错误返回具体字段；
 - 完整文件覆盖率追踪；
 - unified diff 检查与应用；
+- 占位/无变化 Patch 的 `PATCH_NO_CHANGES` 语义诊断，不把空补丁误报为 Git 上下文损坏；
 - 结构化命令执行和实时输出；
 - 验证强度分级；
+- 文件类型感知的内置 `verify_file`（HTML/JSON/classic JavaScript）以及命令验证器目标兼容检查；
+- 验证来源区分 `TASK_INFERRED` 与 `USER_REQUIRED`：前者根据实际变更文件收敛到可执行等级，后者保持用户明确要求；
 - 最新补丁之后的验证时序检查；
 - 任务级 before/after diff；
 - 新文件与文档变更记录；
 - 中断 checkpoint 与恢复。
 
 成功 `FINAL` 不是模型单方面决定。运行时会检查 `REQUIRED` 修改是否真的落盘、条件修改是否已有调查证据、证据是否覆盖目标、测试是否相关且发生在最新补丁之后。
+
+重复保护不仅覆盖连续相同 Decision，也覆盖没有新增完成证据时交替复现的 Guardrail 环，避免两个错误分支互相切换直到耗尽 `maxSteps`。
 
 ### 4. 隔离式多 Agent 协作
 
@@ -145,32 +166,32 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 
 当前还实现了：
 
-- 声明式 `SKILL.md` 发现和受控上下文注入；
+- 声明式 `SKILL.md` 发现、全量有界目录、语义选择，以及通过 `skill_read` 对完整指令和随附文本资源进行渐进读取；
 - 真正只读的 Plan 模式；
-- MCP stdio / Streamable HTTP tools runtime；
-- repository-local Markdown/TXT RAG；
+- MCP stdio / Streamable HTTP runtime：远端 tools 独立注册，静态 resources/list/read 与 prompts/list/get 通过只读命名空间适配器进入统一 Tool Registry，并保留初始化协商元数据用于兼容诊断；
+- repository-local 文档、源码与配置文本 RAG；Agent 能以 `knowledge_search -> knowledge_index -> knowledge_search` 自主恢复空索引；
 - 本地/远程 Embedding 与缓存；
 - AgentBench 脚本化和真实模型评测入口；
 - Capability Registry 与产品能力事实校验；
 - 环境诊断、日志和 Session 调试命令。
 
-这些能力共享现有权限系统，不能绕过 Task Contract。
+这些能力共享现有权限系统，不能绕过 Task Contract。版本化确定性 AgentBench 当前包含 10 个核心场景，并已纳入“旧文件不是本轮产物”“修改未跟踪 HTML”“拒绝无变化 Patch 后恢复”等历史故障；`verify_file` 的成功结果也与命令验证使用同一评测指标口径。
 
 ## 当前真实短板
 
 ### 模型与评测
 
-- 真实模型任务成功率尚未形成足够大的公开 benchmark。
+- 真实模型评测已支持重复采样、首轮成功率、至少一次成功率、全轮通过率、flaky 场景数、run pass rate 的 95% Wilson 区间、成本/延迟与失败分类，并可保存报告后离线比较；版本化 `real-model-acceptance-v1` 固定检查陈旧 RAG 恢复、Skill 渐进读取和旧文件产物溯源，`bench accept` 同时输出 JSON 与 Markdown。当前仍未积累足够大的公开真实模型样本。
 - 自动化测试主要证明运行时确定性，不代表所有模型都能稳定规划。
 - TaskFrame 和动作选择仍依赖模型质量；语义编译器不可用时 AgentLoop 会明确失败，因此不会误执行，但也不能在模型服务中断时完成任务。
-- 缺少按模型、任务类别和重复次数长期维护的成功率/成本趋势。
+- 已具备报告持久化、可读验收报告与 `bench compare` 结构化差值入口；真实调用结果默认写入 `.mini-agent/bench` 而不提交仓库，因为它们依赖个人凭据、成本和外部服务波动。
 
 ### 语义与控制边界
 
 - 多 Agent 要求进入 `TaskFrame.collaboration`，长会话取证进入 `TaskFrame.conversationEvidence`，Web 时效要求进入 `TaskFrame.webEvidencePolicy`。
 - 系统使用中性的最近窗口解析 TaskFrame，再根据模型给出的语义查询从完整 Session 有界召回历史消息和相邻上下文；它不是向量检索。
 - 产品元事实冲突、危险命令、路径、URL 血缘和 Memory 证据过滤仍有确定性规则；是否属于产品问题、是否召回历史记忆以及需要哪些能力只消费 TaskFrame，不再由这些规则选择 Direct/Web/Edit。
-- 配置中的 MCP Tool 可被模型逐个发现和申请；授权精确到 `<server>__<tool>`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准。
+- 配置中的 MCP Tool、resource reader 和 prompt reader 可被模型逐个发现和申请；授权精确到 `<server>__<tool>` / `<server>__read_resource` / `<server>__get_prompt`，不会隐式获得整个 Server、仓库写入或命令能力。Plan/固定只读只开放安全只读 MCP，修改型外部调用仍需逐次显式批准；程序化调用若没有提供权限管理器会直接失败，不存在 fail-open 旁路。Resource 与 Prompt 内容始终标记为不可信外部数据，不能提升为系统指令。
 
 ### 安全与隔离
 
@@ -180,16 +201,20 @@ Web Research 支持查询范围守恒、搜索、抓取、来源血缘、时效�
 
 ### Web 与外部系统
 
-- 搜索质量受提供商影响。
+- Web Search Provider 顺序可配置；默认使用免凭据的 DuckDuckGo HTML/Lite，也可配置 Brave Search API。`doctor` 会显示实际顺序并诊断缺少的 Brave 凭据；真实联网质量仍取决于 API 配额、网络和来源页面。
 - 没有专业体育、金融、新闻等垂直实时 API。
-- 尚未实现逐条 claim-source 的完整自动对齐。
-- MCP 聚焦 tools runtime，未覆盖协议的所有资源、Prompt、认证和服务端主动请求场景。
+- 严格 Web 终局已经要求结构化 `webClaims`，本地验证每条映射引用本轮成功抓取的精确 URL，并要求结论和来源在最终摘要中可见；这完成了可审计的 claim-source 关联，但尚未实现基于 NLI/LLM Judge 的逐条语义蕴含核验。
+- `fetch_url` 会拒绝 HTTP 200 的 WAF/CAPTCHA、登录壳、空正文和高置信软 404；无正文 SPA、订阅墙和站点特有错误模板仍可能需要更多适配。
+- MCP 初始化结果会保留协议版本、服务端信息与 capability keys；tools、resources、prompts 的 list 调用会持续跟随 `nextCursor`，并拒绝重复 cursor 或超过有界页数。状态诊断分别显示发现数量、注册适配器、已桥接/未桥接能力和逐 capability 错误；某一 list 失败只进入 degraded 状态，不会移除同一 Server 已成功加载的其他能力。
+- MCP 已覆盖静态 resources/list/read 与 prompts/list/get，但未覆盖 resource templates、订阅、completion、认证和服务端主动请求场景。
+- MCP Runtime 对应 `2025-11-25` 的 initialize/session 形态，尚未兼容正式 `2026-07-28` 无状态 core、`server/discover`、每请求 `_meta`、InputRequiredResult 和扩展机制。
 
 ### 产品化
 
 - CLI 是主要产品界面，没有 IDE 集成、Web 控制台或持续式全屏 TUI。
-- 本地 JSONL 和文件锁适合单用户 CLI，不适合多租户服务。
+- 本地 JSONL、RAG 跨进程写锁和原子替换适合单机 CLI；它们能避免并发索引更新丢失，但不替代多租户服务需要的数据库事务、ACL 和高可用。
 - 配置 profile、版本发布、安装分发和跨平台现场验证仍可继续打磨。
+- `src/cli/index.ts` 与 `src/agent/AgentLoop.ts` 仍是较大的编排模块；职责已比旧版本清晰，但修改时需要更高的回归成本。
 
 ## 面试项目竞争力
 

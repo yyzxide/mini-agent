@@ -6,13 +6,23 @@
     "apiKey": "replace-with-your-api-key",
     "model": "replace-with-your-model",
     "temperature": 0.2,
-    "maxTokens": 4096,
+    "maxTokens": 16384,
+    "thinkingMode": "auto",
     "timeoutMs": 60000
   },
   "rag": {
     "topK": 5,
     "minScore": 0.12,
     "maxContextChars": 6000
+  },
+  "webSearch": {
+    "providerOrder": ["brave", "duckduckgo_html", "duckduckgo_lite"],
+    "brave": {
+      "apiKeyEnv": "BRAVE_SEARCH_API_KEY",
+      "country": "CN",
+      "searchLang": "zh-hans",
+      "safeSearch": "moderate"
+    }
   },
   "multiAgent": {
     "mode": "auto",

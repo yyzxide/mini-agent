@@ -18,7 +18,7 @@ type KnowledgeSearchInput = z.infer<typeof KnowledgeSearchInputSchema>;
 
 export class KnowledgeSearchTool implements Tool<KnowledgeSearchInput, RagSearchResponse> {
   readonly name = "knowledge_search";
-  readonly description = "Search the repository-local RAG knowledge base and return grounded passages with line citations.";
+  readonly description = "Search the repository-local RAG knowledge base and return grounded passages with line citations. If offline search is insufficient, retry with concise source-language terms or an explicit source path.";
   readonly inputSchema = KnowledgeSearchInputSchema;
   readonly permissionLevel = PermissionLevel.SAFE;
   readonly metadata = {
@@ -44,6 +44,7 @@ export class KnowledgeSearchTool implements Tool<KnowledgeSearchInput, RagSearch
       found: response.found,
       reason: response.reason ?? null,
       citations: response.citations,
+      staleSources: response.staleSources ?? [],
       embeddingCache: store.getEmbeddingCacheStats() ?? null,
     });
   }

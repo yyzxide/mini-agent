@@ -2,7 +2,7 @@
 
 本文不重复描述当前代码，而是保留 `mini-coding-agent` 从 A 到 B 的关键变化：旧设计是什么、暴露了什么问题、如何迁移、保留了哪些兼容层，以及下一步向哪里演进。
 
-> 阅读规则：下面按时间排列的章节是各迁移阶段的历史快照，其中的“现在”“当前”只表示该阶段的 B 状态，不代表 2026-07-29 的源码。`TaskRouter`、`TaskUnderstanding`、`TaskContractBuilder`、专用 Artifact/Follow-up 解析器、`ExternalFactPolicy`、Repo 预扫描器和旧只读委派运行时都已物理删除。当前事实只以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
+> 阅读规则：下面按时间排列的章节是各迁移阶段的历史快照，其中的“现在”“当前”只表示该阶段的 B 状态，不代表 2026-08-03 的源码。`TaskRouter`、`TaskUnderstanding`、`TaskContractBuilder`、专用 Artifact/Follow-up 解析器、`ExternalFactPolicy`、Repo 预扫描器和旧只读委派运行时都已物理删除。当前事实只以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
 
 文档分工如下：
 
@@ -19,7 +19,7 @@
 |---|---|---|---|
 | 任务执行 | Direct、Web、Review、Repository Analysis、AgentLoop 分开执行 | 单一 `AgentLoop` + `AgentTaskContract` | 生命周期、权限和完成性检查统一 |
 | 审查与分析 | 两套高度相似的执行模块 | TaskFrame effects + 同一个 `AgentLoop`，答案形态由结构化合同表达 | 消除重复调查逻辑 |
-| 能力回答 | 模型根据当轮工具猜产品能力，局部问句特判 | TaskFrame 标记产品目标，`CapabilityRegistry` + `CapabilityTruthGuard` 校验最终能力陈述 | 不再把“本轮未授权”说成“产品不支持”，也不再重扫原始问句 |
+| 能力回答 | 模型根据当轮工具猜产品能力，局部问句特判 | TaskFrame 输出结构化 `productCapability` ID，`CapabilityTruthGuard` 从统一 Registry 生成事实回答 | 不再把“本轮未授权”说成“产品不支持”，也不再重扫原始问句或回答文本 |
 | 运行展示 | 零散日志、结束后输出大段 diff | `AgentRuntimeEvent` 时间线 + 可激活 Changes 卡片 + 终端 Diff Viewer | 执行可观察，代码改动按需查看 |
 | 产物追问 | “在哪里”再次交给模型解释 | TaskFrame 语义指代 + Conversation 执行账本 | 既能自主消解指代，也不把旧文件或助手文字冒充为本轮产物 |
 | 文件读取 | 单次固定行数读取 | Token 预算分页 + 行/列续读 + 文件哈希 + EOF 门禁 | 能完整审查大文件和超长单行，又不一次塞满窗口 |
@@ -65,13 +65,15 @@ Direct 契约不开放写文件或 Web 工具时，模型可能回答“我不�
 
 ### B：Registry 是唯一事实源
 
-当前由 `CapabilityRegistry` 描述产品支持的能力及边界。组合式分类器识别“产品主体 + 能力主题 + 疑问/解释意图”，而不是枚举完整句子。模型最终回答仍会经过 `CapabilityTruthGuard`；如果它把暂时的任务权限错误表述为全局能力缺失，运行时依据 Registry 纠正并记录事件。
+当前由 `CapabilityRegistry` 描述产品支持的能力、真实工具、顶层 Decision、用户入口和边界。TaskFrame 模型直接输出 `productCapability.act/capabilityIds`，表达“能力清单、可用性或边界解释”及相关能力 ID。`CapabilityTruthGuard` 只消费这份通过 Schema 的语义记录，再从 Registry 生成事实回答；它不扫描中文/英文问句，也不扫描模型草稿寻找“不能联网”等固定表达。
+
+Registry 不再只覆盖联网、仓库读写和多 Agent。MCP tools runtime、Session 持久化、Long-term Memory、声明式 Skills 和 AgentBench 也进入同一清单；Tool、Decision Action 与 CLI/声明入口分别记录，避免把 `run_command` 伪装成 Tool，或因为某项能力没有静态工具名就遗漏它。
 
 这条迁移确立了一个边界：LLM 可以组织解释，但不能定义产品事实；Task Contract 表示本轮最小权限，也不是产品总能力清单。
 
 ### 下一方向
 
-用多语言和开放表达 Eval 扩大组合式分类器覆盖，减少规则对固定措辞的依赖，同时继续以 Registry 作为最终事实锚点。
+用多语言和开放表达 Eval 检查 TaskFrame 对能力 ID 和意图的选择准确率，同时继续以 Registry 作为最终事实锚点；不要重新增加问句正则。
 
 ## 3. 从输出日志到可审计终端时间线
 
@@ -649,3 +651,85 @@ Git worktree 会覆盖父级当时的 staged、unstaged 和非忽略 untracked �
 - 词法规则仍用于路径、Patch、命令、URL 血缘、输出事实冲突和检索特征，这些规则不授予能力或选择执行模式；
 - 兼容入口应保持单向归一化，不能重新扩张成并行运行时；
 - 真实模型成功率仍需要版本化 AgentBench 和重复抽样证明。
+
+## 23. 从 clean build 到可直接启动的 CLI 发布物
+
+### A：源码和构建都正确，但全局命令失去执行权限
+
+clean build 会先删除整个 `dist/`。TypeScript 随后重新生成带有正确 `#!/usr/bin/env node` 的 `dist/cli/index.js`，但它不会承诺继承旧文件的 POSIX mode；在收紧的 umask 下，新入口可能成为 `600`。全局安装的 `mini-agent` 是指向这个文件的符号链接，因此直接运行会在 Bash 启动 Node 之前得到 `Permission denied`，而 `node dist/cli/index.js` 仍然正常。
+
+这说明“TypeScript 编译通过”和“CLI 发布物可执行”是两个不同的后置条件。只在当前机器手工 `chmod +x` 不能解决问题，因为下一次 clean build 会再次删除该 inode。
+
+### B：构建后定型与真实入口门禁
+
+构建链新增两个独立步骤：
+
+1. `scripts/finalize-build.mjs` 在编译后校验 Node shebang，并在非 Windows 平台把 CLI 入口设为 `755`；
+2. `scripts/check-cli-entry.mjs` 检查文件类型、shebang 和可执行位，然后不经过 `node <file>` 兜底，直接执行编译后的入口并核对 `--version` 与 `package.json`。
+
+`pnpm verify` 和 `pnpm verify:regression` 都在 clean build 后运行 `check:cli`，GitHub Actions 使用同一条门禁。Windows 没有 POSIX executable bit，检查器会改用当前 Node 执行同一入口并保留 shebang、版本校验。
+
+因此全局符号链接、npm `bin` 发布物和本地构建共享同一个可验证入口；以后即使 umask、构建目录或编译行为变化，也会在发布前失败，而不是等用户运行命令时才暴露。
+
+## 24. 边界默认拒绝、审计基线与物理拆分
+
+### A：主链路安全不代表工具适配层安全
+
+CLI 和 `AgentLoop` 一直会向 MCP Tool 传入 `PermissionManager`，但旧的 `McpRemoteTool` 使用可选调用；程序化调用方遗漏 manager 时会绕过检查。这属于工具边界的 fail-open，而不是 TaskFrame 控制面的路由问题。
+
+现在 MCP adapter 在调用任何远端工具前要求权限管理器存在，缺失时返回 `MCP_PERMISSION_MANAGER_REQUIRED`，不会连接远端 Server。修改型 MCP 仍保留逐工具、逐调用的显式批准。权限提示同时接受界面展示的 `1. yes / 2. no`，避免提示与解析分离。
+
+### B：任务 Diff 与仓库脏状态是两种不同证据
+
+任务级 `TaskDiffArtifact` 描述本轮相对基线真正修改了什么；Git working tree snapshot 描述任务前后仓库整体有哪些 staged、unstaged 和 untracked 文件。两者不能共用一个模糊的 `changedFiles`。
+
+变更日志现在分别保存：
+
+- `beforeChangedFiles`：任务开始前的仓库脏文件；
+- `currentChangedFiles`：任务结束后的仓库脏文件；
+- `newlyChangedFiles`：结束状态相对开始状态新增的脏文件；
+- `taskChangedFiles`：TaskDiff 证明由本轮产生或修改的文件。
+
+`GitManager` 使用独立临时 index 构造工作树快照，把 staged、unstaged 和非忽略 untracked 文件纳入同一统计，同时不修改用户真实 index。任务完成性仍由 `TaskDiffService` 的前后 tree 比较负责。
+
+### C：并发索引与确定性质量门禁
+
+RAG 的 embedding 计算在锁外进行，提交阶段进入跨进程写锁、重新读取最新 JSONL、合并本次来源并原子替换。这样不会把远端 embedding 延迟放进临界区，也不会让两个 CLI 进程对不同来源的导入互相覆盖。
+
+默认 `pnpm bench` 现在自动比较 `benchmarks/baselines/core-v1.json`；`pnpm verify` 也显式执行同一确定性门禁。真实模型和 Live Web 评测仍保持 opt-in，因为它们需要凭据并存在成本与外部波动。
+
+### D：按职责拆分，不重写控制面
+
+本轮没有新建第二条执行链，而是从两个集中式入口提取无状态或基础设施职责：
+
+- `AgentLoopSupport`：决策稳定键、重复调用判断、命令转换、遥测聚合和 Diff metadata；
+- `CliParsers` / `CliFormatters`：参数解析、输入读取和终端序列化；
+- `DoctorReport`：环境诊断；
+- `TaskChangeLogger`：Git 基线、任务 Diff 和测试证据汇总。
+
+`AgentLoop` 仍是唯一运行时，`src/cli/index.ts` 仍是组合入口；拆分降低物理耦合，不引入 Direct/Web/Edit 模式或新的自然语言硬编码路由。
+
+## 25. 从“大输出补丁反复失败”到分层协议与类型兼容验证
+
+### A：增加 Token 上限仍无法完成 HTML 修改
+
+真实任务暴露出三类被混在一起的问题：
+
+- TaskFrame、Agent Decision 和最终回答共享输出预算，模型可能在一个 Patch Decision 中生成过长内容并返回截断或非法 JSON；
+- 模型把已存在但未被 Git 跟踪的文件当成“需要重新创建”，把文件系统状态和 Git tracking 混为一谈；
+- `APPLY_PATCH` / `RUN_COMMAND` 同时以 Tool 名和顶层 Decision 概念出现，模型会生成占位补丁、重复 CREATE，或使用 `node --check page.html` 这类目标不兼容的验证命令。
+
+这些失败不能靠继续提高 `maxTokens`、为“优化 HTML”增加问句特判，或把未跟踪文件自动加入 Git 解决。根因分别属于模型协议预算、Patch 预检事实和动作能力描述。
+
+### B：按边界分别收口
+
+当前实现将问题拆成四层：
+
+1. `OpenAICompatibleClient` 按 TaskFrame、Agent Decision 和回答阶段使用独立输出预算；对空内容、thinking 参数不兼容和结构化解析失败只做有界恢复。
+2. `PatchManager` 在调用 Git 前检查工作区目标：已存在文件不能 CREATE，不存在文件不能 MODIFY / DELETE；Git 是否跟踪不参与这个判定。
+3. Capability Registry 分离 `tools` 与 `actions`。`TOOL_CALL` 只允许真实注册工具，Patch 和 Command 只能作为顶层 Decision；遗留形状得到 `DECISION_ACTION_REQUIRED`。
+4. Completion Contract 引入 `verificationBasis`，并增加只读 `verify_file` 与命令目标兼容检查。验证必须适用于实际文件，并发生在最新 Patch 之后。
+
+Patch 诊断同时区分 `PATCH_NO_CHANGES`、`PATCH_TARGET_ALREADY_EXISTS`、`PATCH_TARGET_NOT_FOUND`、`PATCH_CONTEXT_MISMATCH` 和格式损坏。AgentLoop 还会检测没有新增证据的交替 Guardrail 周期，避免在两个不同错误之间来回直到耗尽步骤。
+
+这次迁移说明：Agent 自主性来自模型在清晰能力边界内选择下一步，不来自宿主猜测问句或放宽执行约束；错误恢复质量首先取决于协议是否把真实失败类型反馈给模型。

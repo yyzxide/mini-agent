@@ -5,8 +5,13 @@ import { GitManager } from "../git/GitManager.js";
 import type { GitDiffResult } from "../git/GitManager.js";
 import {
   EmptyPatchError,
+  errorToCode,
+  errorToDetails,
   InvalidPatchFormatError,
+  PatchTargetAlreadyExistsError,
+  PatchTargetMissingError,
   PatchPathOutsideRepoError,
+  PatchNoChangesError,
   PatchTooLargeError,
   PatchTouchesInternalDirectoryError,
 } from "../utils/errors.js";
@@ -46,8 +51,10 @@ export interface GetDiffInput {
 
 export interface PatchCheckResult {
   success: boolean;
+  code?: string;
   error?: string;
   stderr?: string;
+  details?: unknown;
 }
 
 export type PatchChangeType = "ADDED" | "MODIFIED" | "DELETED" | "RENAMED" | "UNKNOWN";
@@ -99,6 +106,8 @@ export class PatchManager {
     try {
       const patch = normalizeUnifiedDiff(input.patch);
       this.assertPatchAllowed(patch);
+      const preview = parseUnifiedDiff(patch);
+      await this.assertWorkspaceTargets(preview.files);
       const patchFile = await this.writeTempPatch(patch);
       try {
         const result = await execa("git", ["-c", "core.autocrlf=false", "apply", "--check", patchFile], {
@@ -111,16 +120,21 @@ export class PatchManager {
           ? { success: true }
           : {
               success: false,
+              code: "PATCH_CONTEXT_MISMATCH",
               error: "git apply --check failed",
               stderr: result.stderr,
+              details: { files: preview.files },
             };
       } finally {
         await fs.rm(patchFile, { force: true });
       }
     } catch (error) {
+      const details = errorToDetails(error);
       return {
         success: false,
+        code: errorToCode(error, "PATCH_VALIDATION_FAILED"),
         error: error instanceof Error ? error.message : String(error),
+        ...(details === undefined ? {} : { details }),
       };
     }
   }
@@ -212,6 +226,30 @@ export class PatchManager {
     for (const filePath of paths) {
       assertPatchPathAllowed(this.repoPath, filePath);
     }
+
+    const preview = parseUnifiedDiff(patch);
+    const hasContentChange = preview.files.some((file) => (
+      file.additions > 0 || file.deletions > 0 || file.changeType === "RENAMED"
+    ));
+    if (!hasContentChange) {
+      throw new PatchNoChangesError(preview.files.map((file) => file.path));
+    }
+  }
+
+  private async assertWorkspaceTargets(files: PatchChangedFile[]): Promise<void> {
+    for (const file of files) {
+      const targetPath = resolveRepoPath(this.repoPath, file.path);
+      const exists = await pathExistsWithoutFollowingMissingTarget(targetPath);
+      if (file.changeType === "ADDED" && exists) {
+        throw new PatchTargetAlreadyExistsError(file.path);
+      }
+      if (file.changeType === "MODIFIED" && !exists) {
+        throw new PatchTargetMissingError(file.path, "MODIFY");
+      }
+      if (file.changeType === "DELETED" && !exists) {
+        throw new PatchTargetMissingError(file.path, "DELETE");
+      }
+    }
   }
 
   private async writeTempPatch(patch: string): Promise<string> {
@@ -220,6 +258,18 @@ export class PatchManager {
     const patchFile = resolveMiniAgentPath(this.repoPath, "tmp", `${randomUUID()}.patch`);
     await fs.writeFile(patchFile, patch, "utf8");
     return patchFile;
+  }
+}
+
+async function pathExistsWithoutFollowingMissingTarget(targetPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 

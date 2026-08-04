@@ -136,6 +136,40 @@ describe("AgentTaskContract", () => {
       summary: "Review complete.",
     })).toMatchObject({ code: "FINAL_WITH_INCOMPLETE_FILE_READ" });
   });
+
+  it("accepts complete repository Skill reads as repository and file coverage evidence", () => {
+    const contract = createTestTaskContract({
+      objective: "Read the complete release Skill.",
+      target: "REPOSITORY",
+      effects: { repositoryRead: true },
+      constraints: { readOnly: true, requireCompleteFileRead: true },
+    });
+    const state = stateFor(contract, "Read the complete SKILL.md.");
+    state.addToolResult({
+      toolName: "skill_read",
+      input: { name: "release-audit" },
+      result: {
+        success: true,
+        data: {
+          name: "release-audit",
+          resource: "SKILL.md",
+          path: "skills/release-audit/SKILL.md",
+          source: "repository",
+          startLine: 1,
+          endLine: 3,
+          totalLines: 3,
+          content: "complete instructions",
+          hasMore: false,
+        },
+      },
+    });
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "The complete repository Skill was read.",
+    })).toBeUndefined();
+  });
 });
 
 function stateFor(

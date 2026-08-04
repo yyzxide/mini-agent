@@ -65,6 +65,58 @@ describe("AgentHarness", () => {
     expect(result.llmCalls).toBeGreaterThanOrEqual(3);
   });
 
+  it("creates a stale RAG fixture and verifies the Agent refresh path", async () => {
+    const result = await new AgentHarness().runScenario({
+      name: "refresh stale policy",
+      userGoal: "Use repository knowledge to answer the current upload policy and refresh stale evidence.",
+      files: {
+        "docs/policy.md": "# Policy\n\nUpload policy requires SHA-256 checksum verification.\n",
+      },
+      ragIndexPaths: ["docs/policy.md"],
+      postIndexFiles: {
+        "docs/policy.md": "# Policy\n\nUpload policy now requires SHA-512 checksum verification.\n",
+      },
+      decisions: [
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs/policy.md"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "FINAL", success: true, summary: "当前策略已从 SHA-256 更新为 SHA-512（docs/policy.md 第 3 行）。" },
+      ],
+      expected: {
+        success: true,
+        toolsCalled: ["knowledge_search", "knowledge_index"],
+        toolCallsInOrder: [
+          { name: "knowledge_search", inputContains: { query: "upload policy checksum verification" } },
+          { name: "knowledge_index", inputContains: { paths: ["docs/policy.md"] } },
+          { name: "knowledge_search", inputContains: { query: "upload policy checksum verification" } },
+        ],
+        summaryContains: ["SHA-512"],
+        summaryMatches: ["docs/policy\\.md(?:(?:#L\\d+(?:-L\\d+)?)|(?::\\d+)|(?:\\s*第\\s*\\d+(?:\\s*[-–—至到]\\s*\\d+)?\\s*行))"],
+      },
+    });
+    createdRepos.push(result.repoPath);
+
+    expect(result.passed, [
+      result.run.error,
+      result.run.summary,
+      ...result.expectationFailures,
+    ].filter(Boolean).join("\n")).toBe(true);
+    expect(result.metrics.toolCalls.filter((tool) => tool === "knowledge_search")).toHaveLength(2);
+  });
+
+  it("treats an unsuccessful run as failed when expected is omitted", async () => {
+    const result = await new AgentHarness().runScenario({
+      name: "failed without explicit expectations",
+      userGoal: "fail",
+      decisions: [{ type: "FAILED", error: "simulated failure" }],
+    });
+    createdRepos.push(result.repoPath);
+
+    expect(result.run.success).toBe(false);
+    expect(result.passed).toBe(false);
+    expect(result.expectationFailures).toContain("Expected success=true but got false");
+  });
+
   it("aggregates suite metrics and failure categories", async () => {
     const harness = new AgentHarness();
     const suite = await harness.runSuite([
@@ -86,7 +138,8 @@ describe("AgentHarness", () => {
     expect(suite.total).toBe(2);
     expect(suite.passed).toBe(1);
     expect(suite.successRate).toBe(0.5);
-    expect(suite.failuresByCategory.EXPECTATION).toBe(1);
+    expect(suite.failuresByCategory.MODEL).toBe(1);
+    expect(suite.scenarios[1]?.run.failureCode).toBe("MODEL_REPORTED_FAILURE");
   });
 
   it("includes delegated child calls in cost metrics", async () => {

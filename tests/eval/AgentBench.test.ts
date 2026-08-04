@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentBench, evaluateAgentBenchGate } from "../../src/eval/AgentBench.js";
+import { AgentBench, compareAgentBenchReports, evaluateAgentBenchGate, renderAgentBenchMarkdownReport } from "../../src/eval/AgentBench.js";
 import { loadAgentBenchDataset, loadAgentBenchReport } from "../../src/eval/AgentBenchDataset.js";
 import type { AgentBenchSummary } from "../../src/eval/AgentBenchTypes.js";
 import type { AgentBenchDataset } from "../../src/eval/AgentBenchTypes.js";
@@ -17,18 +17,48 @@ describe("AgentBench", () => {
 
     expect(report.runs.filter((run) => !run.passed)).toEqual([]);
     expect(report.summary).toMatchObject({
-      scenarios: 7,
-      totalRuns: 7,
-      passedRuns: 7,
+      scenarios: 10,
+      totalRuns: 10,
+      passedRuns: 10,
       passAt1: 1,
       passAtK: 1,
       toolChoiceAccuracy: 1,
+      allRunsPassRate: 1,
+      flakyScenarios: 0,
     });
+    expect(report.summary.runPassRate95CI).toMatchObject({ confidence: 0.95 });
     expect(report.summary.contextTruncationRate).toBeGreaterThanOrEqual(0);
     expect(report.runs.some((run) => run.metrics.testsPassed > 0)).toBe(true);
     expect(report.runs.some((run) => run.metrics.verificationsPassed > 0)).toBe(true);
     expect(report.runs.every((run) => run.repoPath === undefined)).toBe(true);
     expect(report.gate).toEqual({ passed: true, failures: [], comparedToBaseline: true });
+  });
+
+  it("loads the opt-in real-model acceptance profile and renders a readable report", async () => {
+    const dataset = await loadAgentBenchDataset(path.resolve("benchmarks/real-model-acceptance-v1.json"));
+    expect(dataset).toMatchObject({
+      name: "mini-agent-real-acceptance-v1",
+      repetitions: 3,
+      scenarios: [
+        expect.objectContaining({
+          id: "refresh-stale-rag-before-answer",
+          ragIndexPaths: ["docs/policy.md"],
+          postIndexFiles: { "docs/policy.md": expect.stringContaining("SHA-512") },
+        }),
+        expect.objectContaining({ id: "progressively-read-skill-resource" }),
+        expect.objectContaining({ id: "create-new-artifact-with-existing-similar-file" }),
+      ],
+    });
+
+    const markdown = renderAgentBenchMarkdownReport(reportWithSummary(summary({
+      scenarios: 3,
+      totalRuns: 9,
+      passedRuns: 8,
+      runPassRate: 8 / 9,
+    })));
+    expect(markdown).toContain("# Mini Agent 真实模型验收报告");
+    expect(markdown).toContain("Run pass rate");
+    expect(markdown).toContain("88.9%");
   });
 
   it("fails the gate on quality regression or excessive cost", () => {
@@ -84,6 +114,53 @@ describe("AgentBench", () => {
     expect(report.runs[0]?.metrics).toMatchObject({ promptTokens: 10, completionTokens: 4, usageAvailable: true });
   });
 
+  it("reports flaky repeated real-model scenarios instead of hiding them behind passAtK", async () => {
+    const dataset: AgentBenchDataset = {
+      version: 1,
+      name: "flaky-real-fixture",
+      scenarios: [{ id: "answer", name: "answer", userGoal: "answer", expected: { success: true } }],
+    };
+    const report = await new AgentBench().run(dataset, {
+      mode: "real",
+      repetitions: 2,
+      createLlmClient: (_scenario, repetition) => ({
+        chat: async () => repetition === 1
+          ? { type: "FINAL", success: true, summary: "done" }
+          : { type: "FINAL", success: false, summary: "not done" },
+        compileTaskFrame: async () => ({
+          success: true,
+          text: JSON.stringify(createTestTaskFrame({ objective: "answer" })),
+        }),
+      }),
+    });
+
+    expect(report.summary).toMatchObject({
+      passAt1: 1,
+      passAtK: 1,
+      runPassRate: 0.5,
+      allRunsPassRate: 0,
+      flakyScenarios: 1,
+    });
+    expect(report.scenarios[0]).toMatchObject({
+      passRate: 0.5,
+      allRunsPassed: false,
+      flaky: true,
+      failuresByCategory: { EXPECTATION: 1 },
+    });
+  });
+
+  it("builds structured deltas for stored report comparisons", () => {
+    const baseline = reportWithSummary(summary({ runPassRate: 0.5, allRunsPassRate: 0, flakyScenarios: 1 }));
+    const current = reportWithSummary(summary({ runPassRate: 1, allRunsPassRate: 1, flakyScenarios: 0 }));
+    const comparison = compareAgentBenchReports(current, baseline);
+
+    expect(comparison.metricDeltas).toMatchObject({
+      runPassRate: 0.5,
+      allRunsPassRate: 1,
+      flakyScenarios: -1,
+    });
+  });
+
   it("rejects a baseline from a different dataset", async () => {
     const dataset: AgentBenchDataset = {
       version: 1,
@@ -122,6 +199,9 @@ function summary(overrides: Partial<AgentBenchSummary> = {}): AgentBenchSummary 
     passAtK: 1,
     runPassRate: 1,
     toolChoiceAccuracy: 1,
+    allRunsPassRate: 1,
+    flakyScenarios: 0,
+    runPassRate95CI: { confidence: 0.95, lower: 1, upper: 1 },
     averageSteps: 1,
     averageLlmCalls: 1,
     averageDurationMs: 1,

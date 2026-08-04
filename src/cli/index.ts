@@ -5,10 +5,8 @@ import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
-import { execa } from "execa";
 import { findLatestAgentCheckpoint, recoverLatestAgentCheckpoint } from "../agent/AgentCheckpoint.js";
 import { CommandRunner } from "../command/CommandRunner.js";
-import type { CommandResult } from "../command/CommandRunner.js";
 import { classifyVerificationCommandInput } from "../command/CommandClassification.js";
 import {
   initAgentConfig,
@@ -32,11 +30,9 @@ import { SessionStore } from "../session/SessionStore.js";
 import { TaskChangeLogStore } from "../session/TaskChangeLogStore.js";
 import type {
   StoredTaskChangeMode,
-  TaskChangeLogEntry,
   TaskChangeMode,
-  TaskChangeTestResult,
 } from "../session/TaskChangeLogStore.js";
-import type { EventRecord, JsonObject, SessionMeta, SessionRecord } from "../session/SessionTypes.js";
+import type { SessionMeta, SessionRecord } from "../session/SessionTypes.js";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.js";
 import type { ToolContext } from "../tools/Tool.js";
 import {
@@ -46,10 +42,8 @@ import {
   errorToDetails,
   errorToMessage,
 } from "../utils/errors.js";
-import { resolveRepoPath } from "../utils/fs.js";
-import { toJsonObject } from "../utils/json.js";
 import { createRuntimeLogger, readRuntimeLogs } from "../utils/logger.js";
-import type { LogLevel, LogRecord } from "../utils/logger.js";
+import type { LogLevel } from "../utils/logger.js";
 import { SkillStore } from "../skills/SkillStore.js";
 import { createStores } from "./CliTaskRuntime.js";
 import type { AgentCliOptions, CliTaskResult } from "./CliTaskRuntime.js";
@@ -59,6 +53,36 @@ import { registerRagCommands } from "./RagCommands.js";
 import { registerToolCommands } from "./ToolCommands.js";
 import { registerBenchCommands } from "./BenchCommands.js";
 import { createTaskFrameBootstrapContract } from "../runtime/TaskFrameContract.js";
+import { appendTaskChangeLog, readGitSnapshot } from "./TaskChangeLogger.js";
+import { buildDoctorReport } from "./DoctorReport.js";
+import {
+  commandResultToPayload,
+  formatEventRecord,
+  formatInteractiveSessionLine,
+  formatLocalMinute,
+  formatLogRecord,
+  formatMemoryEntryForOutput,
+  formatResumeSessionLine,
+  formatSessionRecord,
+  formatTaskChangeLogEntry,
+  isGitDiffData,
+  limitSingleLine,
+  readPayloadNumber,
+  readPayloadString,
+  type SessionOverview,
+} from "./CliFormatters.js";
+import {
+  parseAgentCount,
+  parseLogLevel,
+  parseNumber,
+  parseOptionalLimit,
+  parsePositiveInteger,
+  parsePositiveNumber,
+  parseProbability,
+  parseThinkingMode,
+  parseWebSearchProviders,
+  readPatchInput,
+} from "./CliParsers.js";
 
 const VERSION = "0.1.0";
 const INTERACTIVE_RESUME_LIST_LIMIT = 10;
@@ -88,16 +112,6 @@ const INTERACTIVE_SLASH_COMMANDS = [
   { command: "/clear", usage: "/clear", description: "Clear the terminal." },
   { command: "/exit", usage: "/exit", description: "Finish this session and exit." },
 ] as const;
-
-interface GitSnapshot {
-  changedFiles: string[];
-  diffStat: string | null;
-}
-
-interface SessionOverview extends SessionMeta {
-  lastUserMessage?: string;
-  latestSummary?: string;
-}
 
 interface SessionSummaryOutput {
   sessionId: string;
@@ -157,7 +171,14 @@ interface ConfigInitOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  thinkingMode?: "auto" | "enabled" | "disabled";
   timeoutMs?: number;
+  webProviders?: Array<"brave" | "duckduckgo_html" | "duckduckgo_lite">;
+  braveApiKey?: string;
+  braveApiKeyEnv?: string;
+  braveCountry?: string;
+  braveSearchLang?: string;
+  braveSafeSearch?: "off" | "moderate" | "strict";
 }
 
 export function createProgram(): Command {
@@ -254,7 +275,14 @@ export function createProgram(): Command {
     .option("--model <model>", "OpenAI-compatible model name")
     .option("--temperature <number>", "Model temperature", parseNumber)
     .option("--max-tokens <number>", "Maximum output tokens", parsePositiveInteger)
+    .option("--thinking-mode <mode>", "Provider thinking mode: auto, enabled, or disabled", parseThinkingMode)
     .option("--timeout-ms <number>", "LLM request timeout in milliseconds", parsePositiveInteger)
+    .option("--web-providers <providers>", "Comma-separated Web Search provider order", parseWebSearchProviders)
+    .option("--brave-api-key <key>", "Brave Search API key stored in mini-agent.config.json")
+    .option("--brave-api-key-env <name>", "Environment variable name that stores the Brave Search API key")
+    .option("--brave-country <code>", "Brave Search two-letter country code")
+    .option("--brave-search-lang <language>", "Brave Search language code")
+    .option("--brave-safe-search <mode>", "Brave safe search: off, moderate, or strict")
     .action(async (options: ConfigInitOptions) => {
       await runJsonAction(async () => {
         const config = await initAgentConfig(process.cwd(), {
@@ -266,8 +294,30 @@ export function createProgram(): Command {
             ...(options.model ? { model: options.model } : {}),
             ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
             ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+            ...(options.thinkingMode === undefined ? {} : { thinkingMode: options.thinkingMode }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
           },
+          ...(
+            options.webProviders
+            || options.braveApiKey
+            || options.braveApiKeyEnv
+            || options.braveCountry
+            || options.braveSearchLang
+            || options.braveSafeSearch
+              ? {
+                  webSearch: {
+                    ...(options.webProviders ? { providerOrder: options.webProviders } : {}),
+                    brave: {
+                      ...(options.braveApiKey ? { apiKey: options.braveApiKey } : {}),
+                      ...(options.braveApiKeyEnv ? { apiKeyEnv: options.braveApiKeyEnv } : {}),
+                      ...(options.braveCountry ? { country: options.braveCountry } : {}),
+                      ...(options.braveSearchLang ? { searchLang: options.braveSearchLang } : {}),
+                      ...(options.braveSafeSearch ? { safeSearch: options.braveSafeSearch } : {}),
+                    },
+                  },
+                }
+              : {}
+          ),
         });
 
         writeJson(redactAgentConfig(config));
@@ -1846,14 +1896,6 @@ async function indexLongTermMemoryForSession(
   }, sessionId).catch(() => undefined);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function limitText(value: string, maxChars: number): string {
-  return value.length > maxChars ? `${value.slice(0, maxChars)}\n...[truncated]` : value;
-}
-
 async function readGitDiff(repoPath: string): Promise<string> {
   const result = await createDefaultToolRegistry().execute("git_diff", {}, { repoPath });
   if (result.success && isGitDiffData(result.data)) {
@@ -1870,194 +1912,6 @@ async function readRepoState(repoPath: string): Promise<string> {
   } catch (error) {
     return `[status] ${errorToMessage(error)}`;
   }
-}
-
-async function readGitSnapshot(repoPath: string): Promise<GitSnapshot> {
-  const git = new GitManager({ repoPath });
-  if (!(await git.isGitRepository().catch(() => false))) {
-    return { changedFiles: [], diffStat: null };
-  }
-
-  const [changedFiles, diffSummary] = await Promise.all([
-    git.getChangedFiles().catch(() => []),
-    git.generateDiffSummary().catch(() => null),
-  ]);
-
-  return {
-    changedFiles,
-    diffStat: diffSummary?.stat || null,
-  };
-}
-
-async function appendTaskChangeLog(
-  repoPath: string,
-  input: {
-    userGoal: string;
-    result: CliTaskResult;
-    beforeSnapshot: GitSnapshot;
-  },
-): Promise<TaskChangeLogEntry | undefined> {
-  if (!input.result.sessionId) {
-    return undefined;
-  }
-
-  const tests = await readTaskTests(repoPath, input.result.sessionId);
-  const artifactId = typeof input.result.metadata?.diffArtifactId === "string"
-    ? input.result.metadata.diffArtifactId
-    : undefined;
-  const taskArtifact = artifactId
-    ? await new TaskDiffStore(repoPath).read(input.result.sessionId, artifactId).catch(() => undefined)
-    : undefined;
-  const changedFiles = taskArtifact
-    ? taskArtifact.files.map((file) => file.path)
-    : [];
-  const diffStat = taskArtifact
-    ? `${String(taskArtifact.fileCount)} files changed, ${String(taskArtifact.additions)} insertions(+), ${String(taskArtifact.deletions)} deletions(-)`
-    : "";
-  return await new TaskChangeLogStore({ repoPath }).append({
-    sessionId: input.result.sessionId,
-    task: input.userGoal,
-    mode: input.result.mode,
-    success: input.result.success,
-    summary: limitText(input.result.summary, 2_000),
-    beforeChangedFiles: [],
-    currentChangedFiles: changedFiles,
-    diffStat,
-    tests,
-    ...(input.result.error ? { error: input.result.error } : {}),
-    metadata: {
-      beforeDiffStat: input.beforeSnapshot.diffStat,
-      ...(input.result.metadata ?? {}),
-    },
-  });
-}
-
-async function buildDoctorReport(repoPath: string): Promise<JsonObject> {
-  const [gitVersion, rgVersion, pnpmVersion, repoState, configResult, sessions, recentLogs, recentChanges] = await Promise.all([
-    readCommandVersion("git", ["--version"]),
-    readCommandVersion("rg", ["--version"]),
-    readPnpmVersion(),
-    new RepoStateAnalyzer({ repoPath }).analyze().catch((error: unknown) => ({ error: errorToMessage(error) })),
-    readDoctorConfig(repoPath),
-    createStores(repoPath).sessionStore.listSessions().catch(() => []),
-    readRuntimeLogs(repoPath, { limit: 1 }).catch(() => []),
-    new TaskChangeLogStore({ repoPath }).list(1).catch(() => []),
-  ]);
-
-  return toJsonObject({
-    timestamp: new Date().toISOString(),
-    repoPath,
-    runtime: {
-      node: process.version,
-      platform: process.platform,
-      arch: process.arch,
-    },
-    commands: {
-      git: gitVersion,
-      rg: rgVersion,
-      pnpm: pnpmVersion,
-    },
-    config: configResult,
-    repository: repoState,
-    storage: {
-      sessionCount: sessions.length,
-      latestSession: sessions[0] ?? null,
-      hasRuntimeLogs: recentLogs.length > 0,
-      hasChangeLog: recentChanges.length > 0,
-    },
-  });
-}
-
-async function readDoctorConfig(repoPath: string): Promise<unknown> {
-  try {
-    const config = await loadAgentConfig(repoPath);
-    const resolved = resolveLlmConfig(config);
-    return {
-      loaded: true,
-      config: redactAgentConfig(config),
-      resolved: {
-        baseUrl: resolved.openai.baseUrl ?? null,
-        model: resolved.openai.model ?? null,
-        hasApiKey: Boolean(resolved.openai.apiKey),
-        temperature: resolved.openai.temperature ?? null,
-        maxTokens: resolved.openai.maxTokens ?? null,
-        timeoutMs: resolved.openai.timeoutMs ?? null,
-      },
-      warnings: [
-        resolved.openai.apiKey ? null : "Missing API key. Configure mini-agent.config.json or MINI_AGENT_API_KEY.",
-        resolved.openai.model ? null : "Missing model. Configure mini-agent.config.json or MINI_AGENT_MODEL.",
-      ].filter(Boolean),
-    };
-  } catch (error) {
-    return {
-      loaded: false,
-      error: errorToMessage(error),
-    };
-  }
-}
-
-async function readCommandVersion(command: string, args: string[]): Promise<{ ok: boolean; output: string }> {
-  try {
-    const result = await execa(command, args, {
-      reject: false,
-      timeout: 5_000,
-      encoding: "utf8",
-    });
-
-    return {
-      ok: result.exitCode === 0,
-      output: firstNonEmptyLine([result.stdout, result.stderr].join("\n")),
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      output: errorToMessage(error),
-    };
-  }
-}
-
-function firstNonEmptyLine(value: string): string {
-  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-}
-
-async function readPnpmVersion(): Promise<{ ok: boolean; output: string }> {
-  const direct = await readCommandVersion("pnpm", ["--version"]);
-  if (direct.ok) {
-    return direct;
-  }
-
-  const viaCorepack = await readCommandVersion("corepack", ["pnpm", "--version"]);
-  if (viaCorepack.ok) {
-    return {
-      ok: true,
-      output: viaCorepack.output ? `corepack pnpm ${viaCorepack.output}` : "corepack pnpm available",
-    };
-  }
-
-  return direct.output ? direct : viaCorepack;
-}
-
-async function readTaskTests(repoPath: string, sessionId: string): Promise<TaskChangeTestResult[]> {
-  const { eventStore } = createStores(repoPath);
-  const events = await eventStore.readEvents(sessionId).catch(() => []);
-
-  return events
-    .filter(isTestEventRecord)
-    .slice(-10)
-    .map((event): TaskChangeTestResult => {
-      const payload = event.payload;
-      return {
-        type: event.type === "TEST_PASSED" ? "TEST_PASSED" : "TEST_FAILED",
-        command: typeof payload.command === "string" ? payload.command : "",
-        exitCode: typeof payload.exitCode === "number" ? payload.exitCode : null,
-      };
-    });
-}
-
-function isTestEventRecord(
-  event: EventRecord,
-): event is EventRecord & { type: "TEST_PASSED" | "TEST_FAILED" } {
-  return event.type === "TEST_PASSED" || event.type === "TEST_FAILED";
 }
 
 function writeJson(value: unknown): void {
@@ -2088,238 +1942,6 @@ async function runJsonAction(action: () => Promise<void>): Promise<void> {
     process.exitCode = 1;
   }
 }
-
-function parseOptionalLimit(value: string | undefined, fallback: number): number {
-  if (!value) {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-
-  return parsed;
-}
-
-function parsePositiveInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Expected a positive integer, got: ${value}`);
-  }
-
-  return parsed;
-}
-
-function parseAgentCount(value: string): number {
-  const parsed = parsePositiveInteger(value);
-  if (parsed > 3) {
-    throw new Error(`Expected an agent count between 1 and 3, got: ${value}`);
-  }
-  return parsed;
-}
-
-function parsePositiveNumber(value: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected a positive number, got: ${value}`);
-  return parsed;
-}
-
-function parseProbability(value: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new Error(`Expected a number between 0 and 1, got: ${value}`);
-  return parsed;
-}
-
-function parseLogLevel(value: string): LogLevel {
-  const normalized = value.toLowerCase();
-  if (normalized === "debug" || normalized === "info" || normalized === "warn" || normalized === "error") {
-    return normalized;
-  }
-
-  throw new Error(`Expected log level debug, info, warn, or error, got: ${value}`);
-}
-
-function parseNumber(value: string): number {
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Expected a number, got: ${value}`);
-  }
-
-  return parsed;
-}
-
-async function readPatchInput(repoPath: string, patchFile?: string): Promise<string> {
-  if (patchFile && patchFile.trim().length > 0) {
-    const absolutePath = resolveRepoPath(repoPath, patchFile);
-    return await fs.readFile(absolutePath, "utf8");
-  }
-
-  if (process.stdin.isTTY) {
-    throw new Error("Patch file is required when stdin is not piped");
-  }
-
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function commandResultToPayload(result: CommandResult): JsonObject {
-  return toJsonObject({
-    command: result.command,
-    cwd: result.cwd,
-    exitCode: result.exitCode,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    durationMs: result.durationMs,
-    success: result.success,
-    timedOut: result.timedOut,
-    truncated: result.truncated,
-    error: result.error,
-  });
-}
-
-function isGitDiffData(value: unknown): value is { diff: string } {
-  return typeof value === "object"
-    && value !== null
-    && "diff" in value
-    && typeof value.diff === "string";
-}
-
-function formatSessionRecord(record: SessionRecord): string {
-  const preview = compactPayload(record.payload, 220);
-  return `[history] ${record.timestamp} ${record.type} ${preview}`;
-}
-
-function formatResumeSessionLine(index: number, session: SessionOverview): string {
-  const number = `${String(index).padStart(2, " ")}.`;
-  const status = session.status.padEnd(8, " ");
-  const updatedAt = formatLocalMinute(session.updatedAt);
-  const label = session.lastUserMessage ? "last" : "title";
-  const preview = limitSingleLine(session.lastUserMessage ?? session.title, 72);
-  const summary = session.latestSummary ? `\n    summary: ${limitSingleLine(session.latestSummary, 88)}` : "";
-
-  return `${number} ${status} ${updatedAt} ${label}: ${preview}\n    id: ${session.sessionId}${summary}`;
-}
-
-function formatInteractiveSessionLine(session: SessionOverview): string {
-  const preview = limitSingleLine(session.lastUserMessage ?? session.title, 80);
-  const summary = session.latestSummary ? `\n          summary: ${limitSingleLine(session.latestSummary, 96)}` : "";
-  return `[session] ${session.sessionId} ${session.status} ${formatLocalMinute(session.updatedAt)} ${preview}${summary}`;
-}
-
-function formatEventRecord(record: EventRecord): string {
-  const preview = compactPayload(record.payload, 220);
-  return `[event] ${record.timestamp} ${record.type} ${preview}`;
-}
-
-function formatLogRecord(record: LogRecord): string {
-  const session = record.sessionId ? ` session=${record.sessionId}` : "";
-  const details = record.details === undefined ? "" : ` ${compactPayload(record.details, 220)}`;
-  return `[log] ${record.timestamp} ${record.level.toUpperCase()} ${record.component}${session} ${record.message}${details}`;
-}
-
-function formatTaskChangeLogEntry(entry: TaskChangeLogEntry): string {
-  const files = entry.currentChangedFiles.length > 0
-    ? ` files=${entry.currentChangedFiles.slice(0, 8).join(",")}`
-    : "";
-  const stat = entry.diffStat ? ` diff="${entry.diffStat}"` : "";
-  const tests = entry.tests.length > 0
-    ? ` tests=${entry.tests.map((test) => `${test.type}:${test.command}:${String(test.exitCode)}`).join("|")}`
-    : "";
-  const review = formatReviewChangeMetadata(entry.metadata);
-  const web = formatWebChangeMetadata(entry.metadata);
-  return `[change] ${entry.timestamp} ${entry.success ? "OK" : "FAIL"} ${entry.mode} session=${entry.sessionId}${files}${stat}${tests}${review}${web} task=${entry.task}`;
-}
-
-function formatReviewChangeMetadata(metadata: unknown): string {
-  if (!isRecord(metadata) || typeof metadata.reviewFile !== "string") {
-    return "";
-  }
-
-  const supplementalFileCount = typeof metadata.supplementalFileCount === "number"
-    ? metadata.supplementalFileCount
-    : undefined;
-  const findings = typeof metadata.findings === "number" ? metadata.findings : undefined;
-  const rejected = typeof metadata.rejectedFindings === "number" ? metadata.rejectedFindings : undefined;
-  const verdict = typeof metadata.overallVerdict === "string" ? metadata.overallVerdict : undefined;
-  return [
-    ` reviewFile=${metadata.reviewFile}`,
-    supplementalFileCount === undefined ? "" : ` related=${String(supplementalFileCount)}`,
-    findings === undefined ? "" : ` findings=${String(findings)}`,
-    rejected === undefined ? "" : ` rejected=${String(rejected)}`,
-    verdict ? ` verdict=${verdict}` : "",
-  ].join("");
-}
-
-function formatWebChangeMetadata(metadata: unknown): string {
-  if (!isRecord(metadata) || !("fetchedSourceCount" in metadata || "sourceCount" in metadata)) {
-    return "";
-  }
-
-  const sourceCount = typeof metadata.sourceCount === "number" ? metadata.sourceCount : undefined;
-  const fetchedSourceCount = typeof metadata.fetchedSourceCount === "number" ? metadata.fetchedSourceCount : undefined;
-  return [
-    sourceCount === undefined ? "" : ` sources=${String(sourceCount)}`,
-    fetchedSourceCount === undefined ? "" : ` fetched=${String(fetchedSourceCount)}`,
-  ].join("");
-}
-
-function compactPayload(value: unknown, maxChars: number): string {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  if (!text) {
-    return "";
-  }
-
-  return text.length > maxChars ? `${text.slice(0, maxChars)}...[truncated]` : text;
-}
-
-function readPayloadString(payload: JsonObject, key: string): string | undefined {
-  const value = payload[key];
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function readPayloadNumber(payload: JsonObject, key: string): number | undefined {
-  const value = payload[key];
-  return typeof value === "number" ? value : undefined;
-}
-
-function formatMemoryEntryForOutput(entry: Awaited<ReturnType<LongTermMemoryStore["list"]>>[number]): Omit<typeof entry, "vector"> {
-  const { vector: _vector, ...visible } = entry;
-  return visible;
-}
-
-function formatLocalMinute(isoTimestamp: string): string {
-  const date = new Date(isoTimestamp);
-  if (Number.isNaN(date.getTime())) {
-    return isoTimestamp;
-  }
-
-  const year = String(date.getFullYear());
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${year}-${month}-${day} ${hour}:${minute}`;
-}
-
-function limitSingleLine(value: string, maxChars: number): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
-}
-
 
 async function isDirectCliEntry(): Promise<boolean> {
   const currentFile = fileURLToPath(import.meta.url);

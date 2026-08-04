@@ -99,6 +99,21 @@ describe("LongTermMemoryStore", () => {
     ]));
   });
 
+  it("adds conservative bilingual aliases for offline lexical retrieval", () => {
+    expect(extractKeywords("上传校验策略")).toEqual(expect.arrayContaining([
+      "upload",
+      "checksum",
+      "verification",
+      "policy",
+    ]));
+    expect(extractKeywords("release security policy")).toEqual(expect.arrayContaining([
+      "发布",
+      "安全",
+      "策略",
+    ]));
+    expect(extractKeywords("天文学设备")).not.toContain("astronomy");
+  });
+
   it("supports explicit remember, stats, forget, and clear lifecycle", async () => {
     const store = new LongTermMemoryStore({ repoPath });
     const first = await store.remember({ text: "Windows 环境使用 npm test 验证", title: "Windows verification" });

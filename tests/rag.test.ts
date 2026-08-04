@@ -7,6 +7,7 @@ import { RagDocumentLoader } from "../src/rag/DocumentLoader.js";
 import { evaluateRag } from "../src/rag/RagEvaluator.js";
 import { RagStore } from "../src/rag/RagStore.js";
 import { createDefaultToolRegistry } from "../src/tools/ToolRegistry.js";
+import { PermissionManager } from "../src/permission/PermissionManager.js";
 
 class TestEmbeddingProvider implements EmbeddingProvider {
   constructor(readonly id = "test-embedding-v1") {}
@@ -50,6 +51,39 @@ describe("RAG knowledge base", () => {
     expect((await store.stats()).tags).toEqual({ backend: 1 });
   });
 
+  it("serializes concurrent index updates without losing either source", async () => {
+    await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks are resumable.\n", "utf8");
+    await fs.writeFile(path.join(repoPath, "docs", "review.md"), "# Review\n\nReview permissions are verified.\n", "utf8");
+    let embeddingsStarted = 0;
+    let releaseEmbeddings: (() => void) | undefined;
+    const bothEmbeddingsStarted = new Promise<void>((resolve) => {
+      releaseEmbeddings = resolve;
+    });
+    const provider: EmbeddingProvider = {
+      id: "concurrent-test-v1",
+      embed: async () => {
+        embeddingsStarted += 1;
+        if (embeddingsStarted === 2) releaseEmbeddings?.();
+        await bothEmbeddingsStarted;
+        return [1, 0, 0];
+      },
+    };
+
+    await Promise.all([
+      new RagStore({ repoPath, embeddingProvider: provider }).ingest(["docs/upload.md"]),
+      new RagStore({ repoPath, embeddingProvider: provider }).ingest(["docs/review.md"]),
+    ]);
+
+    expect(await new RagStore({ repoPath, embeddingProvider: provider }).stats()).toMatchObject({
+      totalChunks: 2,
+      sources: 2,
+      bySource: {
+        "docs/review.md": 1,
+        "docs/upload.md": 1,
+      },
+    });
+  });
+
   it("returns grounded citations and supports source and tag filters", async () => {
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nThe upload flow validates every chunk before merge.\n", "utf8");
     await fs.writeFile(path.join(repoPath, "docs", "review.md"), "# Review\n\nThe review workflow verifies reviewer ownership.\n", "utf8");
@@ -79,6 +113,49 @@ describe("RAG knowledge base", () => {
     expect((await mismatched.search("upload")).reason).toBe("EMBEDDING_PROVIDER_MISMATCH");
   });
 
+  it("refuses stale selected evidence until the changed source is reindexed", async () => {
+    const sourcePath = path.join(repoPath, "docs", "policy.md");
+    await fs.writeFile(sourcePath, "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n", "utf8");
+    const store = new RagStore({ repoPath });
+    await store.ingest(["docs/policy.md"]);
+
+    await fs.writeFile(sourcePath, "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n", "utf8");
+    await expect(store.search("upload policy checksum verification")).resolves.toMatchObject({
+      found: false,
+      reason: "STALE_INDEX",
+      staleSources: ["docs/policy.md"],
+      citations: [],
+    });
+
+    await store.ingest(["docs/policy.md"]);
+    const refreshed = await store.search("upload policy SHA-512 checksum");
+    expect(refreshed.found).toBe(true);
+    expect(refreshed.context).toContain("SHA-512");
+  });
+
+  it("uses conservative bilingual aliases for cross-language local-hash retrieval", async () => {
+    await fs.writeFile(
+      path.join(repoPath, "docs", "policy.md"),
+      "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n",
+      "utf8",
+    );
+    const store = new RagStore({ repoPath, embeddingProvider: new LocalHashEmbeddingProvider() });
+    await store.ingest(["docs/policy.md"]);
+
+    await expect(store.search("上传校验策略 checksum 校验")).resolves.toMatchObject({
+      found: true,
+      citations: ["docs/policy.md#L1-L3"],
+    });
+    await expect(store.search("上传校验策略")).resolves.toMatchObject({
+      found: true,
+      citations: ["docs/policy.md#L1-L3"],
+    });
+    await expect(store.search("天文学设备")).resolves.toMatchObject({
+      found: false,
+      reason: "INSUFFICIENT_EVIDENCE",
+    });
+  });
+
   it("requires lexical evidence when the offline hash embedding collides", async () => {
     const collisionProvider: EmbeddingProvider = { id: "local-hash-v2", embed: async () => [1] };
     await fs.writeFile(path.join(repoPath, "docs", "upload.md"), "# Upload\n\nUpload chunks are merged after validation.\n", "utf8");
@@ -94,6 +171,26 @@ describe("RAG knowledge base", () => {
     const loaded = await loader.load(["docs"]);
     expect(loaded.skipped).toEqual([{ path: "docs/image.png", reason: "UNSUPPORTED_TYPE" }]);
     await expect(loader.load([path.dirname(repoPath)])).rejects.toThrow(/outside repository/i);
+  });
+
+  it("loads source and configuration text while rejecting binary content with a supported extension", async () => {
+    await fs.mkdir(path.join(repoPath, "src"));
+    await fs.writeFile(
+      path.join(repoPath, "src", "policy.ts"),
+      "export function authorizeAction(capability: string): boolean {\n  return capability.length > 0;\n}\n",
+      "utf8",
+    );
+    await fs.writeFile(path.join(repoPath, "agent.yaml"), "agent:\n  mode: bounded\n", "utf8");
+    await fs.writeFile(path.join(repoPath, "src", "binary.ts"), Buffer.from([0, 1, 2, 3]));
+
+    const loaded = await new RagDocumentLoader({ repoPath }).load(["src", "agent.yaml"]);
+
+    expect(loaded.documents.map((document) => ({ source: document.source, title: document.title }))).toEqual([
+      { source: "agent.yaml", title: "agent" },
+      { source: "src/policy.ts", title: "policy" },
+    ]);
+    expect(loaded.documents[1]?.text).toContain("authorizeAction");
+    expect(loaded.skipped).toEqual([{ path: "src/binary.ts", reason: "BINARY_CONTENT" }]);
   });
 
   it("evaluates answerability, hit rate, recall, and reciprocal rank", async () => {
@@ -115,6 +212,19 @@ describe("RAG knowledge base", () => {
       category: "search",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     });
+  });
+
+  it("lets the Agent build a derived index and then search it through registered tools", async () => {
+    await fs.writeFile(path.join(repoPath, "docs", "agent-rag.md"), "# Agent RAG\n\nAutonomous indexing enables grounded retrieval.\n", "utf8");
+    const registry = createDefaultToolRegistry();
+    const indexed = await registry.execute("knowledge_index", { paths: ["docs"] }, {
+      repoPath,
+      permissionManager: new PermissionManager({ prompt: async () => "yes" }),
+      autoApprove: true,
+    });
+    expect(indexed).toMatchObject({ success: true, data: { indexedFiles: 1 } });
+    const searched = await registry.execute("knowledge_search", { query: "autonomous indexing grounded retrieval" }, { repoPath });
+    expect(searched).toMatchObject({ success: true, data: { found: true } });
   });
 
   it("executes knowledge_search through the tool registry", async () => {

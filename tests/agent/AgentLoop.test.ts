@@ -27,6 +27,7 @@ import type { SubAgentCoordinator } from "../../src/agent/SubAgentTypes.js";
 import { DEFAULT_MULTI_AGENT_POLICY } from "../../src/agent/SubAgentTypes.js";
 import { fingerprintWorkingTree } from "../../src/agent/SubAgentWorktree.js";
 import { createTaskFrameBootstrapContract } from "../../src/runtime/TaskFrameContract.js";
+import { RagStore } from "../../src/rag/RagStore.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -86,6 +87,11 @@ describe("AgentLoop", () => {
     ];
     const llmClient: LlmClient = {
       compileTaskFrame: async (input) => {
+        expect(progress).toContainEqual(expect.objectContaining({
+          type: "llm",
+          phase: "started",
+          mode: "task_frame",
+        }));
         expect(input.userGoal).toBe("把 demo.txt 改好并验证");
         return {
           success: true,
@@ -171,6 +177,16 @@ describe("AgentLoop", () => {
       source: "MODEL_TASK_FRAME",
       mutationRequirement: "REQUIRED",
     }));
+    const taskFrameStarted = progress.findIndex((event) => (
+      event.type === "llm" && event.phase === "started" && event.mode === "task_frame"
+    ));
+    const taskFrameFinished = progress.findIndex((event) => (
+      event.type === "llm" && event.phase === "finished" && event.mode === "task_frame"
+    ));
+    const understandingFinished = progress.findIndex((event) => event.type === "understanding");
+    expect(taskFrameStarted).toBeGreaterThanOrEqual(0);
+    expect(taskFrameFinished).toBeGreaterThan(taskFrameStarted);
+    expect(understandingFinished).toBeGreaterThan(taskFrameFinished);
     await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8"))
       .resolves.toBe("single control chain\n");
   });
@@ -239,6 +255,12 @@ describe("AgentLoop", () => {
           "+<canvas id=\"game\"></canvas>",
           "",
         ].join("\n"),
+      },
+      {
+        type: "TOOL_CALL",
+        toolName: "verify_file",
+        input: { path: "snake.html" },
+        reason: "Verify the standalone HTML and inline JavaScript syntax",
       },
       {
         type: "FINAL",
@@ -402,6 +424,365 @@ describe("AgentLoop", () => {
     expect(client.getCallInputs()[2]?.context).toContain("RECOVERABLE_LLM_PROTOCOL_ERROR");
     await expect(fs.readFile(path.join(repoPath, "demo.txt"), "utf8")).resolves.toBe("updated demo\n");
     expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "RECOVERABLE_LLM_PROTOCOL_ERROR",
+    }));
+  });
+
+  it("recovers from a create patch for an existing untracked file and modifies it normally", async () => {
+    const targetPath = path.join(repoPath, "2048.html");
+    await fs.writeFile(targetPath, "<title>2048</title>\n", "utf8");
+    const incorrectCreatePatch = [
+      "diff --git a/2048.html b/2048.html",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/2048.html",
+      "@@ -0,0 +1 @@",
+      "+<title>2048</title>",
+      "",
+    ].join("\n");
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "2048.html", maxLines: 100 },
+        reason: "Read the existing game before optimizing it",
+      },
+      {
+        type: "APPLY_PATCH",
+        patch: incorrectCreatePatch,
+        description: "Incorrectly recreate the untracked file",
+      },
+      {
+        type: "APPLY_PATCH",
+        patch: [
+          "diff --git a/2048.html b/2048.html",
+          "--- a/2048.html",
+          "+++ b/2048.html",
+          "@@ -1 +1 @@",
+          "-<title>2048</title>",
+          "+<title>2048 Improved</title>",
+          "",
+        ].join("\n"),
+        description: "Modify the existing workspace file",
+      },
+      {
+        type: "TOOL_CALL",
+        toolName: "verify_file",
+        input: { path: "2048.html" },
+        reason: "Verify the standalone HTML with a compatible parser",
+      },
+      {
+        type: "FINAL",
+        success: true,
+        summary: "Optimized the existing untracked 2048.html file.",
+      },
+    ]);
+    const userGoal = "优化 2048.html";
+    const loop = createLoop({ llmClient: client });
+
+    const result = await loop.run({
+      userGoal,
+      taskContract: createTestTaskContract({
+        objective: userGoal,
+        target: "REPOSITORY",
+        effects: { repositoryRead: true, repositoryWrite: "REQUIRED" },
+        completionCriteria: ["2048.html is modified."],
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.readFile(targetPath, "utf8")).resolves.toBe("<title>2048 Improved</title>\n");
+    expect(client.getCallInputs()[2]?.context).toContain("PATCH_TARGET_ALREADY_EXISTS");
+    expect(client.getCallInputs()[2]?.context).toContain("Git tracking is irrelevant");
+    expect(client.getCallInputs()[2]?.context).toContain("Filesystem state: EXISTS");
+  });
+
+  it("stops a repeated failed patch with the precise filesystem error", async () => {
+    await fs.writeFile(path.join(repoPath, "2048.html"), "existing\n", "utf8");
+    const incorrectCreatePatch = [
+      "diff --git a/2048.html b/2048.html",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/2048.html",
+      "@@ -0,0 +1 @@",
+      "+replacement",
+      "",
+    ].join("\n");
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "2048.html", maxLines: 100 },
+        reason: "Read the existing file",
+      },
+      { type: "APPLY_PATCH", patch: incorrectCreatePatch, description: "First create attempt" },
+      { type: "APPLY_PATCH", patch: incorrectCreatePatch, description: "Renamed duplicate attempt" },
+    ]);
+    const userGoal = "优化 2048.html";
+    const loop = createLoop({ llmClient: client });
+
+    const result = await loop.run({
+      userGoal,
+      taskContract: createTestTaskContract({
+        objective: userGoal,
+        target: "REPOSITORY",
+        effects: { repositoryRead: true, repositoryWrite: "REQUIRED" },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("repeated a failed decision");
+    expect(result.error).toContain("PATCH_TARGET_ALREADY_EXISTS");
+    expect(result.error).not.toContain("failed too many consecutive steps");
+    expect(client.getCallInputs()).toHaveLength(3);
+  });
+
+  it("falls back to verify_file after an unavailable unclassified verifier for one HTML target", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create the standalone HTML artifact",
+        patch: [
+          "diff --git a/snake-v2.html b/snake-v2.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/snake-v2.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head><title>Snake</title></head><body><script>const score = 0;</script></body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: "missing-mini-agent-html-verifier",
+        args: ["snake-v2.html"],
+        description: "Attempt an unavailable HTML verifier",
+      },
+      { type: "FINAL", success: true, summary: "Created and verified snake-v2.html." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建并验证 snake-v2.html",
+      taskContract: createTestTaskContract({
+        objective: "Create and verify snake-v2.html.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success, result.error).toBe(true);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "guardrail",
+      code: "VERIFIER_AUTO_FALLBACK",
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool",
+      toolName: "verify_file",
+      input: { path: "snake-v2.html" },
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool_result",
+      toolName: "verify_file",
+      success: true,
+    }));
+    expect(client.getCallInputs()).toHaveLength(4);
+  });
+
+  it("redirects node --check on HTML to verify_file before running the incompatible command", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create an HTML page",
+        patch: [
+          "diff --git a/page.html b/page.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/page.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head></head><body><script>let ready = true;</script></body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: "node",
+        args: ["--check", "page.html"],
+        description: "Check HTML syntax",
+      },
+      { type: "FINAL", success: true, summary: "Created and verified page.html." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建并验证 page.html",
+      taskContract: createTestTaskContract({
+        objective: "Create and verify page.html.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success, result.error).toBe(true);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "tool",
+      toolName: "verify_file",
+      input: { path: "page.html" },
+    }));
+    expect(progress.some((event) => event.type === "command" && event.command.includes("node --check"))).toBe(false);
+  });
+
+  it("does not hide an ordinary non-zero command failure behind the HTML fallback", async () => {
+    const failingScript = path.join(repoPath, "fail-command.mjs");
+    await fs.writeFile(failingScript, "process.exit(2);\n", "utf8");
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([
+      {
+        type: "TOOL_CALL",
+        toolName: "read_file",
+        input: { path: "demo.txt" },
+        reason: "Inspect repository context before creating the page",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Create an HTML page",
+        patch: [
+          "diff --git a/failed-page.html b/failed-page.html",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/failed-page.html",
+          "@@ -0,0 +1 @@",
+          "+<!doctype html><html><head></head><body>Page</body></html>",
+          "",
+        ].join("\n"),
+      },
+      {
+        type: "RUN_COMMAND",
+        executable: process.execPath,
+        args: [failingScript],
+        description: "Run a command that exits non-zero",
+      },
+      { type: "FAILED", error: "The requested command failed." },
+    ]);
+    const loop = createLoop({ llmClient: client, onProgress: (event) => progress.push(event) });
+
+    const result = await loop.run({
+      userGoal: "新建 failed-page.html 并执行指定命令",
+      taskContract: createTestTaskContract({
+        objective: "Create failed-page.html and run the requested command.",
+        target: "REPOSITORY",
+        effects: {
+          repositoryRead: true,
+          repositoryWrite: "REQUIRED",
+          commandExecution: true,
+          verification: "SYNTAX",
+        },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(progress.some((event) => event.type === "tool" && event.toolName === "verify_file")).toBe(false);
+    expect(progress).toContainEqual(expect.objectContaining({
+      type: "command_result",
+      success: false,
+      exitCode: 2,
+    }));
+  });
+
+  it("recovers from a placeholder patch using a precise no-changes diagnostic", async () => {
+    await fs.writeFile(path.join(repoPath, "game.html"), "<title>Old game</title>\n", "utf8");
+    const client = new ScriptedLlmClient([
+      { type: "TOOL_CALL", toolName: "read_file", input: { path: "game.html" }, reason: "Read the target" },
+      {
+        type: "APPLY_PATCH",
+        description: "placeholder",
+        patch: "diff --git a/game.html b/game.html\n--- a/game.html\n+++ b/game.html\n@@ -1 +1 @@\n <title>Old game</title>\n",
+      },
+      {
+        type: "APPLY_PATCH",
+        description: "Apply the actual title improvement",
+        patch: "diff --git a/game.html b/game.html\n--- a/game.html\n+++ b/game.html\n@@ -1 +1 @@\n-<title>Old game</title>\n+<title>Improved game</title>\n",
+      },
+      { type: "TOOL_CALL", toolName: "verify_file", input: { path: "game.html" }, reason: "Verify HTML" },
+      { type: "FINAL", success: true, summary: "Improved game.html." },
+    ]);
+    const loop = createLoop({ llmClient: client });
+    const userGoal = "优化 game.html";
+
+    const result = await loop.run({
+      userGoal,
+      taskContract: createTestTaskContract({
+        objective: userGoal,
+        target: "REPOSITORY",
+        effects: { repositoryRead: true, repositoryWrite: "REQUIRED", verification: "SYNTAX" },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.getCallInputs()[2]?.context).toContain("PATCH_NO_CHANGES");
+    await expect(fs.readFile(path.join(repoPath, "game.html"), "utf8"))
+      .resolves.toBe("<title>Improved game</title>\n");
+  });
+
+  it("does not multiply retries after the client reports output-budget exhaustion", async () => {
+    const progress: AgentProgressEvent[] = [];
+    const client = new ScriptedLlmClient([{
+      type: "FAILED",
+      error: "LLM_OUTPUT_BUDGET_EXHAUSTED: finish_reason=length before a valid AgentDecision was completed (max_tokens=32768)",
+    }]);
+    const loop = createLoop({
+      llmClient: client,
+      onProgress: (event) => progress.push(event),
+    });
+    const userGoal = "修改 demo.txt";
+
+    const result = await loop.run({
+      userGoal,
+      taskContract: repositoryContract(userGoal),
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("LLM_OUTPUT_BUDGET_EXHAUSTED");
+    expect(client.getCallInputs()).toHaveLength(1);
+    expect(progress).not.toContainEqual(expect.objectContaining({
       type: "guardrail",
       code: "RECOVERABLE_LLM_PROTOCOL_ERROR",
     }));
@@ -697,6 +1078,10 @@ describe("AgentLoop", () => {
     const taskContract = createTestTaskContract({
       objective: "所以这个助手以后也没法碰外网了吗？",
       target: "PRODUCT",
+      productCapability: {
+        act: "AVAILABILITY",
+        capabilityIds: ["WEB_RESEARCH"],
+      },
     });
     const llmClient: LlmClient = {
       chat: async () => ({
@@ -1468,6 +1853,25 @@ describe("AgentLoop", () => {
     expect(records.some((record) => JSON.stringify(record.payload).includes("Tool not found: not_a_tool"))).toBe(true);
   });
 
+  it("returns action-specific guidance when a decision action is sent as a tool call", async () => {
+    const client = new ScriptedLlmClient([
+      { type: "TOOL_CALL", toolName: "run_command", input: { executable: "npm", args: ["test"] } },
+      { type: "FINAL", success: true, summary: "Recovered from the protocol error." },
+    ]);
+    const loop = createLoop({ llmClient: client });
+
+    const result = await loop.run({
+      userGoal: "recover from a malformed action",
+      taskContract: repositoryContract("recover from a malformed action"),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.getCallInputs()[1]?.state.lastError).toContain("DECISION_ACTION_REQUIRED");
+    expect(client.getCallInputs()[1]?.state.lastError).toContain("RUN_COMMAND");
+  });
+
   it("records an error when the model sends invalid tool input", async () => {
     const sessionStore = new SessionStore({ repoPath });
     const loop = createLoop({
@@ -1765,6 +2169,89 @@ describe("AgentLoop", () => {
     const records = await sessionStore.readRecords(result.sessionId);
     expect(records.some((record) => JSON.stringify(record.payload)
       .includes("FINAL_IGNORES_INSUFFICIENT_KNOWLEDGE"))).toBe(true);
+  });
+
+  it("can recover from an empty knowledge index by indexing repository documents and searching again", async () => {
+    await fs.mkdir(path.join(repoPath, "docs"), { recursive: true });
+    await fs.writeFile(
+      path.join(repoPath, "docs", "upload-policy.md"),
+      "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n",
+      "utf8",
+    );
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy SHA-256 checksum" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy SHA-256 checksum" } },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "上传策略要求执行 SHA-256 校验（docs/upload-policy.md#L1-L3）。",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "请从知识库说明上传策略；索引为空时自行处理",
+      taskContract: createTestTaskContract({
+        objective: "Ground the upload-policy answer in repository knowledge.",
+        target: "REPOSITORY",
+        effects: { knowledgeEvidence: true },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(result.success, `${result.error ?? ""}\n${records.map((record) => JSON.stringify(record.payload)).join("\n")}`).toBe(true);
+    expect(result.summary).toContain("docs/upload-policy.md#L1-L3");
+    const serialized = records.map((record) => JSON.stringify(record.payload)).join("\n");
+    expect(serialized).toContain("knowledge_index");
+    expect(serialized.match(/knowledge_search/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(serialized).toContain("EMPTY_INDEX");
+  });
+
+  it("can refresh stale knowledge evidence before answering", async () => {
+    await fs.mkdir(path.join(repoPath, "docs"), { recursive: true });
+    const policyPath = path.join(repoPath, "docs", "upload-policy.md");
+    await fs.writeFile(policyPath, "# Upload policy\n\nUpload policy requires SHA-256 checksum verification.\n", "utf8");
+    await new RagStore({ repoPath }).ingest(["docs/upload-policy.md"]);
+    await fs.writeFile(policyPath, "# Upload policy\n\nUpload policy now requires SHA-512 checksum verification.\n", "utf8");
+
+    const sessionStore = new SessionStore({ repoPath });
+    const loop = createLoop({
+      sessionStore,
+      llmClient: new ScriptedLlmClient([
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        { type: "TOOL_CALL", toolName: "knowledge_index", input: { paths: ["docs/upload-policy.md"] } },
+        { type: "TOOL_CALL", toolName: "knowledge_search", input: { query: "upload policy checksum verification" } },
+        {
+          type: "FINAL",
+          success: true,
+          summary: "当前上传策略要求 SHA-512 校验（docs/upload-policy.md#L1-L3）。",
+        },
+      ]),
+    });
+
+    const result = await loop.run({
+      userGoal: "从知识库说明当前上传策略，索引过期时先更新",
+      taskContract: createTestTaskContract({
+        objective: "Ground the current upload policy in fresh repository knowledge.",
+        target: "REPOSITORY",
+        effects: { knowledgeEvidence: true },
+      }),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    const records = await sessionStore.readRecords(result.sessionId);
+    expect(result.success, `${result.error ?? ""}\n${records.map((record) => JSON.stringify(record.payload)).join("\n")}`).toBe(true);
+    expect(result.summary).toContain("SHA-512");
+    const serialized = records.map((record) => JSON.stringify(record.payload)).join("\n");
+    expect(serialized).toContain("STALE_INDEX");
+    expect(serialized).toContain("knowledge_index");
   });
 
   it("can use web_search for non-code research tasks", async () => {
@@ -2086,6 +2573,31 @@ describe("AgentLoop", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("could not satisfy guardrail FINAL_WITHOUT_WEB_SEARCH");
     expect(result.error).not.toContain("failed too many consecutive steps");
+  });
+
+  it("stops an alternating guardrail cycle when neither branch adds completion evidence", async () => {
+    const client = new ScriptedLlmClient([
+      { type: "FINAL", success: true, summary: "Still unverified." },
+      { type: "TOOL_CALL", toolName: "run_command", input: { executable: "node", args: ["--check", "page.html"] } },
+      { type: "FINAL", success: true, summary: "Still unverified again." },
+      { type: "TOOL_CALL", toolName: "run_command", input: { executable: "node", args: ["--check", "page.html"] } },
+      { type: "FINAL", success: true, summary: "Still unverified a third time." },
+      { type: "TOOL_CALL", toolName: "run_command", input: { executable: "node", args: ["--check", "page.html"] } },
+      { type: "FINAL", success: true, summary: "Still unverified a fourth time." },
+    ]);
+    const loop = createLoop({ llmClient: client });
+
+    const result = await loop.run({
+      userGoal: "OpenAI 最新的模型是什么？",
+      taskContract: webSearchOnlyContract("OpenAI 最新的模型是什么？"),
+      autoApprove: true,
+      nonInteractive: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("recurring guardrail cycle");
+    expect(result.error).not.toContain("reaching max steps");
+    expect(client.getCallInputs().length).toBeLessThanOrEqual(7);
   });
 
   it("removes tools and constrains the model when the Web final-synthesis reserve starts", async () => {

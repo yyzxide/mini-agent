@@ -5,6 +5,7 @@ import {
   formatFileReadCoverage,
   parseReadFileResultData,
 } from "../agent/FileReadCoverage.js";
+import { formatToolErrorForModel } from "../tools/ToolErrorFormatter.js";
 
 export function formatRecentEvidence(state: AgentState, phase: TaskPhase): string {
   const decisions = state.decisions.slice(-3).map(formatDecision);
@@ -16,7 +17,7 @@ export function formatRecentEvidence(state: AgentState, phase: TaskPhase): strin
         ? `result: ${result.toolName === "read_file"
           ? formatReadFileResultSummary(result.result.data)
           : safeJson(result.result.data ?? null, 2_400, "head")}`
-        : `error: ${result.result.error?.message ?? "unknown tool failure"}`,
+        : `error: ${formatToolErrorForModel(result.result.error, "unknown tool failure")}`,
     ].join("\n"));
   const commandResults = prioritizeByFailure(state.commandResults.slice(-4), phase)
     .map((result) => [
@@ -29,7 +30,7 @@ export function formatRecentEvidence(state: AgentState, phase: TaskPhase): strin
     .map((result) => [
       `${result.result.success ? "SUCCESS" : "FAILURE"} patch:${result.description ?? "apply_patch"}`,
       `files: ${extractModifiedFiles(result.patch).join(", ") || "(unknown)"}`,
-      ...(!result.result.success ? [`error: ${result.result.error?.message ?? "unknown patch failure"}`] : []),
+      ...(!result.result.success ? [`error: ${formatToolErrorForModel(result.result.error, "unknown patch failure")}`] : []),
     ].join("\n"));
 
   return [
@@ -56,6 +57,7 @@ export function formatLatestFileChunk(state: AgentState): string {
   }
   return [
     `File: ${read.path}`,
+    "Filesystem state: EXISTS (a successful read proves the file exists independently of Git tracking)",
     `Lines: ${String(read.startLine)}-${String(read.endLine)} of ${String(read.totalLines)}`,
     `Estimated tokens: ${String(read.estimatedTokens ?? "unreported")}`,
     `More available: ${read.hasMore === true ? `yes; continue at line ${String(read.nextStartLine ?? read.endLine + 1)}, column ${String(read.nextStartColumn ?? 1)}` : "no"}`,

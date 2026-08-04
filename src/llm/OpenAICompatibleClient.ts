@@ -1,4 +1,5 @@
 import type { AgentDecision } from "../agent/AgentDecision.js";
+import { PRODUCT_CAPABILITY_IDS } from "../agent/CapabilityRegistry.js";
 import { formatRuntimeContext } from "../context/RuntimeContext.js";
 import { errorToMessage } from "../utils/errors.js";
 import { DecisionParser } from "./DecisionParser.js";
@@ -17,10 +18,16 @@ export interface OpenAICompatibleClientOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  thinkingMode?: ThinkingMode;
   timeoutMs?: number;
   fetchFn?: typeof fetch;
   decisionParser?: DecisionParser;
 }
+
+export type ThinkingMode = "auto" | "enabled" | "disabled";
+
+const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
+const MAX_RECOVERY_OUTPUT_TOKENS = 32_768;
 
 export interface LlmUsageMetrics {
   promptTokens?: number;
@@ -44,6 +51,7 @@ export class OpenAICompatibleClient implements LlmClient {
   private readonly model: string | undefined;
   private readonly temperature: number;
   private readonly maxTokens: number;
+  private readonly thinkingMode: ThinkingMode;
   private readonly timeoutMs: number;
   private readonly fetchFn: typeof fetch;
   private readonly decisionParser: DecisionParser;
@@ -54,7 +62,8 @@ export class OpenAICompatibleClient implements LlmClient {
     this.apiKey = options.apiKey ?? process.env.MINI_AGENT_API_KEY;
     this.model = options.model ?? process.env.MINI_AGENT_MODEL;
     this.temperature = options.temperature ?? readNumberEnv("MINI_AGENT_TEMPERATURE", 0.2);
-    this.maxTokens = options.maxTokens ?? readIntegerEnv("MINI_AGENT_MAX_TOKENS", 4096);
+    this.maxTokens = options.maxTokens ?? readIntegerEnv("MINI_AGENT_MAX_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS);
+    this.thinkingMode = options.thinkingMode ?? readThinkingModeEnv("MINI_AGENT_THINKING_MODE", "auto");
     this.timeoutMs = options.timeoutMs ?? readIntegerEnv("MINI_AGENT_TIMEOUT_MS", 60_000);
     this.fetchFn = options.fetchFn ?? fetch;
     this.decisionParser = options.decisionParser ?? new DecisionParser();
@@ -141,6 +150,7 @@ export class OpenAICompatibleClient implements LlmClient {
           ],
           temperature: this.temperature,
           max_tokens: this.maxTokens,
+          ...buildThinkingRequest(this.thinkingMode),
         }),
       });
 
@@ -187,6 +197,13 @@ export class OpenAICompatibleClient implements LlmClient {
         availableTools: input.availableTools,
         ...(input.decisionConstraint ? { decisionConstraint: input.decisionConstraint } : {}),
       });
+      const requestMaxTokens = retry?.kind === "output_budget_exhausted"
+        ? Math.max(this.maxTokens, Math.min(this.maxTokens * 2, MAX_RECOVERY_OUTPUT_TOKENS))
+        : this.maxTokens;
+      const retryThinkingMode = retry?.kind === "output_budget_exhausted"
+        && supportsAdaptiveThinking(this.baseUrl, this.model)
+        ? "disabled"
+        : this.thinkingMode;
       const response = await this.fetchFn(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -208,8 +225,9 @@ export class OpenAICompatibleClient implements LlmClient {
             },
           ],
           temperature: this.temperature,
-          max_tokens: this.maxTokens,
-          ...(retry ? {} : { response_format: { type: "json_object" } }),
+          max_tokens: requestMaxTokens,
+          ...buildThinkingRequest(retryThinkingMode),
+          ...(retry?.kind === "unsupported_response_format" ? {} : { response_format: { type: "json_object" } }),
         }),
       });
 
@@ -235,8 +253,17 @@ export class OpenAICompatibleClient implements LlmClient {
       this.recordCallMetrics(body);
       const content = extractDecisionContent(body);
       if (!content) {
-        const error = buildEmptyContentError(body);
-        return retry ? { error } : { retry: { kind: "empty" }, error };
+        const budgetError = buildOutputBudgetError(body, requestMaxTokens);
+        const error = budgetError ?? buildEmptyContentError(body);
+        if (retry) {
+          return { error };
+        }
+        return {
+          retry: budgetError
+            ? { kind: "output_budget_exhausted", error: budgetError }
+            : { kind: "empty" },
+          error,
+        };
       }
 
       try {
@@ -246,7 +273,17 @@ export class OpenAICompatibleClient implements LlmClient {
         };
       } catch (error) {
         const message = errorToMessage(error);
-        return retry ? { error: message } : { retry: { kind: "invalid_json", error: message, content }, error: message };
+        const budgetError = buildOutputBudgetError(body, requestMaxTokens);
+        const responseError = budgetError ?? message;
+        if (retry) {
+          return { error: responseError };
+        }
+        return {
+          retry: budgetError
+            ? { kind: "output_budget_exhausted", error: budgetError }
+            : { kind: "invalid_json", error: message, content },
+          error: responseError,
+        };
       }
     } catch (error) {
       if (isAbortError(error)) {
@@ -296,7 +333,7 @@ interface LlmAttemptResult {
 }
 
 interface LlmRetryRequest {
-  kind: "empty" | "invalid_json" | "unsupported_response_format";
+  kind: "empty" | "invalid_json" | "output_budget_exhausted" | "unsupported_response_format";
   error?: string;
   content?: string;
 }
@@ -338,6 +375,17 @@ function buildDecisionPrompt(userPrompt: string, retry: LlmRetryRequest | undefi
       `Previous request error: ${retry.error ?? "unknown error"}`,
       "Return exactly one valid AgentDecision JSON object in the message content.",
       "Do not return markdown, fenced code blocks, prose, or tool_calls.",
+    ].join("\n");
+  }
+
+  if (retry.kind === "output_budget_exhausted") {
+    return [
+      userPrompt,
+      "",
+      "The previous response exhausted its output budget before completing a valid AgentDecision.",
+      `Provider diagnostic: ${retry.error ?? "finish_reason=length"}`,
+      "Use the completed tool evidence already present in the state and return exactly one compact AgentDecision JSON object.",
+      "Do not repeat analysis, prose, markdown, fenced code blocks, or tool_calls.",
     ].join("\n");
   }
 
@@ -383,7 +431,6 @@ function extractDecisionContent(body: OpenAIChatCompletionResponse): string | un
     extractTextContent(message?.content),
     extractTextContent(firstChoice?.text),
     extractTextContent(body.output_text),
-    extractJsonLookingText(message?.reasoning_content),
   ]);
 }
 
@@ -408,17 +455,42 @@ function extractTextContent(value: unknown): string | undefined {
   return undefined;
 }
 
-function extractJsonLookingText(value: unknown): string | undefined {
-  const text = extractTextContent(value);
-  if (!text || !text.includes("{") || !text.includes("}")) {
+function firstNonEmpty(values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value !== undefined && value.trim().length > 0);
+}
+
+function buildOutputBudgetError(
+  body: OpenAIChatCompletionResponse,
+  requestMaxTokens: number,
+): string | undefined {
+  const firstChoice = body.choices?.[0];
+  if (firstChoice?.finish_reason !== "length") {
     return undefined;
   }
 
-  return text;
+  const usage = extractUsageMetrics(body);
+  const details = [
+    `max_tokens=${String(requestMaxTokens)}`,
+    usage?.completionTokens === undefined ? undefined : `completion_tokens=${String(usage.completionTokens)}`,
+    usage?.reasoningTokens === undefined ? undefined : `reasoning_tokens=${String(usage.reasoningTokens)}`,
+  ].filter(Boolean).join("; ");
+  return `LLM_OUTPUT_BUDGET_EXHAUSTED: finish_reason=length before a valid AgentDecision was completed (${details}). Increase llm.maxTokens or disable provider thinking for structured decisions if this persists.`;
 }
 
-function firstNonEmpty(values: Array<string | undefined>): string | undefined {
-  return values.find((value) => value !== undefined && value.trim().length > 0);
+function buildThinkingRequest(mode: ThinkingMode): { thinking?: { type: "enabled" | "disabled" } } {
+  return mode === "auto" ? {} : { thinking: { type: mode } };
+}
+
+function supportsAdaptiveThinking(baseUrl: string, model: string | undefined): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    if (hostname === "api.deepseek.com" || hostname.endsWith(".deepseek.com")) {
+      return true;
+    }
+  } catch {
+    // Configuration validation and fetch provide the actionable URL error later.
+  }
+  return model?.toLowerCase().startsWith("deepseek-") === true;
 }
 
 function buildEmptyContentError(body: OpenAIChatCompletionResponse): string {
@@ -443,14 +515,18 @@ function buildTaskFrameSystemPrompt(): string {
       "An action mentioned as history, documentation, a quotation, or the object of a question is not necessarily an action requested now.",
       "Runtime-provided prior-turn execution evidence is authoritative about whether a repository change actually happened. Existing or merely read files are not artifacts created by that turn.",
       "repositoryWrite is NONE when no edit is requested, CONDITIONAL when edits are allowed only if investigation establishes a need, and REQUIRED when a repository change is itself the requested outcome.",
+      "Requests to optimize, improve, refactor, rewrite, implement, create, or update a repository artifact make the change itself the requested outcome, so use repositoryWrite=REQUIRED. Reserve CONDITIONAL for inspect/review/diagnose-and-fix-if-needed requests where reporting no necessary change is an acceptable completion.",
       "Set collaboration.requirement to REQUIRED only when the user explicitly requires subagent work, OPTIONAL when delegation is requested as a preference, and NONE otherwise. Record required writer/reviewer outcomes separately.",
       "Set conversationEvidence.requiresHistory when the task depends on an older statement, decision, artifact, constraint, or topic beyond the recent exchange. Set purpose=REFERENT for an ordinary cross-turn reference and purpose=PRIOR_RESPONSE_AUDIT only when the user is asking to inspect, challenge, or correct an earlier assistant response. Provide concise semantic queries for retrieving that evidence; do not guess the answer.",
       "When webEvidence is true, classify its evidence profile instead of choosing numeric thresholds. Use ORDINARY/GENERAL_LOOKUP for definitions, explanations, and generic requests to search the Web. Do not elevate a request merely because current information could be useful or because a result may contain a date or version.",
       "Use CORROBORATED/USER_REQUESTED_CORROBORATION only when the user explicitly asks for multiple independent sources or comparison. Use CURRENT/VOLATILE_CURRENT_CLAIM only for an explicitly latest/current/time-bound request or an inherently volatile fact. Use HIGH_STAKES/HIGH_STAKES_DOMAIN only when wrong or stale medical, legal, financial, or safety information could materially harm the user.",
       "Set webEvidencePolicy.ranking=SUPERLATIVE only when the user actually requests a ranking, top/best/most result, or equivalent superlative. Otherwise use REPRESENTATIVE so search queries cannot silently strengthen the scope.",
       "Set readOnly only when the user actually prohibits changes. Set noWeb, noCommands, noDelegation, or noMcp only for explicit prohibitions.",
+      "Set effects.verificationBasis=USER_REQUIRED only when the user explicitly asks to run or pass a particular verification strength (syntax/static/test/build/lint/typecheck). Otherwise use TASK_INFERRED; the runtime will select a compatible level from the files actually changed.",
+      `For questions about Mini Coding Agent's own capabilities, set target=PRODUCT and classify productCapability.act. Use INVENTORY for a capability list, AVAILABILITY for whether selected capabilities exist, and EXPLAIN_LIMITATION when the user asks about a prior denial or a capability boundary. Select only IDs from: ${PRODUCT_CAPABILITY_IDS.join(", ")}. This is semantic classification; do not match fixed question wording.`,
+      "For other product questions that are not about capability availability, use productCapability.act=NONE. For a general inventory, capabilityIds may be empty; for focused availability or limitation questions, include the relevant capability IDs.",
       "Return one JSON object only with this exact shape:",
-      "{\"version\":1,\"objective\":\"string\",\"target\":\"REPOSITORY|WORLD|PRODUCT|SESSION|DERIVATION|MIXED\",\"answer\":{\"shape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"depth\":\"BRIEF|BALANCED|DETAILED\"},\"effects\":{\"answer\":boolean,\"repositoryRead\":boolean,\"repositoryWrite\":\"NONE|CONDITIONAL|REQUIRED\",\"webEvidence\":boolean,\"knowledgeEvidence\":boolean,\"commandExecution\":boolean,\"verification\":\"NONE|SYNTAX|STATIC|TEST\",\"delegation\":boolean,\"mcp\":boolean},\"webEvidencePolicy\":{\"profile\":\"ORDINARY|CORROBORATED|CURRENT|HIGH_STAKES\",\"basis\":\"GENERAL_LOOKUP|USER_REQUESTED_CORROBORATION|VOLATILE_CURRENT_CLAIM|HIGH_STAKES_DOMAIN\",\"ranking\":\"REPRESENTATIVE|SUPERLATIVE\"},\"constraints\":{\"readOnly\":boolean,\"noWeb\":boolean,\"noCommands\":boolean,\"noDelegation\":boolean,\"noMcp\":boolean,\"requireCompleteFileRead\":boolean},\"collaboration\":{\"requirement\":\"NONE|OPTIONAL|REQUIRED\",\"changeProposal\":boolean,\"review\":boolean,\"requestedAgents\":number|null},\"conversationEvidence\":{\"purpose\":\"CONTEXT|REFERENT|PRIOR_RESPONSE_AUDIT\",\"requiresHistory\":boolean,\"queries\":[\"string\"],\"includeRecentMessages\":number},\"completionCriteria\":[\"string\"],\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
+      "{\"version\":1,\"objective\":\"string\",\"target\":\"REPOSITORY|WORLD|PRODUCT|SESSION|DERIVATION|MIXED\",\"productCapability\":{\"act\":\"NONE|INVENTORY|AVAILABILITY|EXPLAIN_LIMITATION\",\"capabilityIds\":[\"ProductCapabilityId\"]},\"answer\":{\"shape\":\"DEFINITION|COUNT|ENUMERATION|RELATION|IDENTITY|EXPLANATION|FREEFORM\",\"depth\":\"BRIEF|BALANCED|DETAILED\"},\"effects\":{\"answer\":boolean,\"repositoryRead\":boolean,\"repositoryWrite\":\"NONE|CONDITIONAL|REQUIRED\",\"webEvidence\":boolean,\"knowledgeEvidence\":boolean,\"commandExecution\":boolean,\"verification\":\"NONE|SYNTAX|STATIC|TEST\",\"verificationBasis\":\"TASK_INFERRED|USER_REQUIRED\",\"delegation\":boolean,\"mcp\":boolean},\"webEvidencePolicy\":{\"profile\":\"ORDINARY|CORROBORATED|CURRENT|HIGH_STAKES\",\"basis\":\"GENERAL_LOOKUP|USER_REQUESTED_CORROBORATION|VOLATILE_CURRENT_CLAIM|HIGH_STAKES_DOMAIN\",\"ranking\":\"REPRESENTATIVE|SUPERLATIVE\"},\"constraints\":{\"readOnly\":boolean,\"noWeb\":boolean,\"noCommands\":boolean,\"noDelegation\":boolean,\"noMcp\":boolean,\"requireCompleteFileRead\":boolean},\"collaboration\":{\"requirement\":\"NONE|OPTIONAL|REQUIRED\",\"changeProposal\":boolean,\"review\":boolean,\"requestedAgents\":number|null},\"conversationEvidence\":{\"purpose\":\"CONTEXT|REFERENT|PRIOR_RESPONSE_AUDIT\",\"requiresHistory\":boolean,\"queries\":[\"string\"],\"includeRecentMessages\":number},\"completionCriteria\":[\"string\"],\"confidence\":number,\"ambiguities\":[\"string\"],\"rationale\":\"short string\"}",
       "Completion criteria describe observable outcomes, not internal labels. confidence must be between 0 and 1.",
   ].join("\n");
 }
@@ -544,6 +620,11 @@ function readIntegerEnv(name: string, fallback: number): number {
 
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readThinkingModeEnv(name: string, fallback: ThinkingMode): ThinkingMode {
+  const raw = process.env[name]?.trim().toLowerCase();
+  return raw === "auto" || raw === "enabled" || raw === "disabled" ? raw : fallback;
 }
 
 function isAbortError(error: unknown): boolean {

@@ -1,4 +1,6 @@
-# AI Agent 面试学习指南
+# AI / Agent 工程学习指南
+
+> 最近核对：2026-08-03。项目事实来自当前源码与 `pnpm verify`；外部知识优先引用官方文档、协议规范和原始论文。
 
 这份文档不负责继续堆项目功能，而是回答两个问题：
 
@@ -9,7 +11,7 @@
 
 ### 文档基线
 
-本指南已按 2026-07-29 当前工作区实现同步，学习时应以以下事实为准：
+本指南已按 2026-08-03 当前工作区实现同步，学习时应以以下事实为准：
 
 - Direct、Web、Review、Repository Analysis、Change 和混合任务都以 `AGENT_TASK` 共用一个 `AgentLoop`，不存在按模式拆分的任务执行器。
 - CLI 先由模型把请求与 Conversation 编译为 Schema 校验的 `TaskFrame`；源码中已经删除 `TaskRouter`、`TaskUnderstanding`、`TaskContractBuilder` 和公开控制面开关。
@@ -18,12 +20,17 @@
 - 自适应合同会向模型展示安全的“可申请工具”；工具可见不等于已经获准执行。
 - `PLAN`、TaskFrame 的显式只读/禁网/禁命令约束是确定性边界；补丁、命令、路径和网络仍由本地安全层检查。
 - `read_file` 会自动收敛过大的分页提示，真正的输入错误会返回具体字段和约束。
+- Capability Registry 把模型可调用的 `tools` 与顶层 Decision `actions` 分开；`APPLY_PATCH` / `RUN_COMMAND` 不是伪工具，协议错误会返回可恢复的精确诊断。
+- Patch 的 CREATE / MODIFY / DELETE 先按工作区文件事实判定，Git tracking 只负责 diff 上下文和版本控制；空补丁、重复创建和上下文不匹配具有不同错误码。
 - 修改效果使用 `NONE / CONDITIONAL / REQUIRED` 三态语义；Completion Contract 消费 TaskFrame 和执行证据，不再重新扫描原始问句。
+- 验证来源区分 `USER_REQUIRED` 与 `TASK_INFERRED`。独立 HTML、JSON 和 classic JavaScript 可由只读 `verify_file` 做类型兼容验证，不能把 `node --check page.html` 之类的无效命令当成完成证据。
 - 模型通过 `TaskFrame.webEvidencePolicy` 选择普通、多源、当前或高风险证据等级，并判断查询是代表性还是排名范围；本地策略表映射具体门槛，Guardrail 不再从原始问句正则推断证据等级或排名意图。
 - Web 最终综合预留具有确定性降级终止：证据不足时交付部分结论、缺口和已检查来源，不再依赖模型自行退出循环。
 - `fetch_url` 可依据 HTTP 或 HTML meta 解码 GB2312 / GBK / GB18030 中文页面；正式 Search API 与来源页抓取能力是两个独立问题。
 - 架构回归已验证同一个 `AGENT_TASK` 可以依次 Web、读取、Patch、Command 验证并完成，并覆盖仓库内绝对路径读取、过大分页参数自动收敛、模型驱动长会话取证与逐 MCP Tool 授权。
 - TaskFrame 结构错误会做一次有界自修；仍无效则 AgentLoop 在任何动作前 fail closed，不能让猜测合同把原有文件误报成本轮产物。
+- TaskFrame、Agent Decision 与最终回答使用不同的输出预算；推理型模型若返回空内容或不支持当前 thinking 参数，只进行有界降级，不把增加 token 上限当成协议正确性的替代品。
+- 循环保护同时识别连续重复和“两个失败动作交替出现但没有新增证据”的周期，避免只靠最大步数兜底。
 - 当前确定性基线以 `pnpm verify` 当次输出为准；该命令同时检查源码可达性、文档引用、干净构建、未使用声明和完整测试集，不在学习文档中写死易过期的测试数量。
 
 ## 1. 学习优先级
@@ -39,6 +46,8 @@
 | P0 | MCP | 能讲协议角色、transport、工具发现和安全边界 |
 | P1 | Agent 安全 | 能识别 prompt/tool/memory 注入和执行风险 |
 | P1 | AI 应用后端工程 | 能讲超时、重试、限流、观测、成本和异步任务 |
+| P1 | 模型训练与对齐概览 | 能解释预训练、SFT、偏好优化和推理阶段的关系，不要求从零训练 |
+| P2 | 多模态与推理部署 | 理解文本以外输入、量化、吞吐和延迟，按岗位选择深度 |
 
 面试准备顺序建议严格按照表格推进。不要先研究复杂微调或 Transformer 推导，却讲不清自己的 `AgentLoop` 为什么需要最大步数。
 
@@ -71,6 +80,38 @@
 ### 学会标准
 
 能不看文档解释一次 LLM 请求由哪些消息组成，能指出上下文过长时项目会在哪里裁剪，能说明为什么模型回答流畅不代表事实可靠。
+
+### 2.1 从 Transformer 到可调用模型
+
+不需要先推导全部矩阵公式，但要建立正确的层次：
+
+```text
+tokenization
+-> embedding + positional information
+-> repeated Transformer blocks (attention + feed-forward)
+-> next-token probability
+-> pretraining
+-> supervised instruction tuning (SFT)
+-> preference alignment (例如 RLHF / DPO)
+-> inference-time sampling / reasoning / tool use
+```
+
+至少要理解：
+
+- Attention 让一个 token 根据其他 token 的表示计算新的上下文表示；Transformer 不等于“拥有数据库”或“保证事实正确”。
+- 预训练主要学习语言与世界模式，SFT 教模型按指令完成任务，偏好对齐优化回答风格与人类偏好；三者不能代替运行时权限和事实验证。
+- RLHF 通常涉及偏好数据、奖励模型与强化学习；DPO 用更直接的偏好目标简化训练。面试重点是它们解决什么，不是手写训练框架。
+- reasoning effort、temperature、输出 token 上限属于推理阶段配置，不会扩大模型的训练知识，也不会自动修复错误 Tool Schema。
+- embedding model、reranker、生成模型和多模态模型承担的任务不同，不能只按参数量或排行榜选型。
+
+推荐从原始资料建立概念，再用可视化课程补直觉：
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)：先读摘要、架构图和 attention 章节。
+- [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)：理解 SFT、偏好数据、奖励模型和 RLHF 流程。
+- [Direct Preference Optimization](https://arxiv.org/abs/2305.18290)：理解它相对传统 RLHF 简化了什么。
+- [Hugging Face LLM Course](https://huggingface.co/learn/llm-course/chapter1/1)：用于补 tokenizer、Transformer、微调和常用工具链实践；它是辅助教材，不替代论文与项目验证。
+
+学会标准：能用三分钟解释“一个基础模型如何变成能遵循指令、调用工具的应用模型”，并明确哪些能力来自模型训练，哪些来自 Agent Runtime。
 
 ## 3. Structured Output 与 Tool Calling
 
@@ -267,6 +308,7 @@ RAG 不是“接一个向量数据库”。完整链路是：
 - `RagDocumentLoader`
 - `TextChunker`
 - `RagStore`
+- `KnowledgeIndexTool`
 - `KnowledgeSearchTool`
 - `RagEvaluator`
 - `MemoryQueryBuilder`
@@ -278,13 +320,14 @@ RAG 不是“接一个向量数据库”。完整链路是：
 
 ### 当前已经实现
 
-- Markdown/TXT 文档安全导入、按行 chunking、overlap 和来源 hash。
+- 文档、源码和配置文本使用扩展名白名单安全导入；二进制拒绝、按行 chunking、overlap 和来源 hash。
 - 独立于长期记忆的 `.mini-agent/rag/index.jsonl` 文档索引。
 - 按来源增量替换、来源/标签过滤、Top-K、来源多样性和上下文预算。
 - 关键词与向量混合检索、文件行号 citation 和证据不足拒答。
 - answerability accuracy、hit rate、Recall@K、MRR 离线评测。
 - 中英文关键词和本地离线 embedding。
 - 可选 OpenAI-compatible embedding provider。
+- Agent 原生空索引与陈旧索引恢复：search 返回候选前重新核对选中源文件的实时 `sourceHash`；收到 `EMPTY_INDEX` 或 `STALE_INDEX/staleSources` 后，对相关仓库路径执行受权的 `knowledge_index`，再 search，并用刷新后的真实 citation 完成回答。
 - query building、候选召回、rerank、evidence selection。
 - TTL、confidence 和同主题记忆替代。
 - Web 回答在没有可读正文时拒绝给出确定性实时结论。
@@ -296,11 +339,27 @@ RAG 不是“接一个向量数据库”。完整链路是：
 - 没有 cross-encoder reranker、查询改写、PDF/OCR 和结构化表格解析。
 - JSONL 单机索引不提供数据库级事务、文档 ACL 和多租户隔离。
 - 同主题冲突主要基于标题，不是强语义冲突检测。
-- Web 回答还没有做到逐 claim 与 source 的自动对齐。
+- 严格 Web 回答已用结构化 `webClaims` 记录逐 claim 的来源关联，并验证 URL 抓取血缘与最终可见性；尚未用 NLI/LLM Judge 自动证明来源正文对结论的语义蕴含。
 
 ### 学会标准
 
 能画出完整 RAG 链路，能解释 recall 与 rerank 的区别，并能诚实指出当前项目和生产级知识库之间的差距。
+
+### 6.1 Skill 与渐进式上下文注入
+
+Skill 不是新的 Agent 模式，也不应该靠“用户问句命中某个硬编码词”才能存在。它解决的是：如何把可复用工作流、约束和参考资料按需提供给模型，同时避免把所有长说明永久塞入 Prompt。
+
+项目当前采用两阶段注入：
+
+1. `SkillStore` 扫描仓库 `skills/*/SKILL.md` 与本地 `.mini-agent/skills/*/SKILL.md`，校验 frontmatter、名称、长度、真实路径和目录边界。
+2. `ContextBuilder` 总是注入有界的 Skill catalog，只包含名称、描述、来源和资源数量；这让模型可以做语义发现，而不是完全依赖词法预选。
+3. 对显式 `$skill-name` 或明显匹配项，仍可注入一份有界的预选说明，降低常用路径的调用成本。
+4. 模型真正决定使用某项 Skill 时，通过只读 `skill_read` 分页读取完整 `SKILL.md`，并按需读取该目录下已经发现和验证的文本资源。
+5. 二进制、超大资源、符号链接和目录逃逸不会进入可读资源列表；Skill 指令优先级低于系统 Prompt、当前用户目标、Task Contract、权限和仓库事实。
+
+这体现了 progressive disclosure：先给低成本目录，再按语义选择加载高成本内容。它比一次性注入所有 Skill 更节省 Context，也比只靠正则/关键词路由更通用。当前边界是声明式文本工作流，不执行 Skill 中的任意代码，不提供远程市场或依赖安装。
+
+学习时要能回答：Skill catalog 为什么属于发现元数据？`skill_read` 为什么仍需要路径边界？为什么外部 Prompt 或 Skill 文本不能获得 system message 的优先级？
 
 ## 7. Agent Evaluation 与 Agent Harness
 
@@ -316,11 +375,12 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - regression set 与 golden case。
 - offline eval 与 online eval。
 - deterministic scripted model 与 real-model sampling。
-- pass@1、task success rate。
+- pass@1、pass@k、run pass rate、all-runs pass rate；理解“至少一次成功”为什么可能掩盖 flaky。
+- 二项比例的 95% Wilson 置信区间；小样本 100% 不等于真实成功率已经确定为 100%。
 - tool selection accuracy、tool execution success rate。
 - 平均步骤、平均 LLM 调用、token cost、latency。
 - unsupported claim rate。
-- failure taxonomy：模型、工具、权限、循环保护、步数上限、期望不匹配。
+- failure taxonomy：模型、工具、权限、循环保护、步数上限、期望不匹配；分类应消费结构化 `failureCode`，不能通过错误文本关键词猜测。
 - 数据集污染、过拟合固定 case 和 flaky eval。
 
 ### 项目对应
@@ -328,7 +388,9 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - `ScriptedLlmClient`：返回预设 decision，保证离线回归可重复。
 - `AgentHarness`：创建临时 git 仓库、运行 AgentLoop、检查 diff 和文件。
 - `runSuite`：汇总成功率、平均步骤、工具选择准确率和失败分类。
-- Vitest：固定语义/契约、Web、Review、Patch、Command、Context、子 Agent、Memory 和 MCP 回归。
+- `AgentBench`：重复真实模型采样，报告全轮通过率、flaky 场景、Wilson 区间、成本与延迟，并通过 `bench compare` 比较历史报告。
+- `real-model-acceptance-v1` 与 `bench accept`：固定三类真实模型验收目标，默认重复三轮，同时生成机器可读 JSON 和面试/复盘可读 Markdown；报告文件不作为跨模型永久基线自动提交。
+- Vitest：固定语义/契约、Web、Review、Patch、Command、Context、子 Agent、Memory、RAG、Skill 和 MCP 回归。
 - `CapabilityNegotiator.test.ts`：验证动作驱动升级、可申请工具发现和固定只读边界。
 - `AgentLoop.test.ts` / `cli-regression.test.ts`：覆盖 Web 到写入的同循环升级、短追问和真实文件结果。
 
@@ -337,7 +399,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - TaskFrame Schema、有界自修、AgentLoop fail-closed 和结构化 Web evidence policy。
 - `read_file` 仓库内绝对路径、大参数自动收敛和完整分页覆盖。
 - 同一 `AGENT_TASK` 的 Web/读取/写入/命令组合。
-- TaskFrame 只读阻断、MCP 精确授权和最终完成证据。
+- TaskFrame 只读阻断、MCP 精确授权、RAG 空索引恢复、Skill 渐进读取和最终完成证据。
 - 旧配置字段只能被迁移丢弃，不能重新启用另一条执行链。
 - 涉及真实子进程的 Command/MCP 测试在受限环境可能出现 I/O 资源竞争；若单项运行偶发 `server exited` 或 I/O 错误，应检查进程/文件描述符环境，不能把环境竞争误报为协议正确性结论。
 
@@ -357,7 +419,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 
 > 你说优化以后效果更好，怎么证明？
 
-不能只回答“我手动试过”。应该说明固定场景集、确定性离线回归、真实模型抽样、核心指标和失败归因，并承认当前场景规模仍有限。
+不能只回答“我手动试过”。应该说明固定场景集、确定性离线回归、真实模型重复抽样、pass@1/pass@k/all-runs 指标、置信区间、成本和失败归因，并承认当前场景规模仍有限。一次或少量样本全部通过，只能说明这批运行通过，不能证明真实成功率为 100%。
 
 ### 学会标准
 
@@ -370,7 +432,7 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - MCP 解决 Host 与外部能力提供方之间的标准化连接问题。
 - Host、Client、Server 三个角色。
 - MCP 基于 JSON-RPC 消息。
-- initialize 与 capability negotiation。
+- 协议版本会演进：项目实现的 `2025-11-25` 使用 initialize、session 和 capability negotiation；当前 `2026-07-28` 规范改为无状态请求与 `server/discover`。
 - `tools/list`、`tools/call`。
 - tool、resource、prompt 的区别。
 - stdio 与 Streamable HTTP transport。
@@ -384,17 +446,19 @@ Agent Harness 不是一种 Agent 算法，而是承载 Agent 运行、构造场�
 - `HttpMcpClient`
 - `McpRegistryLoader`
 - `McpRemoteTool`
+- `McpResourceTool`
+- `McpPromptTool`
 - `McpCommands`
 
 ### 当前实现边界
 
-已经支持 stdio 和 Streamable HTTP 下的 initialize、工具发现和工具调用；远端工具按 `<server>__<tool>` 注册到统一 ToolRegistry。TaskFrame 只接收有界的 MCP 元数据目录，并明确把 Server 提供的名称与描述视为不可信数据，而不是系统指令。
+项目当前以 `2025-11-25` 协议形态支持 stdio 和 Streamable HTTP 下的 initialize、tools/list/call、静态 resources/list/read 与 prompts/list/get。三类 list 会持续跟随 `nextCursor`，同时用重复 cursor 检测和最大页数阻止异常 Server 制造无限循环。远端工具按 `<server>__<tool>` 注册；同一 Server 已发现的 resource URI 和 prompt name 分别通过 `<server>__read_resource`、`<server>__get_prompt` 只读适配器进入统一 ToolRegistry。Client 会保留协商出的协议版本、服务端信息和 capability keys；Registry 按 capability 独立加载，单项失败记录 degraded 诊断但保留其他成功 adapter。不支持的协议版本仍会在注册前整体失败。TaskFrame 只接收有界 MCP 元数据目录，并把工具描述、资源内容和 prompt message 都视为不可信外部数据，而不是系统指令。
 
 授权精确到模型实际选择的单个 MCP Tool。获得 `server__tool_a` 不会同时获得 `server__tool_b`，也不会隐式获得仓库写入或命令权限；每个新增 Tool 都必须重新申请。安全只读 MCP 可以在 Plan/固定只读合同中发现和授权，修改型 MCP 会被隐藏或拒绝；在普通自适应任务中，修改型 MCP 即使获得精确能力授权，每次实际调用仍需交互式显式批准，不能被全局自动批准静默放行。
 
-尚未覆盖 resources、prompts、server-initiated sampling/elicitation、OAuth、旧版 SSE 回退和完整协议兼容测试。因此准确口径是：
+尚未覆盖 resource templates、订阅、completion、server-initiated sampling/elicitation、OAuth、旧版 SSE 回退，也未实现 `2026-07-28` 的无状态 core、`server/discover`、每请求 `_meta`、InputRequiredResult、Extensions 和 Tasks。因此准确口径是：
 
-> 实现了 MCP tools runtime，不是完整覆盖 MCP 全协议。
+> 实现了面向 `2025-11-25` 形态的 MCP tools、静态 resources 和 prompts 子集，不是完整覆盖 MCP 全协议，也不能声称兼容最新 `2026-07-28` 规范。
 
 ### 典型追问
 
@@ -404,7 +468,7 @@ Function Calling 描述模型如何选择一个宿主提供的函数；MCP 描�
 
 ### 学会标准
 
-能画出 Host -> Client -> Server，能讲一遍 stdio MCP Server 从启动、initialize、tools/list、tools/call 到 close 的生命周期。
+能画出 Host -> Client -> Server，能讲一遍本项目 MCP Server 从启动、initialize、能力协商、tools/resources/prompts 发现与调用到 close 的生命周期；也能说明静态 resource 与 template、prompt 与系统指令、`2025-11-25` session 与 `2026-07-28` 无状态请求模型的差异。
 
 ## 9. Agent 安全
 
@@ -426,6 +490,7 @@ Function Calling 描述模型如何选择一个宿主提供的函数；MCP 描�
 - `resolveRepoPath`
 - `.git` / `.mini-agent` 内部路径保护
 - `PatchManager` 的 check-before-apply
+- 文件系统事实与 Git tracking 分层：CREATE / MODIFY / DELETE 的目标存在性先由工作区预检，Git 只验证 diff 上下文和提供版本控制能力
 - `CommandRunner` 的危险命令拦截
 - `FetchUrlTool` 的私网和重定向限制
 - Plan 模式的工具暴露与运行时双重限制
@@ -467,11 +532,26 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 能回答“如果同时有 100 个用户提交 Agent 任务，怎么改造”，并覆盖任务队列、状态存储、取消、限流、隔离、日志和成本控制。
 
+### 10.1 完整知识地图：知道自己缺哪一层
+
+不要把“AI 知识”看成一条无限长的列表。对 AI 应用工程岗位，可以按六层定位缺口：
+
+| 层 | 核心问题 | 最小产出 |
+| --- | --- | --- |
+| 模型基础 | token、attention、训练与推理如何连接 | 画出从文本到 next-token prediction 的数据流 |
+| 模型接口 | 如何得到稳定、结构化、可观测的输出 | 写一次带 Schema、重试、usage 和超时的调用 |
+| 检索与数据 | 模型如何使用外部、私有和最新知识 | 做一组可测的 RAG 查询并计算 Recall@K / MRR |
+| Agent Runtime | 模型如何在环境反馈中多步行动 | 实现 decision -> action -> observation -> stop |
+| 安全与评测 | 如何限制权限并证明没有回归 | 为危险动作、证据不足和循环失败建立 scenario |
+| 服务化 | 如何承载并发、状态、成本与故障 | 设计队列、存储、限流、trace 和租户隔离 |
+
+学习顺序遵循“概念 -> 本项目源码 -> 最小实验 -> 指标 -> 口述”。如果一项知识没有对应实验或解释目标，先不要继续收集课程。
+
 ## 11. 推荐学习资料与阅读顺序
 
 下面只收录官方文档、协议规范和原始论文。很多二手教程会把“Agent”“工作流”“Function Calling”和“MCP”混为一谈，适合入门但不适合作为面试口径。英文资料不需要逐字翻译，先带着右侧的问题阅读，再回到项目代码验证。
 
-资料状态核对日期为 **2026-07-28**。涉及模型、API 和协议版本时，不要把“当前网页内容”永久写成项目能力；应同时核对项目代码、依赖版本和测试结果。
+资料状态核对日期为 **2026-08-03**。涉及模型、API 和协议版本时，不要把“当前网页内容”永久写成项目能力；应同时核对项目代码、依赖版本和测试结果。特别是 MCP 已在 `2026-07-28` 发布正式规范，而本项目仍有意保持较小的 `2025-11-25` tools/static resources/prompts 子集，实现事实与最新学习材料必须分开表述。
 
 ### 11.1 第一轮必读
 
@@ -484,8 +564,9 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 | 5 | [Effective Context Engineering for AI Agents（Anthropic）](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) | Context 是有限资源、信息选择和压缩、长任务中的上下文维护 | `ContextBuilder`、`MessageCompressor`、Memory 模块 |
 | 6 | [RAG 原始论文（NeurIPS 2020）](https://papers.neurips.cc/paper_files/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html) 与 [Vector Embeddings（OpenAI）](https://developers.openai.com/api/docs/guides/embeddings) | 参数化记忆与外部记忆、dense retrieval、向量相似度；不要把原始 RAG 论文等同于所有现代 RAG 工程 | `RagStore`、`EmbeddingProvider`、Retriever / Reranker / EvidenceSelector |
 | 7 | [Demystifying evals for AI agents（Anthropic）](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) | task、trial、grader、transcript、outcome、harness；能力评测与回归评测的区别 | `AgentHarness`、scenario、failure taxonomy、真实 CLI 回归 |
-| 8 | [MCP Architecture 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/architecture) 与 [MCP Tools 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) | Host / Client / Server、capability negotiation、`tools/list`、`tools/call`、协议错误与工具执行错误 | `McpClient`、`McpRegistryLoader`、`McpRemoteTool` |
+| 8 | [MCP Architecture 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/architecture) 与 [MCP Tools 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) | 当前无状态协议、每请求能力信息、`server/discover`、`tools/list`、`tools/call`；再与项目的 2025-11-25 实现比较 | `McpClient`、`McpRegistryLoader`、`McpRemoteTool` |
 | 9 | [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llm-top-10/) | Prompt Injection、Improper Output Handling、Excessive Agency、敏感信息和供应链风险 | Permission、Path、Command、Web、Memory 和 MCP 安全边界 |
+| 10 | [Responses API 与 Agents SDK（OpenAI）](https://developers.openai.com/api/docs/guides/agents#compare-the-responses-api-and-agents-sdk) | 自己维护循环与使用 SDK lifecycle 的边界、handoff、guardrail、state 和 tracing | 对比本项目自研 `AgentLoop`，说明哪些能力由 Runtime 自己承担 |
 
 如果时间有限，先完成前 5 项。读完后应能解释：模型为什么能自主选工具，为什么初始分类不能锁死整个任务，以及为什么安全授权仍必须由确定性代码控制。
 
@@ -493,9 +574,11 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 #### LLM、Token 与上下文
 
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)：建立 Transformer 基础，不要求第一次就推完公式。
 - [Counting tokens（OpenAI）](https://developers.openai.com/api/docs/guides/token-counting)：理解输入、输出和工具 Schema 都会占用上下文预算。
 - [Compaction（OpenAI）](https://developers.openai.com/api/docs/guides/compaction)：观察长任务怎样压缩状态；阅读时对照本项目的 `MessageCompressor`，不要假设两者实现相同。
 - [Production best practices（OpenAI）](https://developers.openai.com/api/docs/guides/production-best-practices)：关注密钥、请求扩容、延迟和成本，而不是照搬某个厂商接口。
+- [Model optimization（OpenAI）](https://developers.openai.com/api/docs/guides/model-optimization)：理解 eval、prompt、fine-tuning 的迭代顺序，不要遇到失败就直接微调。
 
 读完后的练习：给 `ContextBuilder` 画一张输入优先级表，并说明超预算时先舍弃什么、为什么。
 
@@ -503,7 +586,7 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 - [Function Calling（OpenAI）](https://developers.openai.com/api/docs/guides/function-calling)：重点画出模型和宿主之间的往返，而不是只抄函数定义示例。
 - [JSON Schema 入门](https://json-schema.org/learn/getting-started-step-by-step)：掌握 `type`、`properties`、`required`、数组约束和嵌套结构。
-- [MCP Tools 的 Error Handling](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#error-handling)：区分 malformed request 的协议错误与可反馈给模型自我修正的执行错误。
+- [MCP Tools 的 Error Handling](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#error-handling)：区分 malformed request 的协议错误、可反馈给模型自我修正的执行错误与需要额外输入的结果。
 
 读完后的练习：分别构造 `read_file` 的错误类型、越界路径、负数分页和过大 `maxLines`，说明哪些应拒绝、哪些应自动收敛，并检查返回信息是否足以让模型修正下一次调用。
 
@@ -531,11 +614,12 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 #### MCP
 
-- [MCP Architecture 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/architecture)：作为当前稳定学习基线。
-- [MCP Tools 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)：重点看 tool schema、错误分类、输入输出校验、超时、审计和 human-in-the-loop。
-- [MCP 2026-07-28 Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)：只作为协议演进材料，关注 stateless core、Extensions、Tasks 和授权变化。
+- [MCP Architecture 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/architecture)：当前正式学习基线，重点理解无状态 core、Host / Client / Server 和每请求能力信息。
+- [MCP Tools 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)：重点看 Tool Schema、结果类型、InputRequiredResult、输入输出校验、审计和 human-in-the-loop。
+- [2026-07-28 变更说明](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)：文章标题保留了 Release Candidate，但正文给出了正式发布时间与迁移背景，适合对比 initialize/session 与无状态协议。
+- [MCP Architecture 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/architecture) 与 [Tools 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)：只用于理解本项目当前实现，不再作为最新规范。
 
-截至本文核对日，`2026-07-28` 仍应按 Release Candidate 对待，不能据此声称项目已兼容该版本。项目现状说明仍以代码和 MCP 回归测试为准。
+学习时做一张差异表：`2025-11-25 initialize + session`、`2026-07-28 per-request _meta + server/discover`、本项目已经实现的 tools/static resources/prompts 子集。协议页面存在不代表项目已经兼容，项目能力仍以源码和 MCP 回归测试为准。
 
 #### 安全与后端工程
 
@@ -607,6 +691,13 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 验收：随机抽题时能先给结论，再结合项目代码说明，最后主动讲局限。
 
+### 可选第 5 至 6 周：补模型基础与做独立实验
+
+- 第 5 周读 Transformer、InstructGPT、DPO 的摘要与方法图，完成一个 tokenizer / attention 可视化笔记；目标是建立概念链，不是训练大模型。
+- 第 6 周脱离本仓库做一个 200 行以内的最小 Agent 或 RAG 实验，再用同一组 eval 比较“无工具 / 有工具”“关键词 / 混合检索”“无 Guardrail / 有 Guardrail”。
+
+验收：能区分“模型能力、提示策略、检索质量、Runtime 逻辑和基础设施”五类失败，不再把所有问题都归因于模型或架构。
+
 ## 13. 面试前自检
 
 以下问题如果不能脱离文档回答，就说明还没学会：
@@ -632,11 +723,11 @@ Prompt 是软约束，可能被模型忽略或被注入内容覆盖。权限、�
 
 ## 14. 暂时不用深挖
 
-除非目标转向算法岗，否则当前不必优先投入：
+除非目标转向算法岗，否则当前只需理解概念，不必优先投入实现细节：
 
 - Transformer 复杂数学推导。
 - 从零预训练大模型。
-- RLHF/DPO 训练实现。
+- RLHF/DPO 的大规模训练实现（但要能解释目标和差异）。
 - LoRA 和全参数微调实操。
 - CUDA 和推理引擎内核优化。
 - 大规模分布式训练。

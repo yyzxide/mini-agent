@@ -76,6 +76,64 @@ describe("TaskGuardrails", () => {
     });
   });
 
+  it("treats HTML as source and accepts scoped verify_file evidence", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal: "Optimize game.html",
+      taskContract: createTestTaskContract({
+        objective: "Optimize game.html",
+        target: "REPOSITORY",
+        effects: {
+          repositoryWrite: "REQUIRED",
+          verification: "STATIC",
+          verificationBasis: "TASK_INFERRED",
+        },
+      }),
+    });
+    addSuccessfulPatch(state, "game.html");
+    state.addToolResult({
+      toolName: "verify_file",
+      input: { path: "game.html" },
+      result: {
+        success: true,
+        data: {
+          path: "game.html",
+          level: "SYNTAX",
+          repositoryWide: false,
+          scopePaths: ["game.html"],
+          checks: ["html-structure", "inline-classic-javascript-parse"],
+        },
+      },
+    });
+
+    expect(buildTaskCompletionContract(state)).toMatchObject({ kind: "SOURCE_CHANGE", requiredVerificationLevel: "SYNTAX" });
+    expect(validateAgentDecisionGuardrails(state, successfulFinal())).toBeUndefined();
+  });
+
+  it("preserves a verification level that the user explicitly required", () => {
+    const state = new AgentState({
+      sessionId: "session",
+      repoPath: "/repo",
+      userGoal: "Optimize game.html and pass static validation",
+      taskContract: createTestTaskContract({
+        objective: "Optimize game.html and pass static validation",
+        target: "REPOSITORY",
+        effects: {
+          repositoryWrite: "REQUIRED",
+          verification: "STATIC",
+          verificationBasis: "USER_REQUIRED",
+        },
+      }),
+    });
+    addSuccessfulPatch(state, "game.html");
+
+    expect(buildTaskCompletionContract(state)).toMatchObject({
+      requiredVerificationLevel: "STATIC",
+      verificationReason: expect.stringContaining("explicitly requested"),
+    });
+  });
+
   it("blocks a successful final when source code was changed without verification", () => {
     const state = stateFor("Add subtract to src/math.ts.");
     addSuccessfulPatch(state, "src/math.ts");
@@ -474,6 +532,10 @@ describe("TaskGuardrails", () => {
       type: "FINAL",
       success: true,
       summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/",
+      webClaims: [{
+        claim: "最新系列是 GPT-5.6。",
+        sourceUrls: ["https://openai.com/index/gpt-5-6/"],
+      }],
     })).toBeUndefined();
   });
 
@@ -509,7 +571,41 @@ describe("TaskGuardrails", () => {
       type: "FINAL",
       success: true,
       summary: "当前型号是 Claude Opus 4.1。https://www.anthropic.com/claude/opus",
+      webClaims: [{
+        claim: "当前型号是 Claude Opus 4.1。",
+        sourceUrls: ["https://www.anthropic.com/claude/opus"],
+      }],
     })).toBeUndefined();
+  });
+
+  it("rejects strict Web claim mappings that cite an unfetched source", () => {
+    const state = webStateFor("OpenAI 最新的模型是什么？");
+    const currentYear = new Date().getFullYear();
+    addWebSearch(state, `OpenAI latest model ${String(currentYear)}`, [{
+      title: "Roundup",
+      url: "https://example.com/openai",
+      snippet: "Overview.",
+    }]);
+    addWebSearch(state, `site:openai.com latest model ${String(currentYear)}`, [{
+      title: "GPT-5.6",
+      url: "https://openai.com/index/gpt-5-6/",
+      snippet: "Current release.",
+    }]);
+    addFetchedPage(
+      state,
+      "https://openai.com/index/gpt-5-6/",
+      `GPT-5.6 was released in ${String(currentYear)}.`,
+    );
+
+    expect(validateAgentDecisionGuardrails(state, {
+      type: "FINAL",
+      success: true,
+      summary: "最新系列是 GPT-5.6。https://openai.com/index/gpt-5-6/ https://invented.example/source",
+      webClaims: [{
+        claim: "最新系列是 GPT-5.6。",
+        sourceUrls: ["https://invented.example/source"],
+      }],
+    })).toMatchObject({ code: "FINAL_WEB_CLAIM_SOURCE_NOT_FETCHED" });
   });
 
   it("requires fetching an exact candidate from the authority freshness search", () => {

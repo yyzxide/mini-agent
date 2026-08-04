@@ -16,6 +16,13 @@ export interface StructuredVerificationCommandInput {
   shell?: boolean;
 }
 
+export interface VerificationCommandCompatibilityIssue {
+  code: "VERIFIER_TARGET_MISMATCH";
+  message: string;
+  guidance: string;
+  suggestedVerifyFilePath?: string;
+}
+
 const VERIFICATION_EXECUTABLES = new Set([
   "bash", "bun", "bunx", "c++", "cargo", "clang", "clang++", "cmake", "dotnet",
   "g++", "gcc", "go", "gradle", "javac", "jest", "kotlinc", "make", "mvn",
@@ -60,7 +67,7 @@ const REPOSITORY_WIDE_PATTERNS = [
   /\b(?:make|cmake\s+--build)\b/i,
 ];
 
-const PATH_PATTERN = /(?:^|\s|["'])(\.?\/?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte|json|ya?ml|toml|xml))(?:$|\s|["'])/gi;
+const PATH_PATTERN = /(?:^|\s|["'])(\.?\/?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|cpp|cc|c|h|hpp|cs|kt|kts|swift|rb|php|sh|bash|vue|svelte|html?|css|json|ya?ml|toml|xml))(?:$|\s|["'])/gi;
 
 const LEVEL_RANK: Record<VerificationLevel, number> = {
   NONE: 0,
@@ -71,6 +78,11 @@ const LEVEL_RANK: Record<VerificationLevel, number> = {
 };
 
 export function classifyVerificationCommand(command: string): VerificationCommandClassification {
+  const nodeCheckTarget = command.match(/(?:^|\s)node\s+--check\s+["']?([^"'\s]+)/i)?.[1];
+  if (nodeCheckTarget && validateVerificationCommandCompatibility({
+    executable: "node",
+    args: ["--check", nodeCheckTarget],
+  })) return noVerification();
   const level = TEST_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
     ? "TEST"
     : STATIC_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
@@ -94,6 +106,7 @@ export function classifyVerificationCommandInput(
   if (input.shell === true) {
     return noVerification();
   }
+  if (validateVerificationCommandCompatibility(input)) return noVerification();
   const executable = basename(input.executable ?? "");
   if (executable === "git") {
     return input.args?.[0] === "diff" && input.args.includes("--check")
@@ -104,6 +117,29 @@ export function classifyVerificationCommandInput(
     return noVerification();
   }
   return classifyVerificationCommand([executable, ...(input.args ?? [])].join(" "));
+}
+
+/** Rejects verifier/target pairs that the executable itself cannot parse. */
+export function validateVerificationCommandCompatibility(
+  input: StructuredVerificationCommandInput,
+): VerificationCommandCompatibilityIssue | undefined {
+  if (input.shell === true) return undefined;
+  const executable = basename(input.executable ?? "");
+  const args = input.args ?? [];
+  if (executable !== "node" || !args.includes("--check")) return undefined;
+  const checkIndex = args.indexOf("--check");
+  const target = args.slice(checkIndex + 1).find((argument) => !argument.startsWith("-"));
+  if (!target) return undefined;
+  const extension = target.toLowerCase().match(/\.[a-z0-9]+$/)?.[0];
+  if (!extension || [".js", ".cjs", ".mjs"].includes(extension)) return undefined;
+  return {
+    code: "VERIFIER_TARGET_MISMATCH",
+    message: `node --check cannot parse ${extension} files: ${target}`,
+    guidance: extension === ".html" || extension === ".htm"
+      ? `Use the read-only verify_file tool for ${target}; it checks HTML structure and inline classic JavaScript syntax.`
+      : "Use a verifier that supports the target file type or the repository's build/lint/test command.",
+    ...((extension === ".html" || extension === ".htm") ? { suggestedVerifyFilePath: target } : {}),
+  };
 }
 
 export function isTestCommand(command: string): boolean {

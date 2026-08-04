@@ -29,7 +29,14 @@ export class McpRemoteTool implements Tool<unknown, unknown> {
   }
 
   async execute(input: unknown, context: ToolContext): Promise<ToolResult<unknown>> {
-    const permission = await context.permissionManager?.check({
+    if (!context.permissionManager) {
+      return toolFailure(
+        "MCP_PERMISSION_MANAGER_REQUIRED",
+        `MCP tool ${this.server.name}:${this.remote.name} cannot run without a permission manager`,
+      );
+    }
+
+    const permission = await context.permissionManager.check({
       level: this.permissionLevel,
       action: `mcp:${this.server.name}:${this.remote.name}`,
       description: this.description,
@@ -40,7 +47,7 @@ export class McpRemoteTool implements Tool<unknown, unknown> {
       // external side effect.
       requiresExplicitApproval: this.permissionLevel !== PermissionLevel.SAFE,
     });
-    if (permission && !permission.allowed) {
+    if (!permission.allowed) {
       return toolFailure("MCP_PERMISSION_DENIED", permission.reason ?? "MCP tool call denied", { permission });
     }
 

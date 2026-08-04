@@ -40,6 +40,24 @@ describe("DecisionParser", () => {
     });
   });
 
+  it("preserves structured Web claim-to-source mappings", () => {
+    expect(parser.parse(JSON.stringify({
+      type: "final",
+      summary: "Release 2 is current. https://example.com/release-2",
+      success: true,
+      webClaims: [{
+        claim: "Release 2 is current.",
+        sourceUrls: ["https://example.com/release-2"],
+      }],
+    }))).toMatchObject({
+      type: "FINAL",
+      webClaims: [{
+        claim: "Release 2 is current.",
+        sourceUrls: ["https://example.com/release-2"],
+      }],
+    });
+  });
+
   it("ignores non-JSON code blocks before a JSON decision", () => {
     expect(parser.parse([
       "I would run:",

@@ -130,7 +130,7 @@ export type AgentRuntimeEvent = RuntimeEventMetadata & (
   | { type: "ask_user"; message: string }
   | { type: "diff"; generated: boolean }
   | { type: "summary"; summary: string; success: boolean }
-  | { type: "error"; message: string }
+  | { type: "error"; code?: string; message: string }
 );
 
 export type AgentRuntimeEventHandler = (event: AgentRuntimeEvent) => void | Promise<void>;

@@ -147,7 +147,7 @@ describe("ContextBuilder", () => {
     expect(context).not.toContain("旧任务错误地声称");
   });
 
-  it("selects matching repository skills into bounded context", async () => {
+  it("keeps matching skill instructions out of base context until skill_read", async () => {
     const skillPath = path.join(repoPath, "skills", "testing", "SKILL.md");
     await fs.mkdir(path.dirname(skillPath), { recursive: true });
     await fs.writeFile(skillPath, [
@@ -163,9 +163,32 @@ describe("ContextBuilder", () => {
     const state = new AgentState({ sessionId: session.sessionId, repoPath, userGoal: "run vitest regression" });
 
     const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
-    expect(context).toContain("Selected skills:");
-    expect(context).toContain("Skill: testing");
-    expect(context).toContain("Run targeted Vitest tests");
+    expect(context).toContain("Skill catalog:");
+    expect(context).toContain("testing: Run Vitest regression tests");
+    expect(context).toContain("Use skill_read");
+    expect(context).not.toContain("Run targeted Vitest tests before the full suite");
+  });
+
+  it("exposes a bounded skill catalog even when lexical preselection does not match", async () => {
+    const skillPath = path.join(repoPath, "skills", "release-audit", "SKILL.md");
+    await fs.mkdir(path.dirname(skillPath), { recursive: true });
+    await fs.writeFile(skillPath, [
+      "---",
+      "name: release-audit",
+      "description: Verify package publication readiness",
+      "triggers: publish",
+      "---",
+      "",
+      "Inspect the release checklist.",
+    ].join("\n"), "utf8");
+    const session = await new SessionStore({ repoPath }).createSession({ title: "skill discovery" });
+    const state = new AgentState({ sessionId: session.sessionId, repoPath, userGoal: "检查交付前的准备情况" });
+
+    const context = await new ContextBuilder({ repoPath, maxChars: 12_000 }).build(state);
+    expect(context).toContain("Skill catalog:");
+    expect(context).toContain("release-audit: Verify package publication readiness");
+    expect(context).toContain("Use skill_read");
+    expect(context).not.toContain("Selected skills:");
   });
 
   it("keeps task diagnostics and diff under tight context budgets", async () => {
@@ -258,6 +281,7 @@ describe("ContextBuilder", () => {
     const context = await new ContextBuilder({ repoPath, maxChars: 20_000, maxTokens: 5_000 }).build(state);
 
     expect(context).toContain("Active file chunk:");
+    expect(context).toContain("Filesystem state: EXISTS");
     expect(context).toContain(source);
     expect(context).toContain("File read coverage:");
     expect(context).toContain("partial; next unread line 3");
